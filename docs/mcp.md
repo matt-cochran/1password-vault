@@ -8,7 +8,7 @@ value in 1Password or at opv's masked prompt.
 
 | Tool | Writes | Input | Returns |
 |---|---|---|---|
-| `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `status`; optional `env`, `product`, `target`; for `needs` only, `scan` or `names` (below) | the same document as the CLI command of that name |
+| `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `accounts`, `status` (`accounts` takes no scope); optional `env`, `product`, `target`; for `needs` only, `scan` or `names` (below) | the same document as the CLI command of that name |
 | `opv_next` | nothing | optional `env` | one action this session can take, the queue, and what waits on others |
 | `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest`, `extend`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
 | `opv_import_local` | the local vault only | `env` (must be tier `local`), a file path | per key `imported` / `skipped: already set` / `skipped: empty`; values tagged `assistant_imported` |
@@ -20,11 +20,18 @@ the whole surface, with no aliases (D-G, §25).
 
 Every tool has a CLI command with the same guarantee. `opv_state` returns the same document
 as the CLI command of that name (`opv inventory`, `opv needs`, `opv contract`, `opv ready`,
-`opv plan`, `opv changed`, `opv access`, `opv run --preview`, `opv history`, `opv status`);
+`opv plan`, `opv changed`, `opv access`, `opv run --preview`, `opv history`,
+`opv account list`, `opv status`);
 `opv_propose` returns the same contract diff and plan as `opv propose`; `opv_explain`
 returns the same document as `opv explain`. No tool accepts or returns a secret value, an
 arbitrary command, an executable, or an approval boolean. Successful responses are built
 field by field from checked identifiers; raw upstream JSON is never returned.
+
+`opv_state` section `accounts` returns `opv account list --json` (0.18.0): the accounts this
+machine's `op` knows, whether each is signed in, which one the project uses and why, and each
+finding's `next`. When several accounts exist and none is selected for the project, that
+`next` is `kind: choose`, one choice per account with its steps as `argv` arrays; never pick
+one for the person.
 
 `opv_state` section `needs` takes the CLI's `opv needs` inputs (0.13.0): `env` and `product`
 narrow the declared keys; `scan` is a directory to scan instead of the git tree, which must

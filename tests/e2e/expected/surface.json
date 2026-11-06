@@ -134,6 +134,7 @@
         "json",
         "product",
         "receipt",
+        "sealed-root",
         "target"
       ],
       "name": "delivery verify"
@@ -280,6 +281,7 @@
         "json",
         "product",
         "rotate",
+        "sealed-root",
         "target"
       ],
       "name": "plan"
@@ -427,6 +429,19 @@
     },
     {
       "args": [
+        "set"
+      ],
+      "flags": [
+        "dry-run",
+        "env",
+        "fill-missing",
+        "json",
+        "replace"
+      ],
+      "name": "provision"
+    },
+    {
+      "args": [
         "env"
       ],
       "flags": [
@@ -503,6 +518,7 @@
         "fail-on-drift",
         "json",
         "product",
+        "sealed-root",
         "target"
       ],
       "name": "status"
@@ -522,6 +538,7 @@
         "receipt",
         "retire",
         "rotate",
+        "sealed-root",
         "supply-stdin",
         "target"
       ],
@@ -563,6 +580,25 @@
       "args": [],
       "flags": [],
       "name": "ui"
+    },
+    {
+      "args": [
+        "bundle",
+        "command"
+      ],
+      "flags": [
+        "env",
+        "exec",
+        "identity-env",
+        "identity-file",
+        "json",
+        "min-revision",
+        "product",
+        "project",
+        "signers",
+        "verify-only"
+      ],
+      "name": "unseal"
     },
     {
       "args": [
@@ -1055,6 +1091,7 @@
               "access",
               "delivery_preview",
               "history",
+              "accounts",
               "status"
             ]
           },

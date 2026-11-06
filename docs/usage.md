@@ -26,11 +26,12 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | propose | `opv propose retire <[p/]KEY>` | anyone | marks the key `retiring`; CI then prunes it with `opv sync <env> --prune --retire` and a person archives it with `opv apply rp-<id>` ([retiring a key](#retiring-a-key)) |
 | propose | `opv propose setup [--from-item <env> [--vault <t>] [--item <t>]] [--names-from <.env> [--config-key K]… [--secret-key K]…] [--file \| --project <p>] [--account <a>]` | anyone | first setup: the contract from an existing item or a `.env`'s names (each present in every environment), and every boundary, item, state vault and field |
 | propose | `opv propose structure [--rebind <env>]… [--project <p>]` | anyone | the structure the contract declares, or new ids for an environment |
-| propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys |
+| propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys; an `age_identity` key's `opv apply` prints only its `age1…` recipient ([sealed delivery](sealed-delivery.md#the-runtime-identity-generate-it-into-1password)) |
 | propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose`; its `extend` kind adds an environment to every explicit-list key ([below](#extend-an-environment-to-every-key-the-extend-intent)) |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
 | apply | `opv apply [<plan_id>] [--project <p>] [--attest <env>:<target>:<product/KEY>]…` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
 | person | `opv set <[p/]KEY> --env <e> [--from-file <PATH>]` | **person, in a terminal** | masked entry of one value; a file key's exact bytes with `--from-file`, never a paste into the app |
+| person | `opv provision <SET> --env <e> [--dry-run] [--replace] [--fill-missing] [--json]` | **person, in a terminal** (an assistant: `--dry-run --json` only) | make a contract set's values together (a producer's consent output, generated keys, a template) and write them in one checked edit of its one item ([below](#values-made-together-opv-provision)) |
 | person | `opv import <env> --from <file.env \| target:NAME> [--replace <p/KEY>]… [--rotate <p/KEY>]… [--skip <p/KEY>]… [--dry-run] [--confirm <env>]` | **person** | write-only import: per key `imported`, `skipped: already set` or `skipped: empty`; never "differs" |
 | person | `opv open <[p/]KEY> [--env <e>] [--print] [--json]` | person | the key's item in 1Password, where a value is typed |
 | person | `opv run <env> [--product <p>] [--role <r>] [--preview] [--remote <profile>] [--confirm <env>] -- <cmd>` | person | run with the keys injected; `op run` masks exact values |
@@ -38,13 +39,14 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv changed <env> [--product <p>] [--target <t>] [--json]` | CI, person | did a source item change since the last sync (exit 10) |
 | deliver | `opv sync <env> [--deploy] [--prune [--retire]] [--rotate <product/KEY>] [--prune-immutable <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--target <t>] [--receipt <file>] [--supply-stdin] [--json]` | CI, person | delivery, opv as the courier; `--retire` is a retirement's prune step, `--supply-stdin` takes [infrastructure values](#infrastructure-values---supply-stdin) on stdin (CI only) |
 | deliver | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | CI, person | does every placement still hold what opv delivered |
+| runtime | `opv unseal <bundle> --env <e> --product <p> --signers <file> [--identity-file <path> \| --identity-env <VAR>] [--project <name>] [--min-revision <N>] [--verify-only] [--json] [--exec -- <cmd>]` | the runtime, CI; an assistant: `--verify-only` and inspect | verify a [sealed bundle](sealed-delivery.md), then inspect its names or run the command with its values; no configuration, `op` or network ([below](#sealed-bundles-opv-unseal)) |
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests |
 | admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
-Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed.
+Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed. `--sealed-root <dir>` on `sync`, `plan`, `status` and `delivery verify` is hidden too: it resolves a [sealed target](sealed-delivery.md#bundles-in-another-repository---sealed-root)'s bundles under another checkout.
 
 "Who" is who may run it, not what is permitted: the CLI has no permission model of its own. A command named **person** needs your own terminal and refuses CI or agent mode. A read that opens an item may also tidy its 1Password layout once when a person runs it signed in with their own session (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
@@ -156,7 +158,7 @@ It reads each boundary item once per target, a run-only environment's too, so a 
 For example, `opv --config secrets.toml status --json` when `flyctl` fails with a reply opv does not recognise for both environments:
 
 ```json
-{"schema_version":3,"ok":false,"exit_code":5,"product":null,"environments":[{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"},{"name":"staging","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"}],"totals":{"environments":2,"findings":0},"next":{"kind":"run","actor":"assistant","command":"opv doctor --config secrets.toml"},"do":"read the reply of flyctl shown above; opv does not recognise it"}
+{"schema_version":4,"ok":false,"exit_code":5,"product":null,"environments":[{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"},{"name":"staging","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"}],"totals":{"environments":2,"findings":0},"next":{"kind":"run","actor":"assistant","command":"opv doctor --config secrets.toml"},"do":"read the reply of flyctl shown above; opv does not recognise it"}
 ```
 
 (The failure's `error` object, last in the document, is left out above.)
@@ -308,7 +310,7 @@ The line is always `summary: written N · unchanged N · held N · deployed <rev
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "environment": "prod",
   "product": null,
   "targets": [{"target": "web", "provider": "fly", "deployed": false, "revision": null}],
@@ -363,6 +365,10 @@ Secrets are written with `gh secret set` and config with `gh variable set`, valu
 ### Sync to an application's own store
 
 An application that keeps its own secrets in its own encrypted store, written through an admin API, is an [HTTP target](http-target.md). opv lists the store, writes one `put` per changed name, re-lists to confirm and records the version in the receipt; a version changed outside opv is drift, and a declared conflict code is `target_changed`. The store applies a write at once, so `--deploy` says there is nothing to deploy. The configuration, the credentials item and the errors are in [the HTTP target](http-target.md).
+
+### Sync to a sealed bundle
+
+A runtime with no secret store of its own (a Docker host, a VM, systemd units) gets a [sealed target](sealed-delivery.md): `sync` writes one signed, age-encrypted `opv-sealed/1` file per product at `sealed.out`, and the runtime opens it with [`opv unseal`](#sealed-bundles-opv-unseal), so 1Password is read at release time, never at start. Any change re-seals the whole bundle (a pruned or retired name leaves it); no change writes nothing. A changed recipient, signer or name set marks the bundle stale as a whole, with one line saying why. The existing bundle is verified against `sealed.signer` before any value is read; a tampered one refuses (`input_invalid`) and is left alone. `--sealed-root <dir>` (hidden) on `sync`, `plan`, `status` and `delivery verify` resolves the bundles under another checkout. On a sealed target `plan` says `would leave the sealed bundle at the next sync (no --prune needed)` for a retired name. The configuration, the trust boundary and its residual risk, rotation and migration are in [sealed delivery](sealed-delivery.md).
 
 ### Pruning on Fly
 
@@ -435,7 +441,9 @@ dev[local]: core=vDEV.../iDEV...
 next: opv set api/OPENAI_API_KEY --env dev
 ```
 
-`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. A name declared only as `source = "infrastructure"` is the exception (since 0.17.4): opv never holds its value, so it is kept as the parent environment sets it, and `run` prints one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): <product/KEY>, …`. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it. `run` reads only the boundary items that hold its own keys (with `--product`, the selected product's keys and their `from` sources, never a sibling's separate item), and its one `still needs a value in 1Password (<env>): …` note names only those keys that are empty or missing; another product's empty key in the same item is not named.
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. A name declared only as `source = "infrastructure"` is the exception (since 0.18.0): opv never holds its value, so it is kept as the parent environment sets it, and `run` prints one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): <product/KEY>, …`. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it. `run` reads only the boundary items that hold its own keys (with `--product`, the selected product's keys and their `from` sources, never a sibling's separate item), and its one `still needs a value in 1Password (<env>): …` note names only those keys that are empty or missing; another product's empty key in the same item is not named.
+
+**Sign-in preflight.** The read that fills the environment is also the run's sign-in check (#266, FR-40): a session or account cause from it stops the run before `op run` with that typed cause — `op_not_signed_in` (exit 7), `account_not_registered`, `account_required`, `account_ambiguous`, `own_session_required` or `credential_rejected` — so 1Password's own raw sign-in error never reaches the terminal. In particular, with several accounts and none chosen for the project, a run that `op run` used to send to op's default account stops with `account_required` and the same `choose` step `opv ready` gives. When the cause is `op_not_signed_in` and you are at a terminal (no `--json`, not CI, no service-account or Connect credential) opv signs you in at 1Password's own prompt and runs the same arguments once more in the same process; the command after `--`, its words included, is kept only in memory and never printed. Without a terminal the error stands and names `Next: opv login -- opv run <env> -- <command>` (the child shown as a placeholder). A run whose child has started is never replayed after a sign-in (D4), so a deploy or migration cannot run twice.
 
 **File keys.** A key with `file` is written to a fresh private directory on a RAM-backed `$XDG_RUNTIME_DIR` (0700, files 0400) and removed when the app exits. Which platforms support it and which limits opv enforces (same user, root, ptrace, inherited descriptors, swap, core dumps, hard links, reboot) are in [platforms and limits](design/local-delivery.md#platforms-and-limits). Since 0.13.0:
 
@@ -451,11 +459,15 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 
 ### Delivery preview: `--preview`
 
-`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. Infrastructure keys are not in `keys`: they are listed under `supplied_at_sync`, names only and present only when non-empty (text: `supplied at sync (not injected): …`). `--json` prints one document (`schema_version` 2); the text form prints one line per key plus the summary lines.
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. Infrastructure keys are not in `keys`: they are listed under `supplied_at_sync`, names only and present only when non-empty (text: `supplied at sync (not injected): …`). `--json` prints one document (`schema_version` 4); the text form prints one line per key plus the summary lines.
 
 ### Remote development: `--remote`
 
 `opv run <env> [--product <p>] [--role <r>] --remote <profile>` delivers the same selection to a reviewed profile (`[products.<p>.remotes.<profile>]`) over pinned SSH and runs the profile's pinned command there; it takes no command after `--`. It needs an interactive terminal (refused under CI or with a service-account or Connect credential: `terminal_required`). An unknown profile is `usage`; an environment or role the profile does not allow is `policy_refused`; both before anything is read. The exit code is the remote app's, or 255 when SSH itself failed (connection, authentication or the pinned host key). Closing the terminal, Ctrl-C or a dropped connection stops the remote app and removes its secrets directory. `--preview --remote <profile>` adds `transport: remote` and the profile's pinned connection and command (identifiers only) to the preview. Design and limits: [remote delivery](design/remote-delivery.md).
+
+## Sealed bundles: `opv unseal`
+
+`opv unseal <bundle> --env <e> --product <p> --signers <allowed_signers>` is the runtime side of a [sealed target](sealed-delivery.md). It reads the bundle, the signers file and an age identity, and nothing else: no configuration, no `op`, no socket. It checks the signature against a signers line whose principals include the bundle's environment (namespace `opv-sealed`), then the environment and product, then the project when `--project <name>` is given, then `--min-revision <N>` (the deploy's rollback floor), then that each variable the bundle sets is a plain name, never `OP_*` or the `--identity-env` variable, then that the identity is a recipient, and only then decrypts. `--verify-only` decrypts nothing and needs no identity; with one it also checks membership, and with file keys the RAM-backed `$XDG_RUNTIME_DIR`. Without a mode it decrypts in memory and prints the header and names, never a value. `--exec -- <cmd>` runs the command with the values: every `OP_*` and the `--identity-env` variable are removed, a bundle name replaces an inherited one (named on stderr), file keys go to a private RAM folder, and the exit code is the command's. The identity comes from `--identity-file <path>` or `--identity-env <VAR>`, never an argument. `--json` (not with `--exec`) prints one `opv.unseal/1` document of names and fingerprints. Refusals are the `sealed_*` codes in the [table](#json-contract).
 
 ## Doctor
 
@@ -575,6 +587,8 @@ Next (owner): opv open api/STRIPE_KEY --env staging
 `--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose. The exception is a personal key (`personal_key_missing`, `personal_key_empty`): its value is in the person's own item, so its `prerequisite` is a step for the person, naming the vault, the item title and the field opv reads (`opv open` would open the team item), and when it comes first the receipt's `next` is `{kind: enter_value, actor: person, command: null}`; a [settings health](configuration.md#settings-health-likely-wrong-values) finding (non-blocking) also has a `message`, one sentence naming the keys and environments, never a value. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
 
 Each target in `targets` is `ready` (every vault and item it needs could be opened) or `grants_missing`, and carries `evidence_write: "not_verified"`: an open state vault does not show that the identity can write delivery evidence there. The read-only CI reader never can; a target's deploy identity (`opv access <env> --target <name>`) can. A sync that records evidence, checked with `opv delivery verify`, is the proof.
+
+With [sets](provision.md) declared, the receipt's `sets` lists each set's state in each of its environments (`absent`, `complete`, `partial`, `inconsistent`), computed from the values it reads. A `partial` or `inconsistent` set is a blocking `keys_blocking` finding with `scope.set` and prerequisite `opv provision <set> --env <env>` (actor `owner`); an `absent` set does not block.
 
 `opv ready --gate` turns the receipt into a promotion gate: it fails unless every present key is `set` with delivery evidence at its item version, and no relaxation is unaccepted. A present infrastructure key passes only when it is `as supplied` on every target; otherwise the gate fails with reason `supplied_not_delivered` (absent or not recorded) or `supplied_drifted`, and the step is to run the deploy job that produces it. A key whose `expires` date is within 30 days is an advisory finding, not a failure. Without `--gate`, the exit code is unchanged. [examples/ci-change-detection](../examples/ci-change-detection/) has a promotion chain, `opv-promotion.yml`: a `dev` job syncs and runs `opv ready dev --gate`, and `staging` and `prod` each need the tier before them, so a change reaches production only through green gates. It never runs `opv apply` and never writes 1Password.
 
@@ -707,7 +721,7 @@ opv ready                                        # names: opv apply rp-<id>
 
 `opv propose structure [--rebind <env>]… [--project <p>]` plans the structure the contract declares (missing vaults, items, state vaults and empty fields) or new ids for an environment, and ends with the `opv apply` that runs it. It is also the one-time move that reads inline ids from `secrets.toml` and writes them to `secrets.bindings.toml`: a `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid`, naming the field, and `opv propose structure` then `opv apply` is the only path that reads them, only to move them.
 
-`opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys.
+`opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys. A key with `rules = { age_identity = true }` gets a fresh age X25519 identity: the person's `opv apply` writes it into 1Password and prints only its public `age1…` recipient, for a sealed target's `sealed.recipients` ([sealed delivery](sealed-delivery.md#the-runtime-identity-generate-it-into-1password)).
 
 ### The intent document: `opv propose --intent <file.json>`
 
@@ -738,6 +752,10 @@ opv set web/TLS_PRIVATE_KEY --env prod --from-file key.pem
 `opv import <env> --from <file.env|target:NAME>` is write-only: for each key it reports `imported`, `skipped: already set` or `skipped: empty`, and it never reports that a value differs. A set field is overwritten only when you name it with `--replace <p/KEY>`, an immutable key also needs `--rotate <p/KEY>`, and `--skip <p/KEY>` leaves a key out. `--dry-run` changes nothing; without it, values go from the file to 1Password, and the item is read back and checked. Writing into an environment with `confirm_env = true` or `tier = "production"` needs `--confirm <env>` (the environment's name again), as `opv sync` does; a `--confirm` naming another environment is refused. It needs your own session and never syncs, deploys, prunes or deletes the source.
 
 Over MCP the one writer is `opv_import_local`, and only into an environment whose tier is `local` (no targets, no `confirm_env`); what it writes is tagged `assistant_imported`. Sources: a private dotenv file (literal `KEY=value` lines, never executed; it must be a private regular file under 1 MiB), or `--from target` for targets that can show values (Azure Key Vault, Kubernetes Secrets, GitHub variables). Fly secrets and GitHub secrets can never be read back: put those values in a private dotenv file, or type them in 1Password.
+
+### Values made together: `opv provision`
+
+A contract `[sets.<SET>]` declares keys whose values must be made together and agree: an OAuth refresh token only a consent helper (a `[producers.<name>]` command) can obtain, matched generated keys, a JSON bundle built from them. `opv provision <SET> --env <e>` reads the set's one item, shows the plan (names, makers, the producer's command and `sha256`, the time budget), asks you to type the environment name back, runs each producer once over `opv.produce/1`, makes and validates every member in memory and writes them in one checked edit; the receipt (`opv.provision/1`) names versions and members only. A complete set is `unchanged`; `--replace` re-makes the whole set (old values in `opv · kept`; refused for an immutable member); `--fill-missing` completes a partial set without rotating what is there; `--dry-run` shows the plan and writes nothing, and is the one form an assistant or CI may run. It refuses agent mode (`person_only`), CI and a non-TTY (`terminal_required`), a service account, Connect or deploy credentials (`own_session_required`, and in production also an exported session or token variable) and producers on native Windows (`platform_unsupported`). `opv set`, `opv import` and a generate plan (`opv propose generate`, then `opv apply`) refuse a set member. `opv ready` reports each set's state and blocks on a `partial` or `inconsistent` one. The contract tables, the producer protocol and what 1Password can and cannot guarantee: [Provisioning values together](provision.md).
 
 ## Mint a target's deploy credential: `opv target credentials`
 
@@ -785,7 +803,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 
 ## Sign-in: `opv login`
 
-`opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`; in a `--shell` session the expired-session Next is that session's eval line.
+`opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`; in a `--shell` session the expired-session Next is that session's eval line. When the project records the account (`.opv`, or the configuration's `account`), the sign-in step is just `opv login` (or `opv login -- opv <command>`): `opv login` finds the recorded account itself, so no `--account` is named, and only an environment or `OP_ACCOUNT` that named it puts `--account <ID>` in the step. At a terminal, opv's sign-in notice names `eval "$(opv login --shell)"` as the way to keep the current shell signed in (`--shell=powershell` is refused).
 
 **Reusing one sign-in across commands.** With the 1Password desktop app integration on (macOS and Windows, and Linux with the 1Password app running), opv reuses the app's unlock with no flag: commands in that terminal are already signed in, `--shell` prints nothing, and stderr says `The 1Password app integration is on: commands in this terminal already reuse its unlock. Nothing to set.` Elsewhere (WSL with the Linux `op`, headless Linux) sign in once for the shell:
 
@@ -796,7 +814,7 @@ opv login --shell=fish | source    # fish
 
 `--shell` prints the session assignments and an `opv` shell function and nothing else, so it must write to a pipe: a terminal, a file, or another reader (`opv login --shell | cat`, `| tee`) is refused with `shell_eval_required` (exit 6). Asking for another shell's syntax than the shell running it (`--shell=fish` in bash) is refused with `shell_mismatch` (exit 2) before any sign-in, because a shell that cannot parse the lines can print them in its error; with no value, `--shell` follows the running shell. It emits a non-exported variable and an `opv` shell function that passes the session to `opv` alone, so only `opv` sees it, for that one command: plain `op`, assistants and other scripts started from that shell are not signed in. The session ends after 1Password's idle window (about 30 minutes), and the variable dies with the shell; a command that finds it expired names the eval line as its Next, so run it again to refresh. `set -x` (or fish's `fish_trace`) traces the evaluated line to stderr, which would put the session there: a documented residual, so do not trace a shell you sign in this way. PowerShell is not supported yet and `--shell=powershell` is refused. An assistant hands this command to the person; it never runs it.
 
-**Accounts, without signing in.** `opv account list` shows the accounts this 1Password CLI knows, whether each is signed in, which one the project uses and why (`--account`, `OP_ACCOUNT`, `.opv`, or the only one), and what to do next; it never prompts or signs in. `--json` gives the same as one document (`opv schema` lists its fields): `discovery` (`ok`, `unavailable`, `op_missing`), `selected`, `accounts` and `findings` with stable codes (`no_accounts`, `selected_account_absent`, `account_ambiguous`, `selected_signed_out`, `discovery_unavailable`, `op_missing`, and the advisory `shared_sign_in_address`, `session_for_other_account` and `stale_session_variable`), each with one `next` command. Several accounts on one sign-in address (`my.1password.com` holds every individual and family account) are listed by shorthand and email: naming the address picks one of them, so opv names accounts by ID, and with `op` itself you use the shorthand (`op signin --account <shorthand>`). An `OP_SESSION_<name>` variable in the shell for another account, or for none (left by an earlier `eval $(op signin …)`), is reported by name only; `opv login` ignores it and prints these notes before 1Password's prompt. Only accounts this CLI knows are listed; on Linux and WSL an account that is only in the 1Password app appears after `opv login --add`. `opv account use <email or ID>` records the project's account in `.opv` with no prompt; a value several accounts match (a shared sign-in address) is refused with the candidates' IDs.
+**Accounts, without signing in.** `opv account list` shows the accounts this 1Password CLI knows, whether each is signed in, which one the project uses and why (`--account`, `OP_ACCOUNT`, `.opv`, or the only one), and what to do next; it never prompts or signs in. `--json` gives the same as one document (`opv schema` lists its fields): `discovery` (`ok`, `unavailable`, `op_missing`), `selected`, `accounts` and `findings` with stable codes (`no_accounts`, `selected_account_absent`, `account_ambiguous`, `account_required`, `selected_signed_out`, `discovery_unavailable`, `op_missing`, and the advisory `shared_sign_in_address`, `session_for_other_account` and `stale_session_variable`), each with one `next` command. Several accounts with none selected for the project is `account_required`: its `next` is `kind: choose`, one choice per account with its steps as `argv` arrays (`opv account use <account ID>`, then the sign-in and `opv ready --json` as `reach` allows); opv never picks one, and `opv ready --json` gives the same choices. Several accounts on one sign-in address (`my.1password.com` holds every individual and family account) are listed by shorthand and email: naming the address picks one of them, so opv names accounts by ID, and with `op` itself you use the shorthand (`op signin --account <shorthand>`). An `OP_SESSION_<name>` variable in the shell for another account, or for none (left by an earlier `eval $(op signin …)`), is reported by name only; `opv login` ignores it and prints these notes before 1Password's prompt. Only accounts this CLI knows are listed; on Linux and WSL an account that is only in the 1Password app appears after `opv login --add`. `opv account use <email or ID>` records the project's account in `.opv` with no prompt; a value several accounts match (a shared sign-in address) is refused with the candidates' IDs.
 
 **Choosing the account.** Until the project records one (`.opv`, written by your first choice; commit it), `opv login` asks which 1Password account holds the project's secrets, even when only one is added to this CLI, so you always see which one it is; each entry says whether it is signed in, and the last one is **Add another 1Password account**. `opv login --add [--account <email>]` adds an account right away. You type the sign-in address, Secret Key and password only at 1Password's own prompt (your Emergency Kit has them). On Linux and WSL the CLI keeps its own accounts: in WSL, accounts that are only in the Windows 1Password app are not listed until you add them here. On macOS and Windows the CLI uses the app's accounts, so you add an account in the app.
 
@@ -815,6 +833,14 @@ opv login --shell=fish | source    # fish
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
 | `opv config check --file F` | exit 2 with a diff (`copies_differ`) when a committed copy differs from the manifest. On a file project (`--config`, or a `secrets.toml` found from here and no `.opv`), F is a regenerated file: it must load (with the project's `secrets.bindings.toml`, since a generator writes the contract only) and its configuration must equal the committed one, the project's `secrets.toml` or, when F is that file regenerated in place, its copy at git `HEAD`. Equal prints one line (exit 0); different prints a diff and exits 2 with `regenerated_file_differs`; a file that does not load is its load error, never a diff. A generator that merged a proposal's [fragment](#opv-propose-key-env-target-and-retire) passes |
+
+**How opv finds the configuration.** First match wins: `--config <file>` (or `OPV_CONFIG`); `OPV_PROJECT=<name>` (the manifest `opv · <name>`); a `secrets.toml` walked up from here that sits at or below the nearest `.opv`'s folder; that `.opv`'s `config = "<path>"`; its `project = "<name>"`; a `secrets.toml` above the `.opv` (only when the `.opv` names neither `config` nor `project`); the manifest tagged with this checkout's git remote. A `.opv` may therefore name a configuration that is not on the walk-up path:
+
+```toml
+config = "infra/shared-host/fleet/secrets.toml"
+```
+
+The path is relative to the `.opv`'s folder; its form is checked at parse (relative, no `..`, inside the repository) and its existence and containment when it is used, so `opv login` and `opv account use` work before a generated file exists. stderr says `using <path> (named by <the .opv>)`. When nothing is found, opv searches at most four folders below the repository root (20 files, 2 000 folders, skipping `.git`, `node_modules`, `target` and hidden folders) and names what it saw: with one file `Do` says to add it to the `.opv` as `config = "<path>"` and `Next:` re-runs with `--config <path from here>`; with several it lists them and leaves the pick to you. A file found this way is never used unless it is named. opv 0.17 refuses a `.opv` with `config` (it knows only `project` and `account`), so a team sharing it upgrades together.
 
 Details, discovery and the review trade-off: [configuration in 1Password](configuration.md#configuration-in-1password). Declaring keys, environments and targets is `opv propose`: [configuration](configuration.md#start-from-an-existing-item-opv-init).
 
@@ -842,7 +868,7 @@ Every command that takes `--json` — `inventory`, `needs`, `contract`, `ready`,
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "ok": false,
   "exit_code": 6,
   "next": {
@@ -869,7 +895,7 @@ Every command that takes `--json` — `inventory`, `needs`, `contract`, `ready`,
 }
 ```
 
-`schema_version` is `3` since 0.12.0. `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
+`schema_version` is `4` since 0.18.0 (`3` from 0.12.0, when `next` became typed). `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `choose`, `none`. Schema 4 adds `argv`, `reach` and `choices`, each present only when known: `argv` is the exact words to exec, built from a typed opv command and never split from `command` (absent for a `-- <command>` placeholder); `choose` means a person picks one of `choices` (two or more, never ranked), whose `steps` then run in order; `reach` (`app`, `shell`, `none`) says how far the current process reaches a 1Password session. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
 
 A failure after the command produced its document (findings, exit 8) keeps that document's fields between `exit_code` and `next`. `config export <ENV>` (and `config export --json`) prints the bare document on success and the failure document on failure. Usage errors (`--json` with an unknown flag) print the failure document with code `usage`.
 
@@ -905,8 +931,12 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `needs_undeclared` | 2 | after_fix | no | the code reads names the contract declares nowhere and the default branch does not declare either |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
 | `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
+| `producer_changed` | 2 | after_fix | no | a producer's file no longer has the sha256 the contract pins; a person reviews the change and pins it again |
 | `regenerated_file_differs` | 2 | never | no | a file project's regenerated configuration file differs from the committed copy; a person picks which is right |
 | `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
+| `sealed_identity_unusable` | 2 | after_fix | no | opv unseal: the age identity could not be read, or is not exactly one AGE-SECRET-KEY-1 line |
+| `sealed_recipient_shared` | 2 | after_fix | no | an age recipient of a sealed target is also a recipient of a sealed target in another trust group |
+| `sealed_signer_shared` | 2 | after_fix | no | a sealed target's signer also signs for a sealed target in another trust group, so one could sign for the other |
 | `shell_mismatch` | 2 | never | yes | opv login --shell was asked for another shell's syntax than the shell running it; nothing was signed in |
 | `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
 | `state_vault_missing` | 2 | after_fix | yes | a target's state vault for its delivery evidence is not bound yet; a person runs opv apply |
@@ -923,6 +953,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `value_in_text_field` | 2 | after_fix | no | free text in an intent document looks like a secret value and is refused before anything is written |
 | `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
 | `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
+| `producer_failed` | 3 | after_fix | no | a producer ended with a non-zero exit, a signal, its timeout or its own error code; nothing was written |
 | `remote_version_mismatch` | 3 | after_fix | no | opv on the remote host speaks another protocol version |
 | `tool_unusable` | 3 | after_fix | no | op or the target CLI is installed but cannot be used (an unreadable version, a Windows op.exe from WSL, ...) |
 | `concurrent_edit` | 4 | check_first | yes | another edit landed together with opv's; check the history before acting again |
@@ -948,13 +979,19 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
-| `local_io_failed` | 6/74 | after_fix/safe | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `local_io_failed` | 6/74 | after_fix/safe | no | opv's own local input or output failed (a file, the current folder, standard output, a sealed bundle another opv run is sealing, ...) |
 | `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `person_only` | 6 | never | yes | a person-only command was called from an assistant; it runs only in a person's terminal |
 | `plan_unknown` | 6 | never | no | no plan has this id |
+| `platform_unsupported` | 6 | never | no | the command needs something this platform lacks (a producer on native Windows); run it from WSL |
 | `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
 | `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
 | `ram_dir_unavailable` | 6 | after_fix | no | a private RAM-backed folder is needed (Azure deploy credentials, a file opv run delivers) and none is usable; nothing was read or changed |
+| `sealed_malformed` | 6 | after_fix | no | opv unseal: the bundle is missing, too large or not a well-formed opv-sealed/1 file; nothing was decrypted |
+| `sealed_payload_mismatch` | 6 | after_fix | no | opv unseal: the decrypted payload does not match the signed header; nothing was delivered |
+| `sealed_revision_below_floor` | 6 | after_fix | no | opv unseal: the bundle's signed revision is below --min-revision (a rollback); nothing was decrypted |
+| `sealed_scope_mismatch` | 6 | after_fix | no | opv unseal: the bundle's signed environment or product is not the one --env or --product names; nothing was decrypted |
+| `sealed_signature_invalid` | 6 | after_fix | no | opv unseal: the bundle's signature does not verify against an allowed_signers line for its environment (namespace opv-sealed), or the signers file was refused; nothing was decrypted |
 | `shell_eval_required` | 6 | after_fix | yes | opv login --shell prints a 1Password session only to a pipe; run it inside the shell's eval |
 | `stale_plan` | 6 | never | no | the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed |
 | `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
@@ -965,6 +1002,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
 | `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |
+| `sealed_not_a_recipient` | 7 | after_fix | no | opv unseal: the age identity is not a recipient of this bundle |
 | `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
 | `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
@@ -993,12 +1031,12 @@ opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 and nothing else. It contains names, states and counts only: no value, no value fragment,
 no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
 and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
-[failure document](#json-contract). The top-level `schema_version` is `3` (0.12.0 typed `next`); adding a field keeps it, while
+[failure document](#json-contract). The top-level `schema_version` is `4` (since 0.18.0; `3` from 0.12.0's typed `next`); adding a field keeps it, while
 renaming or removing a field, or changing its meaning, increments it.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -1141,7 +1179,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.17.4  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.18.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

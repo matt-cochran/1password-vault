@@ -24,6 +24,11 @@ rules = { prefix = "sk_" }
 [products.api.keys.PLAIN]
 kind = "secret"
 environments = ["dev"]
+
+[products.api.keys.OPV_SEALED_IDENTITY]
+kind = "secret"
+environments = ["dev"]
+rules = { age_identity = true }
 "#;
 
 /// A fake whose dev item already holds `api/WEBHOOK_HEX` = `already-set`.
@@ -63,6 +68,80 @@ fn a_base64_key_is_generated_as_base64() {
         recipe("api", "SESSION_KEY", "dev", &spec(&fleet, "SESSION_KEY")).unwrap(),
         Recipe::Base64(32)
     );
+}
+
+// st-g1 (sealed-target §7.1): an `age_identity = true` key is made in memory and only
+// its public recipient is shown, so it can go into `sealed.recipients`.
+
+#[test]
+fn an_age_identity_key_gets_the_age_identity_recipe() {
+    let (fleet, _, _) = world();
+    assert_eq!(
+        recipe(
+            "api",
+            "OPV_SEALED_IDENTITY",
+            "dev",
+            &spec(&fleet, "OPV_SEALED_IDENTITY")
+        )
+        .unwrap(),
+        Recipe::AgeIdentity
+    );
+}
+
+#[test]
+fn a_generated_age_identity_parses_as_an_age_x25519_identity() {
+    let v = make(Recipe::AgeIdentity).unwrap();
+    assert!(crate::bundle::crypto::parse_identity(v.expose()).is_ok());
+}
+
+#[test]
+fn the_age_identity_recipe_names_itself() {
+    assert!(
+        Recipe::AgeIdentity
+            .describe()
+            .contains("age X25519 identity")
+    );
+}
+
+#[test]
+fn an_age_identity_prints_its_recipient() {
+    let (fleet, op, id) = world();
+    let mut out = Vec::new();
+    run(
+        &fleet,
+        "dev",
+        &["api/OPV_SEALED_IDENTITY".into()],
+        &op,
+        &mut out,
+    )
+    .unwrap();
+    let recipient =
+        crate::bundle::crypto::parse_identity(&field(&op, &id, "OPV_SEALED_IDENTITY").unwrap())
+            .unwrap()
+            .recipient()
+            .to_string();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .any(|line| line == recipient)
+    );
+}
+
+#[test]
+fn an_age_identity_never_prints_the_identity() {
+    let (fleet, op, id) = world();
+    let mut out = Vec::new();
+    run(
+        &fleet,
+        "dev",
+        &["api/OPV_SEALED_IDENTITY".into()],
+        &op,
+        &mut out,
+    )
+    .unwrap();
+    let identity = field(&op, &id, "OPV_SEALED_IDENTITY").unwrap();
+    assert!(!String::from_utf8(out).unwrap().contains(&identity));
 }
 
 #[test]
@@ -268,4 +347,59 @@ fn an_infrastructure_key_is_refused_as_infrastructure() {
     let s = session_key_with(|s| s.value_source = Some(crate::domain::ValueSource::Infrastructure));
     let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
     assert_eq!(why_of(&e), GenerateRefusal::Infrastructure.words());
+}
+
+// A set member is written only together with its set (#253 §5.6; test 29): `generate`
+// refuses it from the configuration alone, before any 1Password call.
+
+/// A dev fleet where api/SESSION_KEY is a member of the set `grant`.
+fn set_world() -> (crate::domain::Fleet, FakeOp) {
+    let op = FakeOp::default();
+    op.signed_in.set(true);
+    let id = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · api · dev values", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": []
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n\
+         [products.api.keys.SESSION_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+         rules = {{ base64_bytes = 32 }}\n\
+         [sets.grant]\nenvironments = [\"dev\"]\n\
+         members = {{ \"api/SESSION_KEY\" = {{ generate = \"rules\" }} }}\n"
+    ))
+    .unwrap();
+    (fleet, op)
+}
+
+#[test]
+fn a_set_member_is_refused_as_a_set_member() {
+    let (fleet, op) = set_world();
+    let e = run(
+        &fleet,
+        "dev",
+        &["api/SESSION_KEY".into()],
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let doc = crate::error::document(&e, &crate::error::invocation(), false);
+    assert_eq!(doc["subject"]["guard"]["guard"], "set_member");
+}
+
+#[test]
+fn a_set_member_refusal_runs_no_op_command() {
+    let (fleet, op) = set_world();
+    let _ = run(
+        &fleet,
+        "dev",
+        &["api/SESSION_KEY".into()],
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(op.calls.borrow().is_empty());
 }

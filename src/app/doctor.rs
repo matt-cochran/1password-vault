@@ -2374,6 +2374,7 @@ mod tests {
                 system: crate::cause::System::Azure,
                 account: None,
                 state: crate::cause::SessionState::SignedOut,
+                selected_by: None,
             }
             .into()),
         );
@@ -2548,7 +2549,7 @@ mod tests {
         assert_eq!(
             (doc["schema_version"].as_u64(), checks),
             (
-                Some(3),
+                Some(4),
                 [
                     ("config", "ok"),
                     ("op", "ok"),

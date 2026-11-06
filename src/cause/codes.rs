@@ -73,6 +73,33 @@ pub fn table() -> Vec<CodeRow> {
     rows
 }
 
+/// The codes whose `next` stays the assistant's read although `human_required` is true
+/// (FR-65; design agent-signin-readiness §2.3, vet item 7). For each, a person-only Do
+/// (a grant, a value, a confirmation, a pick, a revoke, an owner's setup) comes first, and
+/// the assistant's read afterwards shows whether it took, so the read is not flipped to the
+/// person and `human_required` keeps saying a person must act. Every other code obeys
+/// "`human_required` implies `next.actor == person`" (a test); each entry is decided in
+/// `docs/design/error-catalog.md` §6.3.
+pub const ASSISTANT_READS_AFTER_PERSON: &[&str] = &[
+    "account_ambiguous",
+    "choice_required",
+    "concurrent_edit",
+    "confirm_mismatch",
+    "create_outcome_unknown",
+    "credential_rejected",
+    "deploy_credentials_failed",
+    "findings",
+    "ids_not_in_account",
+    "input_invalid",
+    "keys_blocking",
+    "manifest_ambiguous",
+    "owner_setup_required",
+    "permission_denied",
+    "secret_not_stored",
+    "target_not_signed_in",
+    "vault_no_access",
+];
+
 /// What a code means, in one line. Every code [`examples`] produces has one (a test).
 pub fn meaning(code: &str) -> &'static str {
     match code {
@@ -274,7 +301,7 @@ pub fn meaning(code: &str) -> &'static str {
             "a source item changed since the last sync, or no source versions are recorded; the next step is the sync"
         }
         "local_io_failed" => {
-            "opv's own local input or output failed (a file, the current folder, standard output, ...)"
+            "opv's own local input or output failed (a file, the current folder, standard output, a sealed bundle another opv run is sealing, ...)"
         }
         "handoff_refused" => {
             "another process connected to opv's private hand-off pipe; opv refused it and sent nothing"
@@ -291,6 +318,46 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "title_not_found" => "no 1Password vault or item has exactly this title",
         "title_ambiguous" => "more than one 1Password vault or item has exactly this title",
+        // provision (#253)
+        "producer_failed" => {
+            "a producer ended with a non-zero exit, a signal, its timeout or its own error code; nothing was written"
+        }
+        "producer_changed" => {
+            "a producer's file no longer has the sha256 the contract pins; a person reviews the change and pins it again"
+        }
+        "platform_unsupported" => {
+            "the command needs something this platform lacks (a producer on native Windows); run it from WSL"
+        }
+        // end provision
+        // sealed target (#271)
+        "sealed_recipient_shared" => {
+            "an age recipient of a sealed target is also a recipient of a sealed target in another trust group"
+        }
+        "sealed_signer_shared" => {
+            "a sealed target's signer also signs for a sealed target in another trust group, so one could sign for the other"
+        }
+        "sealed_malformed" => {
+            "opv unseal: the bundle is missing, too large or not a well-formed opv-sealed/1 file; nothing was decrypted"
+        }
+        "sealed_signature_invalid" => {
+            "opv unseal: the bundle's signature does not verify against an allowed_signers line for its environment (namespace opv-sealed), or the signers file was refused; nothing was decrypted"
+        }
+        "sealed_scope_mismatch" => {
+            "opv unseal: the bundle's signed environment or product is not the one --env or --product names; nothing was decrypted"
+        }
+        "sealed_revision_below_floor" => {
+            "opv unseal: the bundle's signed revision is below --min-revision (a rollback); nothing was decrypted"
+        }
+        "sealed_identity_unusable" => {
+            "opv unseal: the age identity could not be read, or is not exactly one AGE-SECRET-KEY-1 line"
+        }
+        "sealed_not_a_recipient" => {
+            "opv unseal: the age identity is not a recipient of this bundle"
+        }
+        "sealed_payload_mismatch" => {
+            "opv unseal: the decrypted payload does not match the signed header; nothing was delivered"
+        }
+        // end sealed target
         "internal_error" => "opv hit an internal error; report it",
         _ => "",
     }
@@ -474,6 +541,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 repo: Some("repo-xyz".into()),
                 account: Some(AccountId::new("ACC-XYZ")),
             }),
+            found: None,
         },
         ConfigSourceMismatch {
             command: CommandId("apply".into()),
@@ -596,6 +664,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             system: System::OnePassword,
             account: Some(AccountId::new("ACC-6AIN")),
             state: SessionState::Expired,
+            selected_by: None,
         },
         AccountNotOnMachine {
             account: AccountRef::Shorthand("acct-short".into()),
@@ -939,13 +1008,18 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                     email: "me@one.example".into(),
                     address: "my.1password.com".into(),
                     id: AccountId::new("ACC-ONE"),
+                    shorthand: None,
+                    signed_in: None,
                 },
                 AccountChoice {
                     email: "me@two.example".into(),
                     address: "my.1password.com".into(),
                     id: AccountId::new("ACC-TWO"),
+                    shorthand: None,
+                    signed_in: None,
                 },
             ],
+            reach: crate::json::Reach::None,
         },
         SourceOnly {
             product: ProductName::new("shared-xyz"),
@@ -986,8 +1060,121 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             tier: "shared",
             file: PathBuf::from("local.env"),
         },
+        // provision (#253)
+        ProducerFailed {
+            producer: "consent-xyz".into(),
+            why: ProducerFailure::Reported {
+                code: "access_denied".into(),
+            },
+        },
+        ProducerChanged {
+            producer: "consent-xyz".into(),
+            file: PathBuf::from("tools/connect.py"),
+        },
+        Unsupported {
+            feature: UnsupportedFeature::ProducerOnWindows {
+                set: "set-xyz".into(),
+                producer: "consent-xyz".into(),
+            },
+        },
+        // end provision
+        // sealed target (#271): the configuration causes
+        ConfigInvalid {
+            source: file_source(),
+            at: Some(Location { line: 9, col: 1 }),
+            field: DottedPath(sealed_path("recipients")),
+            rule: FieldRule::Check {
+                check: ConfigCheck::SealedRecipientShared {
+                    recipient: "sha256:0123456789abcdef".into(),
+                    other_env: "env-stage".into(),
+                    other_target: "box-xyz".into(),
+                },
+            },
+        },
+        ConfigInvalid {
+            source: file_source(),
+            at: Some(Location { line: 10, col: 1 }),
+            field: DottedPath(sealed_path("signer")),
+            rule: FieldRule::Check {
+                check: ConfigCheck::SealedSignerShared {
+                    signer: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".into(),
+                    other_env: "env-stage".into(),
+                    other_target: "box-xyz".into(),
+                },
+            },
+        },
+        // `opv unseal`'s refusals (design §4.2), one per code
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::Malformed {
+                detail: "the bundle contains a CR byte".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::SignatureInvalid {
+                signers: PathBuf::from("/etc/opv/allowed_signers"),
+                detail: "no allowed_signers line for principal `env-prod` with namespaces=\"opv-sealed\" holds the signing key".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::ScopeMismatch {
+                field: "environment".into(),
+                expected: "env-prod".into(),
+                found: "env-stage".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::RevisionBelowFloor {
+                revision: 6,
+                floor: 7,
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::IdentityUnusable {
+                from: IdentityFrom::Env {
+                    var: "OPV_AGE_IDENTITY".into(),
+                },
+                detail: "no AGE-SECRET-KEY-1… line".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::NotARecipient {
+                recipient: Some("sha256:0123456789abcdef".into()),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::PayloadMismatch {
+                detail: "the payload's names differ from the header".into(),
+            },
+        },
+        // end sealed target
         Bug { site: "site-xyz" },
     ]
+}
+
+/// The example sealed bundle `opv unseal` reads.
+fn sealed_bundle() -> PathBuf {
+    PathBuf::from("deploy/prod-api.opv-sealed")
+}
+
+/// The path of field `leaf` of the example sealed target.
+fn sealed_path(leaf: &str) -> Vec<String> {
+    [
+        "environments",
+        "env-prod",
+        "targets",
+        "box-xyz",
+        "sealed",
+        leaf,
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// The observation the examples carry (only the runner builds one; it never reaches a

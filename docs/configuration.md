@@ -661,6 +661,23 @@ generated from the application's schema with
 opv never guesses a remote name: `--http-names` gives the `http.names` mapping as comma-separated
 `KEY=remote` pairs.
 
+### Sealed bundle
+
+A runtime with no secret store of its own (a Docker host, a VM, systemd units) gets one signed,
+age-encrypted file per product, written by `opv sync` and opened by `opv unseal` with no
+1Password at runtime. The fields, load rules, trust boundary and migration are in
+[sealed delivery](sealed-delivery.md).
+
+```toml
+[environments.prod.targets.box]
+products = ["api"]
+deploy_credentials = "op://Ops Prod/opv-sealed-prod-signer"   # a 1Password SSH Key item
+sealed.out = "sealed/prod/{product}.opv-sealed"
+sealed.env_name = "{KEY}"
+sealed.recipients = ["age1…"]                     # the runtime identity's recipient
+sealed.signer = "ssh-ed25519 AAAA… opv-sealed-prod"   # the public half of deploy_credentials
+```
+
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
 A runtime can keep its secrets in a store from another provider. Declare the store once and point the target at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).

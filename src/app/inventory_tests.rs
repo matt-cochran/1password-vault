@@ -66,7 +66,7 @@ fn the_json_document_is_schema_three() {
     let mut out = Vec::new();
     run(&fleet, None, None, &op, None, true, &mut out).unwrap();
     let doc: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(doc["schema_version"], 3);
+    assert_eq!(doc["schema_version"], 4);
 }
 
 /// A declared key with no field reads `absent`, never `empty`.

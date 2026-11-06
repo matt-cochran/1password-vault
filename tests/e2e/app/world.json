@@ -61,6 +61,16 @@
         "account": "AE2EDEVACCOUNT000000000001"
       },
       {
+        "id": "vE2ESEALSIGNER000000000001",
+        "name": "e2e-app · box · signer",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2ESTATEBOX00000000000001",
+        "name": "e2e-app · box · state",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
         "id": "vE2EMANIFEST00000000000001",
         "name": "e2e-manifest",
         "account": "AE2EDEVACCOUNT000000000001"
@@ -340,6 +350,54 @@
             "type": "STRING",
             "label": "OTEL_RESOURCE",
             "value": "test-marker-e2e-prod-web-otel-resource"
+          }
+        ]
+      },
+      {
+        "id": "iE2ESEALSIGNERPROD00000001",
+        "title": "e2e-app · box · prod signer",
+        "version": 1,
+        "vault": {
+          "id": "vE2ESEALSIGNER000000000001",
+          "name": "e2e-app · box · signer"
+        },
+        "category": "SSH_KEY",
+        "fields": [
+          {
+            "id": "private_key",
+            "type": "SSHKEY",
+            "label": "private key",
+            "value": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIH4bteHrI+qjyXbPjXD5QjZ2MBSQ9TmLktNYQgqE3vW4\n-----END PRIVATE KEY-----\n",
+            "ssh_formats": {
+              "openssh": {
+                "value": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACDYq4KK2JUDfjneXgLaSQSMtcCDgr5X0H9eyF3TLc8j+QAAALAdsAIoHbAC\nKAAAAAtzc2gtZWQyNTUxOQAAACDYq4KK2JUDfjneXgLaSQSMtcCDgr5X0H9eyF3TLc8j+Q\nAAAEB+G7Xh6yPqo8l2z41w+UI2djAUkPU5i5LTWEIKhN71uNirgorYlQN+Od5eAtpJBIy1\nwIOCvlfQf17IXdMtzyP5AAAAJm9wdi1zZWFsZWQta2F0LVRFU1QtRklYVFVSRS1kby1ub3\nQtdXNlAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n"
+              }
+            }
+          },
+          {
+            "id": "public_key",
+            "type": "STRING",
+            "label": "public key",
+            "value": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINirgorYlQN+Od5eAtpJBIy1wIOCvlfQf17IXdMtzyP5"
+          }
+        ]
+      },
+      {
+        "id": "iE2EDELIVERYWEBBOX00000001",
+        "title": "opv · delivery · web · box",
+        "version": 1,
+        "vault": {
+          "id": "vE2ESTATEBOX00000000000001",
+          "name": "e2e-app · box · state"
+        },
+        "category": "SECURE_NOTE",
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain",
+            "value": ""
           }
         ]
       },

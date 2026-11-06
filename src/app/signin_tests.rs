@@ -667,3 +667,45 @@ fn strict_sign_in_signs_in_with_the_named_targets_item() {
     let _ = signed.read(&Call::new("flyctl", &["version"]), &[]);
     assert_eq!(env_of(&r.calls.borrow()[1], "FLY_API_TOKEN"), Some(TOKEN));
 }
+
+// --- FR-65: how far this process reaches a session (`next.reach`) ----------------------
+
+#[test]
+fn a_headless_linux_op_reaches_no_session() {
+    assert_eq!(reach(None, &[], &[], &linux()), crate::json::Reach::None);
+}
+
+#[test]
+fn the_app_on_macos_is_reached() {
+    let mac = Host::from_env(&FakeEnv::new("macos").shell("/bin/zsh"));
+    assert_eq!(reach(None, &[], &[], &mac), crate::json::Reach::App);
+}
+
+/// The account's own `OP_SESSION_<shorthand>` in this process: the person refreshes it.
+#[test]
+fn the_accounts_shell_session_is_reached() {
+    let listed = [listed_account(
+        "AAAA0000000000000000000001",
+        "my",
+        "USER0000000000000000000001",
+        "me@example.com",
+    )];
+    assert_eq!(
+        reach(
+            Some("AAAA0000000000000000000001"),
+            &["OP_SESSION_my".to_string()],
+            &listed,
+            &linux()
+        ),
+        crate::json::Reach::Shell
+    );
+}
+
+/// A sign-in step names an account `opv login` finds by itself only when it was given.
+#[test]
+fn a_configured_account_is_not_named_again() {
+    assert_eq!(
+        refresh_account(Some("AAAA0000000000000000000001"), true),
+        None
+    );
+}

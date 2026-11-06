@@ -1,0 +1,13 @@
+{
+ "_note": "Shape of the downstream's own format (infra docs/platform/sealed-secrets.md, platformd/src/sealed.rs:44-63), every value a placeholder. Signed by a detached <bundle>.sig (ssh-keygen -Y sign -n opv-sealed, principal opv-sealed). The ciphertext opens to {\"schema\":\"opv-sealed-payload/v1\",\"env\",\"product\",\"revision\",\"values\":{\"KEY\":\"<string>\"}}. The real envelope has no _note field (deny_unknown_fields). opv does not read this format; see docs/design/sealed-target.md section 5.8.",
+ "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\n<armored age ciphertext>\n-----END AGE ENCRYPTED FILE-----\n",
+ "contract_digest": "sha256:<64 hex>",
+ "created_at": "2026-11-04T20:19:11Z",
+ "env": "staging-zonetico",
+ "product": "zonetico",
+ "recipients": [
+  "<age1 recipient of the staging machine>"
+ ],
+ "revision": 1793823551,
+ "schema": "opv-sealed/v1"
+}

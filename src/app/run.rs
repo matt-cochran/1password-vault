@@ -250,6 +250,11 @@ fn launch(
             crate::domain::key_label(product, key)
         ));
     }
+    // FR-40 (#266): op's default account is never used by accident. With several accounts
+    // on this machine and none selected, the run stops before any read, with the choices.
+    if super::tidy::active() && !account_selected(env) {
+        crate::config_store::pick_account(runner, None)?;
+    }
     // FR-55: a personal key's value is in the person's own item. Locate it before the read
     // and before `op run`, so a missing personal item stops the run and names the keys.
     let personal_env = if selected
@@ -299,13 +304,19 @@ fn launch(
     // FR-43: one tolerant read of the boundary items holding `wanted` (never a sibling's
     // separate item, FR-57), which tidies each item read, whole, when a person runs opv.
     // A key whose field is still not where the convention puts it (a read-only run) is
-    // referenced by field id. If the read fails, `op run` reports the problem itself.
-    let read = super::tidy::active()
-        .then(|| {
-            let scope = super::tidy::ReadScope::Keys(wanted.clone());
-            super::tidy::read_for(fleet, &scope, env_name, runner).ok()
-        })
-        .flatten();
+    // referenced by field id. The read is also the run's sign-in preflight (#266, FR-40):
+    // a session or account cause stops the run before `op run`, typed, so op's own sign-in
+    // advice never reaches the terminal. Any other failure is left to `op run` to report.
+    let read = if super::tidy::active() {
+        let scope = super::tidy::ReadScope::Keys(wanted.clone());
+        match super::tidy::read_for(fleet, &scope, env_name, runner) {
+            Ok(r) => Some(r),
+            Err(e) if stops_before_child(&e) => return Err(e),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     let by_id = read.as_ref().map(|r| &r.refs);
     let normalized = read.as_ref().map(|r| &r.normalized);
     let who = read.as_ref().and_then(|r| r.identity);
@@ -405,9 +416,93 @@ fn launch(
     let remove = names_to_clear(fleet);
     note_inherited_infrastructure(fleet, &remove, runner);
     ensure_native(runner)?;
+    // From here the child may run: main never replays this run after a sign-in (#266, D4).
+    mark_child_started();
     runner
         .run_inherited_clean(OP, &args, &env_pairs, &remove)
         .map_err(|e| op_unusable(e.kind()))
+}
+
+/// A session or account cause from the preflight read: the run stops before `op run`
+/// (#266). These are the causes whose `next` is a typed sign-in or choice (FR-65).
+fn stops_before_child(e: &Error) -> bool {
+    e.cause().is_some_and(|(c, _)| c.types_argv())
+}
+
+/// Whether this run's 1Password account was chosen: by the environment, by the run (the
+/// `.opv` file, `OP_ACCOUNT`, `--account`, a manifest), or by a service-account or Connect
+/// credential, which decides the account itself. In this crate's unit tests it is true
+/// unless a test holds [`no_account_selected`]'s guard.
+fn account_selected(env: &crate::domain::Environment) -> bool {
+    #[cfg(test)]
+    {
+        let _ = env;
+        !NO_ACCOUNT.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        env.account.is_some()
+            || crate::runner::run_account().is_some()
+            || Host::detect().op_credential.is_some()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static NO_ACCOUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes [`account_selected`] false on this thread until the guard drops (tests).
+#[cfg(test)]
+pub(crate) struct NoAccount;
+
+#[cfg(test)]
+pub(crate) fn no_account_selected() -> NoAccount {
+    NO_ACCOUNT.with(|a| a.set(true));
+    NoAccount
+}
+
+#[cfg(test)]
+impl Drop for NoAccount {
+    fn drop(&mut self) {
+        NO_ACCOUNT.with(|a| a.set(false));
+    }
+}
+
+/// Set once `op run` may have started the child (D4, FMECA item 4): a sign-in replay of
+/// `opv run` never follows it, whatever error comes back, so a deploy or migration script
+/// never runs twice. Process-wide in the binary; per thread in this crate's unit tests.
+#[cfg(not(test))]
+static CHILD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    static CHILD_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn mark_child_started() {
+    #[cfg(not(test))]
+    CHILD_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    CHILD_STARTED.with(|c| c.set(true));
+}
+
+/// True once this process may have started a run's child (see [`CHILD_STARTED`]).
+pub fn child_started() -> bool {
+    #[cfg(not(test))]
+    {
+        CHILD_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    {
+        CHILD_STARTED.with(std::cell::Cell::get)
+    }
+}
+
+/// Whether `res` may be replayed after an in-place sign-in (FR-40 amended): a signed-out
+/// failure, and no run's child has started in this process.
+pub fn may_replay(res: &Result<i32, Error>) -> bool {
+    matches!(res, Err(e) if e.code_str() == "op_not_signed_in") && !child_started()
 }
 
 /// The declared names a run removes from the environment it inherits: every key name of
@@ -608,6 +703,10 @@ pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
 #[cfg(test)]
 #[path = "run_scope_tests.rs"]
 mod scope_tests;
+
+#[cfg(test)]
+#[path = "run_signin_tests.rs"]
+mod signin_tests;
 
 #[cfg(test)]
 mod tests {

@@ -18,6 +18,9 @@ use crate::app::account::Report;
 use crate::app::rule_source::{RuleSource, RuleStatus, rule_source};
 use crate::cause::{Cause, EnvName, KeyName, ProductName};
 use crate::domain::plan::RuleGate;
+use crate::domain::provision::{KeyRef, MemberSource, SetState, classify};
+use crate::domain::provision_template as template;
+use crate::domain::value_state::ValueState;
 use crate::domain::{KeyState, Row, TargetState, key_label};
 use crate::error::Error;
 
@@ -173,6 +176,9 @@ pub struct Scope {
     pub product: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The provision set (#253/#262), when the finding is about one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set: Option<String>,
 }
 
 /// One target of an environment as the receipt lists it (FR-56): its identity and whether
@@ -192,6 +198,28 @@ pub struct TargetReport {
     /// does not show that this identity can write delivery evidence there. Only a sync that
     /// records evidence proves it (`opv delivery verify`); a read-only CI reader never can.
     pub evidence_write: &'static str,
+}
+
+/// One provision set to judge in one environment (#253/#262, `docs/design/owner-value-ingestion.md`
+/// §4.5): its name and each member's value state, as the caller read them. The caller has
+/// already read the values; nothing here calls `op`.
+pub struct SetInput {
+    pub name: String,
+    pub environment: String,
+    pub members: Vec<ValueState>,
+}
+
+/// One provision set member in one environment the set names (#253/#262, §4.5, D7):
+/// `(set, environment, product, key)`. A member is written only by `opv provision`, so
+/// `ready` never sends the person to `opv open` for one.
+pub type SetMember = (String, String, String, String);
+
+/// A provision set's state in one environment, as the receipt reports it (#253/#262, §4.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SetReport {
+    pub set: String,
+    pub environment: String,
+    pub state: SetState,
 }
 
 /// One thing a person or agent must act on, with one runnable prerequisite and one verify
@@ -227,6 +255,17 @@ pub struct Next {
     pub actor: String,
     /// The command to run; `None` for a personal key's step, which is no command.
     pub command: Option<String>,
+    /// The exact words to exec (schema 4, FR-65): only for an account finding's typed step,
+    /// built from its command and never split from `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// How far this process reaches a 1Password session, for a `choose` (FR-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<crate::json::Reach>,
+    /// The candidates of a `choose` (`account_required`), as `opv account list --json` gives
+    /// them: the same builder (FR-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<serde_json::Value>,
     /// The finding's step as the text output shows it; never serialized.
     #[serde(skip)]
     pub step: String,
@@ -246,6 +285,10 @@ pub struct Receipt {
     pub config: ConfigRef,
     pub account: Option<AccountRef>,
     pub matrix: Vec<MatrixEntry>,
+    /// Each provision set's state per environment (#253/#262, §4.5); omitted when the
+    /// configuration declares no sets.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sets: Vec<SetReport>,
     /// Every target of every environment, in environment then name order (FR-56).
     pub targets: Vec<TargetReport>,
     pub findings: Vec<Finding>,
@@ -288,6 +331,33 @@ fn receipt_with(
     revision: Option<String>,
     gaps: &[(String, String, String)],
 ) -> Receipt {
+    receipt_with_sets(
+        inputs,
+        opv_version,
+        generated_at,
+        item_versions,
+        revision,
+        gaps,
+        &[],
+        &[],
+    )
+}
+
+/// [`receipt_with`] with each provision set's member value states (#253/#262, §4.5):
+/// `ready` classifies them and reports each set's state, with a blocking finding for a
+/// partial or inconsistent set. A set `classify` cannot judge is not reported, never
+/// misreported as absent.
+#[allow(clippy::too_many_arguments)]
+fn receipt_with_sets(
+    inputs: &Inputs<'_>,
+    opv_version: &str,
+    generated_at: &str,
+    item_versions: BTreeMap<String, u64>,
+    revision: Option<String>,
+    gaps: &[(String, String, String)],
+    sets: &[SetInput],
+    members: &[SetMember],
+) -> Receipt {
     let config = ConfigRef {
         source: inputs.config_source.clone(),
     };
@@ -297,22 +367,34 @@ fn receipt_with(
     });
     let matrix = build_matrix(inputs);
     let targets = build_targets(inputs);
+    let sets = set_reports(sets);
     let findings = build_findings(
         inputs,
         gaps,
         crate::host::Host::detect().agent_mode().is_some(),
+        &sets,
+        members,
     );
     let next = findings
         .iter()
-        .find(|f| f.blocking)
-        .or_else(|| findings.first())
-        .map(|f| {
-            let personal = is_personal_step(&f.code);
-            Next {
-                kind: personal.then_some(crate::json::NextKind::EnterValue),
-                actor: f.actor.clone(),
-                command: (!personal).then(|| f.prerequisite.clone()),
-                step: f.prerequisite.clone(),
+        .position(|f| f.blocking)
+        .or_else(|| (!findings.is_empty()).then_some(0))
+        .map(|at| {
+            let f = &findings[at];
+            match account_step(inputs, &findings, at) {
+                Some(step) => typed_next(f, step),
+                None => {
+                    let personal = is_personal_step(&f.code);
+                    Next {
+                        kind: personal.then_some(crate::json::NextKind::EnterValue),
+                        actor: f.actor.clone(),
+                        command: (!personal).then(|| f.prerequisite.clone()),
+                        argv: None,
+                        reach: None,
+                        choices: None,
+                        step: f.prerequisite.clone(),
+                    }
+                }
             }
         });
     let receipt_id = receipt_id(&config, &account, &matrix, &findings);
@@ -332,6 +414,7 @@ fn receipt_with(
         config,
         account,
         matrix,
+        sets,
         targets,
         findings,
         next,
@@ -339,6 +422,36 @@ fn receipt_with(
         item_versions,
         revision,
         environments,
+    }
+}
+
+/// The typed step of the finding at `at` when it is one of the account report's (FR-65):
+/// [`build_findings`] puts every account finding first, one for one and in order, so the
+/// finding at `at` is the account report's `at`-th when that one has the same code.
+fn account_step<'a>(
+    inputs: &'a Inputs<'_>,
+    findings: &[Finding],
+    at: usize,
+) -> Option<&'a crate::cause::Next> {
+    let f = inputs.account.findings.get(at)?;
+    (f.code == findings[at].code).then_some(f.step.as_ref())?
+}
+
+/// The receipt's `next` from an account finding's typed step: the same `kind`, `command`,
+/// `argv`, `reach` and `choices` as `opv account list --json` gives
+/// ([`super::account::typed_step`]), with the finding's actor.
+fn typed_next(f: &Finding, step: &crate::cause::Next) -> Next {
+    let v = super::account::typed_step(step);
+    Next {
+        kind: v["kind"]
+            .as_str()
+            .and_then(crate::json::NextKind::from_name),
+        actor: f.actor.clone(),
+        command: v["command"].as_str().map(str::to_string),
+        argv: serde_json::from_value(v["argv"].clone()).ok(),
+        reach: serde_json::from_value(v["reach"].clone()).ok(),
+        choices: v.get("choices").cloned(),
+        step: f.prerequisite.clone(),
     }
 }
 
@@ -653,6 +766,7 @@ fn row_findings(
                 product,
                 key: Some(r.key.clone()),
                 account: None,
+                set: None,
             },
             blocking: true,
             actor: "owner".into(),
@@ -673,6 +787,8 @@ fn build_findings(
     inputs: &Inputs<'_>,
     gaps: &[(String, String, String)],
     agent: bool,
+    sets: &[SetReport],
+    members: &[SetMember],
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     let selected = inputs
@@ -702,7 +818,7 @@ fn build_findings(
             ),
             actor: "owner".into(),
             effect: effect.into(),
-            prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),
+            prerequisite: f.step_text().unwrap_or_else(|| "opv account list".into()),
             verify: "opv account list --json".into(),
             message: None,
             act: None,
@@ -790,7 +906,16 @@ fn build_findings(
         let Ok(rows) = &env.rows else { continue };
         row_findings(&mut out, inputs, env, None, rows);
     }
+    fold_set_members(&mut out, sets, members);
     out.extend(inputs.retirement.iter().cloned());
+    // #253/#262: a provision set that is partial or inconsistent blocks readiness; the
+    // owner runs `opv provision <set> --env <env>`. A complete set has no finding, and an
+    // absent one is reported as absent without blocking (§4.5, §7).
+    for s in sets {
+        if let Some(finding) = set_finding(s) {
+            out.push(finding);
+        }
+    }
     // Settings health (#92): likely-wrong values, never blocking. The scope is the first
     // environment named (in configured order), where `opv open` takes the person to fix it.
     // Cross-tier warnings (the same value across environments, or under two keys) are for a
@@ -812,6 +937,7 @@ fn build_findings(
                 product,
                 key: Some(h.key.clone()),
                 account: None,
+                set: None,
             },
             // Advisory (#92): a person judges a likely-wrong value; readiness never fails
             // on one, so `opv ready`'s exit code never changes.
@@ -834,6 +960,269 @@ fn build_findings(
         out.push(environment_gap_finding(product, key, env));
     }
     out
+}
+
+/// A row finding's `opv open` step for a provision set member (#253/#262, §4.5, §7, D7): a
+/// member is written only by `opv provision`, never by hand. Where the set's own
+/// `keys_blocking` finding covers that environment, the member's finding is dropped (one
+/// finding per set, not one per member per target); otherwise (an absent set, or one
+/// `ready` could not judge) its step is the set's provision command. Findings for keys in
+/// no set are kept as they are.
+fn fold_set_members(out: &mut Vec<Finding>, sets: &[SetReport], members: &[SetMember]) {
+    let set_of = |f: &Finding| {
+        let env = f.scope.environment.as_deref()?;
+        let product = f.scope.product.as_deref()?;
+        let key = f.scope.key.as_deref()?;
+        members
+            .iter()
+            .find(|(_, e, p, k)| e == env && p == product && k == key)
+            .map(|(set, ..)| (set.clone(), env.to_string()))
+    };
+    let opens = |f: &Finding| {
+        matches!(
+            f.code.as_str(),
+            "key_missing" | "key_empty" | "key_failed_rule" | "key_wrong_kind"
+        ) && f.prerequisite.starts_with("opv open ")
+    };
+    out.retain_mut(|f| {
+        if !opens(f) {
+            return true;
+        }
+        let Some((set, env)) = set_of(f) else {
+            return true;
+        };
+        let covered = sets.iter().any(|s| {
+            s.set == set
+                && s.environment == env
+                && matches!(s.state, SetState::Partial | SetState::Inconsistent)
+        });
+        if covered {
+            return false;
+        }
+        f.prerequisite = format!("opv provision {set} --env {env}");
+        true
+    });
+}
+
+/// Each provision set member in each environment the set names (#253/#262, §4.5), scoped
+/// by `only` like the rest of the receipt.
+fn set_members(fleet: &crate::domain::Fleet, only: Option<&str>) -> Vec<SetMember> {
+    let mut out = Vec::new();
+    for (name, set) in &fleet.sets {
+        for environment in &set.environments {
+            if only.is_some_and(|o| o != environment) {
+                continue;
+            }
+            for member in set.members.keys() {
+                out.push((
+                    name.clone(),
+                    environment.clone(),
+                    member.product.clone(),
+                    member.key.clone(),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The `keys_blocking` finding for a provision set (#253/#262, §7): a set whose members are
+/// some-but-not-all set, or all set but one failing its rules. Blocking, naming the set and
+/// the owner's step: `opv provision <set> --env <env> --fill-missing` for a partial set,
+/// `--replace` for an inconsistent one (§7, D7). A complete or absent set produces none;
+/// the receipt's `sets` field carries the state either way.
+fn set_finding(s: &SetReport) -> Option<Finding> {
+    let flag = match s.state {
+        SetState::Partial => "--fill-missing",
+        SetState::Inconsistent => "--replace",
+        _ => return None,
+    };
+    Some(Finding {
+        code: "keys_blocking".into(),
+        scope: Scope {
+            environment: Some(s.environment.clone()),
+            set: Some(s.set.clone()),
+            ..Scope::default()
+        },
+        blocking: true,
+        actor: "owner".into(),
+        effect: "writes_1password".into(),
+        prerequisite: format!("opv provision {} --env {} {flag}", s.set, s.environment),
+        verify: VERIFY.into(),
+        message: None,
+        act: None,
+    })
+}
+
+/// Each provision set's state in each environment it names, from the caller's member value
+/// states (#253/#262, §4.5). A set `classify` cannot judge (an unreadable or not-stored
+/// member) is left out, never misreported as absent.
+fn set_reports(sets: &[SetInput]) -> Vec<SetReport> {
+    sets.iter()
+        .filter_map(|s| {
+            let state = classify(s.members.iter()).ok()?;
+            Some(SetReport {
+                set: s.name.clone(),
+                environment: s.environment.clone(),
+                state,
+            })
+        })
+        .collect()
+}
+
+/// Each provision set's members' value states in each environment it names, from the rows
+/// `ready` already read (#253/#262, §4.5): no new `op` call. A member with no row, or a
+/// state `classify` cannot judge, leaves the set unreported, never misreported as absent.
+/// A template member that is set is also judged against the stored members (#262, §4.5):
+/// a document not of its template's shape, or whose member leaves differ from the stored
+/// members, is malformed, so the set is inconsistent. `kept` is each environment's fields
+/// as read; the values are compared in memory and dropped here.
+fn set_inputs(
+    fleet: &crate::domain::Fleet,
+    envs: &[EnvInput],
+    only: Option<&str>,
+    placeholders: &BTreeSet<(String, String, String)>,
+    kept: &[(String, bool, Vec<crate::domain::plan::ItemField>)],
+) -> Vec<SetInput> {
+    let mut rows: BTreeMap<(&str, &str, &str), &Row> = BTreeMap::new();
+    for env in envs {
+        match &env.target {
+            Some(targets) => {
+                for t in targets {
+                    if let Ok(rs) = &t.rows {
+                        for r in rs {
+                            rows.insert((env.name.as_str(), r.product.as_str(), r.key.as_str()), r);
+                        }
+                    }
+                }
+            }
+            None => {
+                if let Ok(rs) = &env.rows {
+                    for r in rs {
+                        rows.insert((env.name.as_str(), r.product.as_str(), r.key.as_str()), r);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (name, set) in &fleet.sets {
+        for environment in &set.environments {
+            if only.is_some_and(|o| o != environment) {
+                continue;
+            }
+            let mut members = Vec::with_capacity(set.members.len());
+            let mut judged = true;
+            let stored = |k: &KeyRef| stored_value(kept, environment, k);
+            for (member, source) in &set.members {
+                let Some(row) = rows.get(&(
+                    environment.as_str(),
+                    member.product.as_str(),
+                    member.key.as_str(),
+                )) else {
+                    judged = false;
+                    break;
+                };
+                let placeholder = placeholders.contains(&(
+                    environment.clone(),
+                    member.product.clone(),
+                    member.key.clone(),
+                ));
+                match row_value_state(row, placeholder) {
+                    Some(ValueState::Set)
+                        if template_disagrees(source, stored(member), &stored) =>
+                    {
+                        members.push(ValueState::Malformed {
+                            rule: "template".to_string(),
+                        });
+                    }
+                    Some(state) => members.push(state),
+                    None => {
+                        judged = false;
+                        break;
+                    }
+                }
+            }
+            if judged {
+                out.push(SetInput {
+                    name: name.clone(),
+                    environment: environment.clone(),
+                    members,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The value `ready` read for member `k` in `environment`, if any (an empty field holds
+/// none).
+fn stored_value<'k>(
+    kept: &'k [(String, bool, Vec<crate::domain::plan::ItemField>)],
+    environment: &str,
+    k: &KeyRef,
+) -> Option<&'k crate::domain::SecretValue> {
+    kept.iter()
+        .filter(|(name, _, _)| name == environment)
+        .flat_map(|(_, _, fields)| fields)
+        .find(|f| f.section == k.product && f.label == k.key)
+        .map(|f| &f.value)
+        .filter(|v| !v.expose().trim().is_empty())
+}
+
+/// A template member's stored document does not [`template::fit`] the stored members
+/// (#262, §4.5). Not a template, or no document read: false (the row's state stands).
+fn template_disagrees<'v>(
+    source: &MemberSource,
+    document: Option<&crate::domain::SecretValue>,
+    stored: &impl Fn(&KeyRef) -> Option<&'v crate::domain::SecretValue>,
+) -> bool {
+    match (source, document) {
+        (MemberSource::Template(t), Some(doc)) => {
+            template::fit(t, doc.expose().as_bytes(), |k| stored(k)).is_err()
+        }
+        _ => false,
+    }
+}
+
+/// One row's value state as [`classify`] reads it (#253/#262, §4.5), the same judgement
+/// [`gate_keys`] makes. `None` when opv cannot judge the row (a shared or infrastructure
+/// row, or one the rule gate held back), so the set is left unreported.
+fn row_value_state(row: &Row, placeholder: bool) -> Option<ValueState> {
+    Some(match &row.state {
+        // Rules not committed are not evaluated, so the value state is `set` (design row
+        // `value-state`), exactly as `gate_keys` judges it.
+        KeyState::Ready | KeyState::RulesPendingReview => {
+            if placeholder {
+                ValueState::Placeholder
+            } else {
+                ValueState::Set
+            }
+        }
+        KeyState::Missing => ValueState::Absent,
+        // Empty takes precedence over placeholder, as `value_state::classify` orders it.
+        KeyState::RuleFailed("nonempty", _) => ValueState::Empty,
+        KeyState::RuleFailed(rule, _) => {
+            if placeholder {
+                ValueState::Placeholder
+            } else {
+                ValueState::Malformed {
+                    rule: (*rule).to_string(),
+                }
+            }
+        }
+        KeyState::WrongKind => {
+            if placeholder {
+                ValueState::Placeholder
+            } else {
+                ValueState::Malformed {
+                    rule: "kind".to_string(),
+                }
+            }
+        }
+        KeyState::Skipped | KeyState::SourceBlocked => return None,
+        KeyState::SuppliedAtSync => ValueState::Supplied,
+    })
 }
 
 /// The `environment_gap` finding (#179): a declared environment an explicit `environments`
@@ -1113,7 +1502,7 @@ pub fn run_at(
         Err(e) if e.code_str() == "account_not_registered" => {}
         other => other?,
     }
-    let account = super::account::gather(r, None);
+    let account = project_accounts(fleet, r);
     // FR-55: the environments' own order, then their keys; never a fixed list.
     let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
         .environments
@@ -1308,7 +1697,10 @@ pub fn run_at(
         gaps.retain(|(_, _, env)| env == o);
     }
     gaps.sort();
-    let doc = receipt_with(
+    // #253/#262: each provision set's member value states, from the rows read above (no
+    // new `op` call). Scoped by `only` like the rest of the receipt.
+    let sets = set_inputs(fleet, &envs, only, &placeholder_values, &kept);
+    let doc = receipt_with_sets(
         &Inputs {
             config_source: config_source.map(str::to_string),
             account: &account,
@@ -1326,6 +1718,8 @@ pub fn run_at(
         },
         revision,
         &gaps,
+        &sets,
+        &set_members(fleet, only),
     );
     // The receipt is plain data: failing to serialize it is opv's own bug.
     let bug = |_| {
@@ -1347,6 +1741,28 @@ pub fn run_at(
         writeln!(out, "saved: {}", path.display()).map_err(super::write_err)?;
     }
     Ok(())
+}
+
+/// The FR-49 account report as `ready` reads it: the account the environments agree on
+/// selects as the project's (FR-40). When every environment names its own account and they
+/// differ, none is chosen for the project, so there is no `account_required` (#257).
+fn project_accounts(fleet: &crate::domain::Fleet, r: &dyn crate::runner::CommandRunner) -> Report {
+    let named: std::collections::BTreeSet<Option<&str>> = fleet
+        .environments
+        .values()
+        .map(|e| e.account.as_deref())
+        .collect();
+    let agreed = match named.iter().collect::<Vec<_>>().as_slice() {
+        [Some(one)] => Some(*one),
+        _ => None,
+    };
+    let report = super::account::gather_with(r, None, agreed);
+    let each_names_own = !named.is_empty() && !named.contains(&None);
+    if each_names_own && agreed.is_none() {
+        report.without("account_required")
+    } else {
+        report
+    }
 }
 
 /// The git commit of the repository, `git rev-parse HEAD` through the runner; `None`

@@ -80,6 +80,7 @@ fn op_signed_out() -> Error {
         system: System::OnePassword,
         account: None,
         state: SessionState::SignedOut,
+        selected_by: None,
     }
     .into()
 }
@@ -127,6 +128,7 @@ fn account_report() -> account::Report {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -193,6 +195,7 @@ fn signed_out_report() -> account::Report {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -208,6 +211,7 @@ fn unavailable_report() -> account::Report {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -1468,6 +1472,7 @@ fn a_shared_sign_in_address_does_not_block_readiness() {
         manifest: None,
         platform: crate::host::Platform::Wsl,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     });
     let r = receipt(&inputs(&account, vec![]), "0.8.0");
     assert!(
@@ -2011,4 +2016,466 @@ fn ready_text_groups_environment_gaps_into_one_count_line() {
         &three_environment_gaps(),
     );
     assert!(text(&r).starts_with("ready: 0 blocking · 3 findings · receipt rcpt-"));
+}
+
+// --- #257, FR-65: the account choice is typed, and the same as `account list`'s ---------
+
+fn second() -> Account {
+    account(
+        "BBBB0000000000000000000002",
+        "other@example.com",
+        "my.1password.com",
+        "my",
+        "USER0000000000000000000002",
+    )
+}
+
+/// Two accounts, both signed out, none selected for the project (#257).
+fn unselected_report() -> account::Report {
+    account::report(&account::Inputs {
+        discovery: Discovery::Listed(vec![owner(), second()]),
+        signed_in: &|_| Some(false),
+        flag: None,
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: Platform::Linux,
+        session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
+    })
+}
+
+/// The receipt's `next` as `opv ready --json` frames it (schema 4).
+fn framed_next(r: &Receipt) -> serde_json::Value {
+    let body = serde_json::to_vec(r).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&crate::json::finish(&body, Ok(()), false)).unwrap();
+    doc["next"].clone()
+}
+
+#[test]
+fn several_unselected_accounts_block_readiness() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "account_required" && f.blocking)
+    );
+}
+
+/// #257: `next.kind` is `choose`, never `none` and never `opv account list` again.
+#[test]
+fn several_unselected_accounts_next_is_choose() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(framed_next(&r)["kind"], "choose");
+}
+
+/// FR-65: `ready --json` gives the same choices as `account list --json`.
+#[test]
+fn ready_choices_are_account_lists_choices() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(
+        framed_next(&r)["choices"],
+        report.next.as_ref().unwrap()["choices"]
+    );
+}
+
+#[test]
+fn several_unselected_accounts_step_offers_each_account() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "pick one: opv account use AAAA0000000000000000000001; \
+         opv account use BBBB0000000000000000000002"
+    );
+}
+
+/// E9: the selected account signed out is the person's sign-in, with its exec argv.
+#[test]
+fn selected_signed_out_next_is_authorize() {
+    let report = signed_out_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(framed_next(&r)["kind"], "authorize");
+}
+
+#[test]
+fn selected_signed_out_next_has_its_argv() {
+    let report = signed_out_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(
+        framed_next(&r)["argv"],
+        serde_json::json!(["opv", "login", "--account", "AAAA0000000000000000000001"])
+    );
+}
+
+// #253/#262: provision set states in `ready` -------------------------------------------
+
+/// A value passing `hex_bytes = 32`: 64 hex digits, recognisable so a leak is visible.
+const SET_HEX32: &str = "deadbeefcafef00ddeadbeefcafef00ddeadbeefcafef00ddeadbeefcafef00d";
+
+/// A value failing `hex_bytes = 32`: 64 characters that are not hex.
+const SET_NOT_HEX: &str = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+
+/// One CONCEALED field `label` in section `app`.
+fn concealed(label: &str, value: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("f-{label}"), "type": "CONCEALED",
+        "section": {"id": "app", "label": "app"},
+        "label": label, "value": value
+    })
+}
+
+/// `opv ready --json` on a run-only `dev` with one `[sets.grant]` whose two members are
+/// `app/ALPHA` and `app/BETA`, each 32 hex bytes by rule. `fields` is the item's fields.
+fn ready_on_a_set(fields: serde_json::Value) -> serde_json::Value {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let item = serde_json::json!({
+        "title": "t", "category": "SECURE_NOTE",
+        "sections": [{"id": "app", "label": "app"}],
+        "fields": fields,
+    });
+    let id = op.insert("vdev0000000000000000000001", item);
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         [products.app.keys.ALPHA]\nkind = \"secret\"\nrules = {{ hex_bytes = 32 }}\n\
+         [products.app.keys.BETA]\nkind = \"secret\"\nrules = {{ hex_bytes = 32 }}\n\
+         [sets.grant]\nenvironments = [\"dev\"]\n\
+         members = {{ \"app/ALPHA\" = {{ generate = \"rules\" }}, \
+         \"app/BETA\" = {{ generate = \"rules\" }} }}\n"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, true, None, false, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// A receipt's provision set findings: the blocking `keys_blocking` finding scoped to the
+/// set `grant`.
+fn set_findings(doc: &serde_json::Value) -> Vec<&serde_json::Value> {
+    doc["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["scope"]["set"] == "grant")
+        .collect()
+}
+
+#[test]
+fn a_complete_provision_set_is_reported_complete() {
+    let doc = ready_on_a_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_HEX32),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "complete");
+}
+
+#[test]
+fn a_complete_provision_set_produces_no_set_finding() {
+    let doc = ready_on_a_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_HEX32),
+    ]));
+    assert!(set_findings(&doc).is_empty());
+}
+
+#[test]
+fn a_partial_provision_set_is_reported_partial() {
+    let doc = ready_on_a_set(serde_json::json!([concealed("ALPHA", SET_HEX32)]));
+    assert_eq!(doc["sets"][0]["state"], "partial");
+}
+
+#[test]
+fn a_partial_provision_set_produces_one_blocking_finding() {
+    let doc = ready_on_a_set(serde_json::json!([concealed("ALPHA", SET_HEX32)]));
+    assert_eq!(
+        set_findings(&doc)
+            .iter()
+            .filter(|f| f["blocking"] == true)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_partial_provision_set_finding_names_the_set() {
+    let doc = ready_on_a_set(serde_json::json!([concealed("ALPHA", SET_HEX32)]));
+    assert_eq!(set_findings(&doc)[0]["scope"]["set"], "grant");
+}
+
+#[test]
+fn a_partial_provision_set_finding_is_keys_blocking() {
+    let doc = ready_on_a_set(serde_json::json!([concealed("ALPHA", SET_HEX32)]));
+    assert_eq!(set_findings(&doc)[0]["code"], "keys_blocking");
+}
+
+#[test]
+fn a_partial_provision_set_finding_names_the_provision_command() {
+    let doc = ready_on_a_set(serde_json::json!([concealed("ALPHA", SET_HEX32)]));
+    assert_eq!(
+        set_findings(&doc)[0]["prerequisite"],
+        "opv provision grant --env dev --fill-missing"
+    );
+}
+
+/// A `prod` Fly target holding set `grant` (`app/ALPHA` set, `app/BETA` as `beta`) in
+/// `state`, and `app/PLAIN` (in no set) missing when `plain`.
+fn receipt_with_a_set_on_a_target(
+    report: &account::Report,
+    beta: KeyState,
+    state: ValueState,
+    plain: bool,
+) -> Receipt {
+    let mut rows = vec![
+        row("app", "ALPHA", KeyState::Ready, TargetState::Present),
+        row("app", "BETA", beta, TargetState::Absent),
+    ];
+    if plain {
+        rows.push(row("app", "PLAIN", KeyState::Missing, TargetState::Absent));
+    }
+    let envs = vec![env("prod", Some("Fly"), rows)];
+    let sets = [SetInput {
+        name: "grant".into(),
+        environment: "prod".into(),
+        members: vec![ValueState::Set, state],
+    }];
+    let members: Vec<SetMember> = ["ALPHA", "BETA"]
+        .iter()
+        .map(|k| ("grant".into(), "prod".into(), "app".into(), (*k).into()))
+        .collect();
+    receipt_with_sets(
+        &inputs(report, envs),
+        "0.18.0",
+        "",
+        BTreeMap::new(),
+        None,
+        &[],
+        &sets,
+        &members,
+    )
+}
+
+/// A `prod` Fly target where set `grant` is partial (`app/BETA` is missing), with
+/// `app/PLAIN` (in no set) missing when `plain`.
+fn receipt_with_a_partial_set_on_a_target(report: &account::Report, plain: bool) -> Receipt {
+    receipt_with_a_set_on_a_target(report, KeyState::Missing, ValueState::Absent, plain)
+}
+
+#[test]
+fn a_partial_provision_sets_ready_next_fills_the_missing_members() {
+    let report = account_report();
+    let r = receipt_with_a_partial_set_on_a_target(&report, false);
+    assert_eq!(
+        r.next.unwrap().step,
+        "opv provision grant --env prod --fill-missing"
+    );
+}
+
+#[test]
+fn an_inconsistent_provision_sets_ready_next_replaces_the_set() {
+    let report = account_report();
+    let r = receipt_with_a_set_on_a_target(
+        &report,
+        KeyState::RuleFailed("hex_bytes", Reason::Fixed("not hex")),
+        ValueState::Malformed {
+            rule: "hex_bytes".into(),
+        },
+        false,
+    );
+    assert_eq!(
+        r.next.unwrap().step,
+        "opv provision grant --env prod --replace"
+    );
+}
+
+#[test]
+fn a_set_member_missing_on_a_target_yields_no_opv_open_step() {
+    let report = account_report();
+    let r = receipt_with_a_partial_set_on_a_target(&report, true);
+    assert!(
+        !r.findings
+            .iter()
+            .any(|f| f.prerequisite.starts_with("opv open app/BETA"))
+    );
+}
+
+#[test]
+fn a_missing_key_in_no_set_still_yields_opv_open() {
+    let report = account_report();
+    let r = receipt_with_a_partial_set_on_a_target(&report, true);
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.prerequisite == "opv open app/PLAIN --env prod")
+    );
+}
+
+#[test]
+fn an_inconsistent_provision_set_is_reported_inconsistent() {
+    let doc = ready_on_a_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_NOT_HEX),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "inconsistent");
+}
+
+#[test]
+fn an_inconsistent_provision_set_produces_one_blocking_finding() {
+    let doc = ready_on_a_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_NOT_HEX),
+    ]));
+    assert_eq!(
+        set_findings(&doc)
+            .iter()
+            .filter(|f| f["blocking"] == true)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn an_absent_provision_set_is_reported_absent() {
+    let doc = ready_on_a_set(serde_json::json!([]));
+    assert_eq!(doc["sets"][0]["state"], "absent");
+}
+
+#[test]
+fn an_absent_provision_set_produces_no_set_finding() {
+    let doc = ready_on_a_set(serde_json::json!([]));
+    assert!(set_findings(&doc).is_empty());
+}
+
+#[test]
+fn a_fleet_without_sets_omits_the_sets_field() {
+    let report = account_report();
+    let r = receipt(
+        &inputs(&report, vec![env("dev", None, Vec::new())]),
+        "0.18.0",
+    );
+    assert!(serde_json::to_value(&r).unwrap().get("sets").is_none());
+}
+
+#[test]
+fn ready_never_prints_a_set_member_value() {
+    let doc = ready_on_a_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_NOT_HEX),
+    ]));
+    assert!(!doc.to_string().contains("deadbeef"));
+}
+
+// #262: a set with a template member is judged with the stored members ----------------
+
+/// `opv ready --json` on a run-only `dev` with one `[sets.bundle]`: `app/ALPHA` (32 hex
+/// bytes by rule), `app/BETA` from the producer `issuer`, and `app/BUNDLE`, the template
+/// `{ v = 1, alpha = "${app/ALPHA}", beta = "${app/BETA}", id = "${issuer.site_id}" }`.
+fn ready_on_a_template_set(fields: serde_json::Value) -> serde_json::Value {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let item = serde_json::json!({
+        "title": "t", "category": "SECURE_NOTE",
+        "sections": [{"id": "app", "label": "app"}],
+        "fields": fields,
+    });
+    let id = op.insert("vdev0000000000000000000001", item);
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         [products.app.keys.ALPHA]\nkind = \"secret\"\nrules = {{ hex_bytes = 32 }}\n\
+         [products.app.keys.BETA]\nkind = \"secret\"\n\
+         [products.app.keys.BUNDLE]\nkind = \"secret\"\n\
+         [producers.issuer]\ncommand = [\"python3\", \"-c\", \"pass\"]\n\
+         outputs = [\"site_id\", \"key\"]\ntimeout = \"1m\"\n\
+         [sets.bundle]\nenvironments = [\"dev\"]\n\
+         [sets.bundle.members]\n\
+         \"app/ALPHA\" = {{ generate = \"rules\" }}\n\
+         \"app/BETA\" = {{ producer = \"issuer\", output = \"key\" }}\n\
+         [sets.bundle.members.\"app/BUNDLE\".template]\n\
+         v = 1\nalpha = \"${{app/ALPHA}}\"\nbeta = \"${{app/BETA}}\"\nid = \"${{issuer.site_id}}\"\n"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, true, None, false, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// A value `app/BETA` may hold.
+const SET_BETA: &str = "beta-SITEKEY-0123456789";
+
+/// The bundle as stored, holding `alpha` for `app/ALPHA` and `beta` for `app/BETA`.
+fn bundle_of(alpha: &str, beta: &str) -> String {
+    serde_json::json!({"v": 1, "alpha": alpha, "beta": beta, "id": "site-0001"}).to_string()
+}
+
+#[test]
+fn a_template_set_whose_bundle_fits_its_members_is_complete() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, SET_BETA)),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "complete");
+}
+
+#[test]
+fn a_bundle_disagreeing_with_a_member_makes_the_set_inconsistent() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, "beta-OTHERKEY-9876543210")),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "inconsistent");
+}
+
+#[test]
+fn a_bundle_disagreeing_with_a_member_is_one_blocking_finding() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, "beta-OTHERKEY-9876543210")),
+    ]));
+    assert_eq!(
+        doc["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["scope"]["set"] == "bundle" && f["blocking"] == true)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_bundle_not_of_its_templates_shape_makes_the_set_inconsistent() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", r#"{"v":2}"#),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "inconsistent");
+}
+
+#[test]
+fn a_bundle_whose_member_is_missing_leaves_the_set_partial() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, SET_BETA)),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "partial");
+}
+
+#[test]
+fn ready_never_prints_a_bundle_leaf() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, "beta-OTHERKEY-9876543210")),
+    ]));
+    assert!(!doc.to_string().contains("SITEKEY") && !doc.to_string().contains("OTHERKEY"));
 }

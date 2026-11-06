@@ -1,0 +1,268 @@
+# provision_sets: a matched set through the real binary
+
+## dry run text exit: 0
+## dry run text stdout
+opv provision sites --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 9 members set)
+  make    web/AGENCY_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/AGENCY_SITE_KEY   producer site-issuer → agency_site_key
+  make    web/OWNER_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/OWNER_SITE_KEY   producer site-issuer → owner_site_key
+  make    web/PLATFORM_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  make    web/SITES_GATEWAY_KEY   generate hex_bytes 32
+  make    web/SITE_SECRETS   template of ${site-issuer.platform_site_id}, ${web/PLATFORM_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}, ${site-issuer.agency_site_id}, ${web/AGENCY_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}, ${site-issuer.owner_site_id}, ${web/OWNER_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+  producer site-issuer: opv-e2e-producer producer/sites.json
+           sha256 4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91   timeout 1m   inputs none
+  budget  1m producer + 4m commit of <left> left
+  compare no other environment declared
+  write   one edit of one item; nothing else in the item changes
+
+## dry run text stderr
+using <SCENARIO>/project/secrets.toml
+
+## dry run --json exit: 0
+## dry run --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","result":"dry_run","plan":{"set":"sites","env":"prod","item":{"boundary":"web","vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version":1},"state":"absent","replace":false,"members":[{"key":"web/AGENCY_IDENTITY_SECRET","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"},{"key":"web/AGENCY_SITE_KEY","made_by":{"maker":"producer","producer":"site-issuer","output":"agency_site_key"},"state":"absent"},{"key":"web/OWNER_IDENTITY_SECRET","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"},{"key":"web/OWNER_SITE_KEY","made_by":{"maker":"producer","producer":"site-issuer","output":"owner_site_key"},"state":"absent"},{"key":"web/PLATFORM_IDENTITY_SECRET","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"},{"key":"web/PLATFORM_SITE_KEY","made_by":{"maker":"producer","producer":"site-issuer","output":"platform_site_key"},"state":"absent"},{"key":"web/SITES_GATEWAY_KEY","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"},{"key":"web/SITE_SECRETS","made_by":{"maker":"template","references":["${site-issuer.platform_site_id}","${web/PLATFORM_IDENTITY_SECRET}","${web/SITES_GATEWAY_KEY}","${site-issuer.agency_site_id}","${web/AGENCY_IDENTITY_SECRET}","${web/SITES_GATEWAY_KEY}","${site-issuer.owner_site_id}","${web/OWNER_IDENTITY_SECRET}","${web/SITES_GATEWAY_KEY}"]},"state":"absent"},{"key":"web/USER_HASH_KEY","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"}],"producers":[{"name":"site-issuer","command":["opv-e2e-producer","producer/sites.json"],"sha256":"4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91","timeout_seconds":60,"inputs":[],"open_url_hosts":[]}],"budget":{"producers_seconds":60,"commit_seconds":240,"left_seconds":"<left>"},"compare":[]},"next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod"},"do":null}
+
+## dry run --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## written text exit: 0
+## written text stdout
+provisioned set sites in environment prod: item at version 2, verified
+Next: opv ready prod
+
+## written text stderr
+using <SCENARIO>/project/secrets.toml
+opv provision sites --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 9 members set)
+  make    web/AGENCY_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/AGENCY_SITE_KEY   producer site-issuer → agency_site_key
+  make    web/OWNER_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/OWNER_SITE_KEY   producer site-issuer → owner_site_key
+  make    web/PLATFORM_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  make    web/SITES_GATEWAY_KEY   generate hex_bytes 32
+  make    web/SITE_SECRETS   template of ${site-issuer.platform_site_id}, ${web/PLATFORM_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}, ${site-issuer.agency_site_id}, ${web/AGENCY_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}, ${site-issuer.owner_site_id}, ${web/OWNER_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+  producer site-issuer: opv-e2e-producer producer/sites.json
+           sha256 4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91   timeout 1m   inputs none
+  budget  1m producer + 4m commit of <left> left
+  compare no other environment declared
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision sites in it: running producer site-issuer
+
+## written --json exit: 0
+## written --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","set":"sites","env":"prod","mode":"absent","result":"written","concurrent_edit":false,"item":{"vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version_before":1,"version_after":2,"verified_at":2},"members":[{"key":"web/AGENCY_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/AGENCY_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/OWNER_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/OWNER_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/PLATFORM_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/PLATFORM_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/SITES_GATEWAY_KEY","made_by":"generate","state":"set"},{"key":"web/SITE_SECRETS","made_by":"template","state":"set"},{"key":"web/USER_HASH_KEY","made_by":"generate","state":"set"}],"producers":[{"name":"site-issuer","sha256":"4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91","exit":0}],"compared_environments":[],"not_compared":[],"next":{"kind":"run","actor":"assistant","command":"opv ready prod"},"do":null}
+
+## written --json stderr
+using <SCENARIO>/project/secrets.toml
+opv provision sites --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 9 members set)
+  make    web/AGENCY_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/AGENCY_SITE_KEY   producer site-issuer → agency_site_key
+  make    web/OWNER_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/OWNER_SITE_KEY   producer site-issuer → owner_site_key
+  make    web/PLATFORM_IDENTITY_SECRET   generate hex_bytes 32
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  make    web/SITES_GATEWAY_KEY   generate hex_bytes 32
+  make    web/SITE_SECRETS   template of ${site-issuer.platform_site_id}, ${web/PLATFORM_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}, ${site-issuer.agency_site_id}, ${web/AGENCY_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}, ${site-issuer.owner_site_id}, ${web/OWNER_IDENTITY_SECRET}, ${web/SITES_GATEWAY_KEY}
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+  producer site-issuer: opv-e2e-producer producer/sites.json
+           sha256 4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91   timeout 1m   inputs none
+  budget  1m producer + 4m commit of <left> left
+  compare no other environment declared
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision sites in it: running producer site-issuer
+
+## second run text exit: 0
+## second run text stdout
+set sites in environment prod is already complete; nothing made or written
+Next: opv ready prod
+
+## second run text stderr
+using <SCENARIO>/project/secrets.toml
+
+## second run --json exit: 0
+## second run --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","set":"sites","env":"prod","mode":"complete","result":"unchanged","concurrent_edit":false,"item":{"vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version_before":2,"version_after":null,"verified_at":null},"members":[{"key":"web/AGENCY_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/AGENCY_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/OWNER_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/OWNER_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/PLATFORM_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/PLATFORM_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/SITES_GATEWAY_KEY","made_by":"generate","state":"set"},{"key":"web/SITE_SECRETS","made_by":"template","state":"set"},{"key":"web/USER_HASH_KEY","made_by":"generate","state":"set"}],"producers":[],"compared_environments":[],"not_compared":[],"next":{"kind":"run","actor":"assistant","command":"opv ready prod"},"do":null}
+
+## second run --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## partial ready text exit: 0
+## partial ready text stdout
+ready: 1 blocking · 3 findings · receipt rcpt-<id>
+PRODUCT  Production
+shared   n/a
+web      14/17 · 2 findings
+Targets:
+  prod fly Fly · app e2e-app-prod ready
+  prod gh GitHub · repos e2e-org/e2e-app environment production ready
+  prod k8s Kubernetes · context e2e-cluster namespace e2e-prod deployment e2e-app ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [owner] keys_blocking prod → opv provision sites --env prod --fill-missing
+  [owner] environment_gap prod web/PERSONAL_LLM_KEY → opv propose key web/PERSONAL_LLM_KEY --env prod
+Next (owner): opv provision sites --env prod --fill-missing
+
+## partial ready text stderr
+using <SCENARIO>/project/secrets.toml
+
+## partial ready --json exit: 0
+## partial ready --json stdout
+{"schema_version":4,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"prod","title":"Production","product":"shared","target":"Fly","target_name":"fly","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"Fly","target_name":"fly","keys":17,"saved":14,"findings":2,"delivered":true},{"environment":"prod","title":"Production","product":"shared","target":"GitHub","target_name":"gh","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"GitHub","target_name":"gh","keys":17,"saved":14,"findings":2,"delivered":true},{"environment":"prod","title":"Production","product":"shared","target":"Kubernetes","target_name":"k8s","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"Kubernetes","target_name":"k8s","keys":17,"saved":14,"findings":2,"delivered":true}],"sets":[{"set":"sites","environment":"prod","state":"partial"}],"targets":[{"environment":"prod","name":"fly","provider":"Fly","locator":"app e2e-app-prod","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"k8s","provider":"Kubernetes","locator":"context e2e-cluster namespace e2e-prod deployment e2e-app","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"keys_blocking","scope":{"environment":"prod","set":"sites"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv provision sites --env prod --fill-missing","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"prod","product":"web","key":"PERSONAL_LLM_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key web/PERSONAL_LLM_KEY --env prod","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --fill-missing"},"do":null}
+
+## partial ready --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## partial refused text exit: 6
+## partial refused text stdout
+
+## partial refused text stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv does not provision set sites in environment prod: the set is partial (web/PLATFORM_SITE_KEY, web/USER_HASH_KEY without a value), so it is completed only with --fill-missing
+Do: make only the missing members, keeping every present one: opv provision sites --env prod --fill-missing
+Next: opv provision sites --env prod --fill-missing
+
+## partial refused --json exit: 6
+## partial refused --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --fill-missing"},"do":"make only the missing members, keeping every present one: opv provision sites --env prod --fill-missing","error":{"code":"policy_refused","category":"policy","message":"opv does not provision set sites in environment prod: the set is partial (web/PLATFORM_SITE_KEY, web/USER_HASH_KEY without a value), so it is completed only with --fill-missing","subject":{"guard":{"guard":"provision_refused","set":"sites","env":"prod","reason":{"reason":"partial","missing":["web/PLATFORM_SITE_KEY","web/USER_HASH_KEY"]}}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"make only the missing members, keeping every present one: opv provision sites --env prod --fill-missing","next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --fill-missing"}}}
+
+## partial refused --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv does not provision set sites in environment prod: the set is partial (web/PLATFORM_SITE_KEY, web/USER_HASH_KEY without a value), so it is completed only with --fill-missing
+Do: make only the missing members, keeping every present one: opv provision sites --env prod --fill-missing
+Next: opv provision sites --env prod --fill-missing
+
+## partial dry run text exit: 0
+## partial dry run text stdout
+opv provision sites --env prod --fill-missing
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 2)
+  state   partial (7 of 9 members set)
+  keep    web/AGENCY_IDENTITY_SECRET
+  keep    web/AGENCY_SITE_KEY
+  keep    web/OWNER_IDENTITY_SECRET
+  keep    web/OWNER_SITE_KEY
+  keep    web/PLATFORM_IDENTITY_SECRET
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  keep    web/SITES_GATEWAY_KEY
+  keep    web/SITE_SECRETS
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+  producer site-issuer: opv-e2e-producer producer/sites.json
+           sha256 4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91   timeout 1m   inputs none
+  budget  1m producer + 4m commit of <left> left
+  compare no other environment declared
+  write   one edit of one item; nothing else in the item changes
+
+## partial dry run text stderr
+using <SCENARIO>/project/secrets.toml
+
+## partial dry run --json exit: 0
+## partial dry run --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","result":"dry_run","plan":{"set":"sites","env":"prod","item":{"boundary":"web","vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version":2},"state":"partial","replace":false,"fill_missing":true,"members":[{"key":"web/AGENCY_IDENTITY_SECRET","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"set"},{"key":"web/AGENCY_SITE_KEY","made_by":{"maker":"producer","producer":"site-issuer","output":"agency_site_key"},"state":"set"},{"key":"web/OWNER_IDENTITY_SECRET","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"set"},{"key":"web/OWNER_SITE_KEY","made_by":{"maker":"producer","producer":"site-issuer","output":"owner_site_key"},"state":"set"},{"key":"web/PLATFORM_IDENTITY_SECRET","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"set"},{"key":"web/PLATFORM_SITE_KEY","made_by":{"maker":"producer","producer":"site-issuer","output":"platform_site_key"},"state":"absent"},{"key":"web/SITES_GATEWAY_KEY","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"set"},{"key":"web/SITE_SECRETS","made_by":{"maker":"template","references":["${site-issuer.platform_site_id}","${web/PLATFORM_IDENTITY_SECRET}","${web/SITES_GATEWAY_KEY}","${site-issuer.agency_site_id}","${web/AGENCY_IDENTITY_SECRET}","${web/SITES_GATEWAY_KEY}","${site-issuer.owner_site_id}","${web/OWNER_IDENTITY_SECRET}","${web/SITES_GATEWAY_KEY}"]},"state":"set"},{"key":"web/USER_HASH_KEY","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"}],"producers":[{"name":"site-issuer","command":["opv-e2e-producer","producer/sites.json"],"sha256":"4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91","timeout_seconds":60,"inputs":[],"open_url_hosts":[]}],"budget":{"producers_seconds":60,"commit_seconds":240,"left_seconds":"<left>"},"compare":[]},"next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --fill-missing"},"do":null}
+
+## partial dry run --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## fill missing text exit: 0
+## fill missing text stdout
+provisioned set sites in environment prod: item at version 3, verified
+Next: opv ready prod
+
+## fill missing text stderr
+using <SCENARIO>/project/secrets.toml
+opv provision sites --env prod --fill-missing
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 2)
+  state   partial (7 of 9 members set)
+  keep    web/AGENCY_IDENTITY_SECRET
+  keep    web/AGENCY_SITE_KEY
+  keep    web/OWNER_IDENTITY_SECRET
+  keep    web/OWNER_SITE_KEY
+  keep    web/PLATFORM_IDENTITY_SECRET
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  keep    web/SITES_GATEWAY_KEY
+  keep    web/SITE_SECRETS
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+  producer site-issuer: opv-e2e-producer producer/sites.json
+           sha256 4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91   timeout 1m   inputs none
+  budget  1m producer + 4m commit of <left> left
+  compare no other environment declared
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision sites in it: running producer site-issuer
+
+## fill missing --json exit: 0
+## fill missing --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","set":"sites","env":"prod","mode":"partial","result":"written","concurrent_edit":false,"item":{"vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version_before":2,"version_after":3,"verified_at":3},"members":[{"key":"web/AGENCY_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/AGENCY_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/OWNER_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/OWNER_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/PLATFORM_IDENTITY_SECRET","made_by":"generate","state":"set"},{"key":"web/PLATFORM_SITE_KEY","made_by":"producer","state":"set"},{"key":"web/SITES_GATEWAY_KEY","made_by":"generate","state":"set"},{"key":"web/SITE_SECRETS","made_by":"template","state":"set"},{"key":"web/USER_HASH_KEY","made_by":"generate","state":"set"}],"producers":[{"name":"site-issuer","sha256":"4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91","exit":0}],"compared_environments":[],"not_compared":[],"next":{"kind":"run","actor":"assistant","command":"opv ready prod"},"do":null}
+
+## fill missing --json stderr
+using <SCENARIO>/project/secrets.toml
+opv provision sites --env prod --fill-missing
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 2)
+  state   partial (7 of 9 members set)
+  keep    web/AGENCY_IDENTITY_SECRET
+  keep    web/AGENCY_SITE_KEY
+  keep    web/OWNER_IDENTITY_SECRET
+  keep    web/OWNER_SITE_KEY
+  keep    web/PLATFORM_IDENTITY_SECRET
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  keep    web/SITES_GATEWAY_KEY
+  keep    web/SITE_SECRETS
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+  producer site-issuer: opv-e2e-producer producer/sites.json
+           sha256 4dcd120f500a01fde59b627642f4389dfa4bdce9032c86ea17d7405ddc45af91   timeout 1m   inputs none
+  budget  1m producer + 4m commit of <left> left
+  compare no other environment declared
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision sites in it: running producer site-issuer
+
+## inconsistent ready text exit: 0
+## inconsistent ready text stdout
+ready: 1 blocking · 3 findings · receipt rcpt-<id>
+PRODUCT  Production
+shared   n/a
+web      16/17
+Targets:
+  prod fly Fly · app e2e-app-prod ready
+  prod gh GitHub · repos e2e-org/e2e-app environment production ready
+  prod k8s Kubernetes · context e2e-cluster namespace e2e-prod deployment e2e-app ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [owner] keys_blocking prod → opv provision sites --env prod --replace
+  [owner] environment_gap prod web/PERSONAL_LLM_KEY → opv propose key web/PERSONAL_LLM_KEY --env prod
+Next (owner): opv provision sites --env prod --replace
+
+## inconsistent ready text stderr
+using <SCENARIO>/project/secrets.toml
+
+## inconsistent ready --json exit: 0
+## inconsistent ready --json stdout
+{"schema_version":4,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"prod","title":"Production","product":"shared","target":"Fly","target_name":"fly","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"Fly","target_name":"fly","keys":17,"saved":16,"findings":0,"delivered":true},{"environment":"prod","title":"Production","product":"shared","target":"GitHub","target_name":"gh","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"GitHub","target_name":"gh","keys":17,"saved":16,"findings":0,"delivered":true},{"environment":"prod","title":"Production","product":"shared","target":"Kubernetes","target_name":"k8s","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"Kubernetes","target_name":"k8s","keys":17,"saved":16,"findings":0,"delivered":true}],"sets":[{"set":"sites","environment":"prod","state":"inconsistent"}],"targets":[{"environment":"prod","name":"fly","provider":"Fly","locator":"app e2e-app-prod","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"k8s","provider":"Kubernetes","locator":"context e2e-cluster namespace e2e-prod deployment e2e-app","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"keys_blocking","scope":{"environment":"prod","set":"sites"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv provision sites --env prod --replace","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"prod","product":"web","key":"PERSONAL_LLM_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key web/PERSONAL_LLM_KEY --env prod","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --replace"},"do":null}
+
+## inconsistent ready --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## inconsistent refused text exit: 6
+## inconsistent refused text stdout
+
+## inconsistent refused text stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv does not provision set sites in environment prod: every member holds a value, but web/SITE_SECRETS fail their rules
+Do: re-make the whole set: opv provision sites --env prod --replace (the replaced values are kept in the item's opv · kept section)
+Next: opv provision sites --env prod --replace
+
+## inconsistent refused --json exit: 6
+## inconsistent refused --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --replace"},"do":"re-make the whole set: opv provision sites --env prod --replace (the replaced values are kept in the item's opv · kept section)","error":{"code":"policy_refused","category":"policy","message":"opv does not provision set sites in environment prod: every member holds a value, but web/SITE_SECRETS fail their rules","subject":{"guard":{"guard":"provision_refused","set":"sites","env":"prod","reason":{"reason":"inconsistent","members":["web/SITE_SECRETS"]}}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"re-make the whole set: opv provision sites --env prod --replace (the replaced values are kept in the item's opv · kept section)","next":{"kind":"apply","actor":"person","command":"opv provision sites --env prod --replace"}}}
+
+## inconsistent refused --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv does not provision set sites in environment prod: every member holds a value, but web/SITE_SECRETS fail their rules
+Do: re-make the whole set: opv provision sites --env prod --replace (the replaced values are kept in the item's opv · kept section)
+Next: opv provision sites --env prod --replace

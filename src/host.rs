@@ -556,14 +556,16 @@ fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
         System::Azure => azure::diagnose::diagnose(seen, "", &ctx),
         System::Kubernetes => kubernetes::diagnose::diagnose(seen, "", &ctx),
         System::GitHub => github::diagnose::diagnose(seen, "", &ctx),
-        system @ (System::Ssh | System::RemoteOpv | System::Https | System::Docker) => {
-            Cause::Unavailable {
-                system,
-                why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-                attempts: seen.attempts(),
-                seen,
-            }
-        }
+        system @ (System::Ssh
+        | System::RemoteOpv
+        | System::Https
+        | System::Docker
+        | System::Sealed) => Cause::Unavailable {
+            system,
+            why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
+            attempts: seen.attempts(),
+            seen,
+        },
     };
     // Only called once every read attempt went unanswered: the count is the one the runner
     // observed (B), never a constant.
@@ -1244,12 +1246,95 @@ impl fmt::Display for Platform {
     }
 }
 
+/// Credentials that would let this process write 1Password without the person's own
+/// authorization in the 1Password app (#133): an `op` session token, a service account or
+/// Connect. The first one set, by name.
+pub(crate) fn credential_in_environment(
+    vars: impl Iterator<Item = (String, String)>,
+) -> Option<String> {
+    vars.filter(|(_, v)| !v.is_empty())
+        .map(|(k, _)| k)
+        .find(|k| {
+            crate::app::account::is_session_var(k)
+                || [
+                    "OP_SERVICE_ACCOUNT_TOKEN",
+                    "OP_CONNECT_HOST",
+                    "OP_CONNECT_TOKEN",
+                ]
+                .contains(&k.as_str())
+        })
+}
+
+/// [`credential_in_environment`] judged through `env` (the testable seam): the `OP_SESSION*`
+/// variables it names plus the service-account and Connect variables, by name only.
+pub(crate) fn credential_on(env: &dyn HostEnv) -> Option<String> {
+    let names = env.session_var_names().into_iter().chain(
+        [
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "OP_CONNECT_HOST",
+            "OP_CONNECT_TOKEN",
+        ]
+        .map(String::from),
+    );
+    // Only set and non-empty names are passed on; the value handed over is a stand-in.
+    credential_in_environment(
+        names
+            .filter(|n| env.is_set(n))
+            .map(|n| (n, "set".to_string())),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn host(env: FakeEnv) -> Host {
         Host::from_env(&env)
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn an_op_session_token_refuses_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SESSION_my", "x")]));
+        assert_eq!(found.as_deref(), Some("OP_SESSION_my"));
+    }
+
+    #[test]
+    fn a_bare_op_session_refuses_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SESSION", "x")]));
+        assert_eq!(found.as_deref(), Some("OP_SESSION"));
+    }
+
+    /// FMECA L6: op's delegation setting shares the prefix but holds no session.
+    #[test]
+    fn the_delegation_setting_does_not_refuse_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SESSION_DELEGATION_ENABLED", "true")]));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn a_service_account_token_refuses_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_x")]));
+        assert_eq!(found.as_deref(), Some("OP_SERVICE_ACCOUNT_TOKEN"));
+    }
+
+    #[test]
+    fn a_connect_credential_refuses_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_CONNECT_TOKEN", "x")]));
+        assert_eq!(found.as_deref(), Some("OP_CONNECT_TOKEN"));
+    }
+
+    #[test]
+    fn an_environment_without_op_credentials_may_apply() {
+        let found = credential_in_environment(vars(&[("OP_ACCOUNT", "A"), ("HOME", "/h")]));
+        assert_eq!(found, None);
     }
 
     /// The real environment seam runs without panicking (its result depends on the host).

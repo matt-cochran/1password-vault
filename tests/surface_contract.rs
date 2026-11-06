@@ -120,3 +120,46 @@ fn surface_golden_lists_no_removed_zero_eleven_command() {
         "removed commands listed: {offending:?}"
     );
 }
+
+/// #253, #262: `opv provision` is on the CLI surface with its Slice A and B flags.
+#[test]
+fn surface_golden_lists_provision_with_its_flags() {
+    let golden = golden();
+    let provision = golden["cli"]
+        .as_array()
+        .expect("cli is an array")
+        .iter()
+        .find(|command| command["name"] == "provision")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        provision["flags"],
+        serde_json::json!(["dry-run", "env", "fill-missing", "json", "replace"])
+    );
+}
+
+/// #253 D3: an assistant never writes a value, so no MCP tool provisions: neither the golden
+/// nor the installed binary's `opv schema` maps a tool to `provision`.
+#[test]
+fn no_mcp_tool_provisions() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_opv"))
+        .arg("schema")
+        .output()
+        .expect("opv schema runs");
+    let schema: Value = serde_json::from_slice(&out.stdout).expect("schema is JSON");
+    let live = schema["mcp_tools"].as_array().cloned().unwrap_or_default();
+    let golden = golden()["mcp"].as_array().cloned().unwrap_or_default();
+    let provisioning: Vec<&Value> = live
+        .iter()
+        .chain(golden.iter())
+        .filter(|tool| {
+            [&tool["tool"], &tool["cli"], &tool["name"]]
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s.contains("provision")))
+        })
+        .collect();
+    assert!(
+        !live.is_empty() && provisioning.is_empty(),
+        "{provisioning:?}"
+    );
+}

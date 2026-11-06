@@ -165,6 +165,14 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
         "boundary_missing",
         "state_vault_missing",
         "state_vault_wider_than_values",
+        // #271: `opv unseal`'s refusals (design sealed-target §4.2)
+        "sealed_malformed",
+        "sealed_signature_invalid",
+        "sealed_scope_mismatch",
+        "sealed_revision_below_floor",
+        "sealed_identity_unusable",
+        "sealed_not_a_recipient",
+        "sealed_payload_mismatch",
     ] {
         assert!(slugs.contains(&slug), "error_codes is missing {slug}");
     }

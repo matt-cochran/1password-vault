@@ -1,0 +1,254 @@
+# provision: `opv provision` through the real binary
+
+## written text exit: 0
+## written text stdout
+provisioned set grant in environment prod: item at version 2, verified
+Next: opv ready prod
+
+## written text stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: running producer consent
+opening the consent page in your browser: https://consent.example.test/authorize?client=e2e&scope=grant
+waiting for the producer
+
+## written --json exit: 0
+## written --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","set":"grant","env":"prod","mode":"absent","result":"written","concurrent_edit":false,"item":{"vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version_before":1,"version_after":2,"verified_at":2},"members":[{"key":"web/GRANT_SALT","made_by":"generate","state":"set"},{"key":"web/GRANT_TOKEN","made_by":"producer","state":"set"}],"producers":[{"name":"consent","sha256":"2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a","exit":0}],"compared_environments":["dev"],"not_compared":[],"next":{"kind":"run","actor":"assistant","command":"opv ready prod"},"do":null}
+
+## written --json stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: running producer consent
+opening the consent page in your browser: https://consent.example.test/authorize?client=e2e&scope=grant
+waiting for the producer
+
+## wrong environment text exit: 6
+## wrong environment text stdout
+
+## wrong environment text stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: opv: the confirmation dev does not match environment prod
+Do: check which environment you meant
+Next: opv plan prod
+
+## wrong environment --json exit: 6
+## wrong environment --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod"},"do":"check which environment you meant","error":{"code":"confirm_mismatch","category":"policy","message":"the confirmation dev does not match environment prod","subject":{"env":"prod","given":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"check which environment you meant","next":{"kind":"run","actor":"assistant","command":"opv plan prod"}}}
+
+## wrong environment --json stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: opv: the confirmation dev does not match environment prod
+Do: check which environment you meant
+Next: opv plan prod
+
+## exit after result text exit: 3
+## exit after result text stdout
+
+## exit after result text stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 884fc8b1ba0af9ede8db2b8c09cfb59961fb2d4ce08413f71ed93472745ffa7f   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: running producer consent
+waiting for the producer
+opv: producer consent exited with status 1; nothing was written
+Do: see producer consent's documentation for exit status 1; opv never shows its output
+Next: opv provision grant --env prod
+
+## exit after result --json exit: 3
+## exit after result --json stdout
+{"schema_version":4,"ok":false,"exit_code":3,"next":{"kind":"run","actor":"assistant","command":"opv provision grant --env prod --json"},"do":"see producer consent's documentation for exit status 1; opv never shows its output","error":{"code":"producer_failed","category":"dependency","message":"producer consent exited with status 1; nothing was written","subject":{"why":{"failure":"exit","status":1},"producer":"consent"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"see producer consent's documentation for exit status 1; opv never shows its output","next":{"kind":"run","actor":"assistant","command":"opv provision grant --env prod --json"}}}
+
+## exit after result --json stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 884fc8b1ba0af9ede8db2b8c09cfb59961fb2d4ce08413f71ed93472745ffa7f   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: running producer consent
+waiting for the producer
+opv: producer consent exited with status 1; nothing was written
+Do: see producer consent's documentation for exit status 1; opv never shows its output
+Next: opv provision grant --env prod --json
+
+## producer error text exit: 3
+## producer error text stdout
+
+## producer error text stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 d79f9f868bbab6a9d025c517ddcbc7dee18df8099deb603dbb4ef9669cd44e85   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: running producer consent
+opening the consent page in your browser: https://consent.example.test/authorize?client=e2e&scope=grant
+opv: producer consent reported consent_denied; nothing was written
+Do: see producer consent's documentation for consent_denied
+Next: opv provision grant --env prod
+
+## producer error --json exit: 3
+## producer error --json stdout
+{"schema_version":4,"ok":false,"exit_code":3,"next":{"kind":"run","actor":"assistant","command":"opv provision grant --env prod --json"},"do":"see producer consent's documentation for consent_denied","error":{"code":"producer_failed","category":"dependency","message":"producer consent reported consent_denied; nothing was written","subject":{"why":{"failure":"reported","code":"consent_denied"},"producer":"consent"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"see producer consent's documentation for consent_denied","next":{"kind":"run","actor":"assistant","command":"opv provision grant --env prod --json"}}}
+
+## producer error --json stderr
+using <SCENARIO>/project/secrets.toml
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 d79f9f868bbab6a9d025c517ddcbc7dee18df8099deb603dbb4ef9669cd44e85   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+Type the environment name to provision grant in it: running producer consent
+opening the consent page in your browser: https://consent.example.test/authorize?client=e2e&scope=grant
+opv: producer consent reported consent_denied; nothing was written
+Do: see producer consent's documentation for consent_denied
+Next: opv provision grant --env prod --json
+
+## dry run text exit: 0
+## dry run text stdout
+opv provision grant --env prod
+  item    web · prod   (vault vE2EWEBPROD000000000000001, item iE2EWEBPROD000000000000001, version 1)
+  state   absent (0 of 2 members set)
+  make    web/GRANT_SALT   generate hex_bytes 32
+  make    web/GRANT_TOKEN   producer consent → refresh_token
+  producer consent: opv-e2e-producer producer/consent.json
+           sha256 2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a   timeout 1m   inputs web/API_KEY
+  budget  1m producer + 4m commit of <left> left
+  compare dev
+  write   one edit of one item; nothing else in the item changes
+
+## dry run text stderr
+using <SCENARIO>/project/secrets.toml
+
+## dry run --json exit: 0
+## dry run --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.provision/1","result":"dry_run","plan":{"set":"grant","env":"prod","item":{"boundary":"web","vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001","version":1},"state":"absent","replace":false,"members":[{"key":"web/GRANT_SALT","made_by":{"maker":"generate","generator":"hex_bytes 32"},"state":"absent"},{"key":"web/GRANT_TOKEN","made_by":{"maker":"producer","producer":"consent","output":"refresh_token"},"state":"absent"}],"producers":[{"name":"consent","command":["opv-e2e-producer","producer/consent.json"],"sha256":"2d1611166507df9e6601dfdbe1575092b61c8f18d187dd3646b72fdc281b808a","timeout_seconds":60,"inputs":["web/API_KEY"],"open_url_hosts":["consent.example.test"]}],"budget":{"producers_seconds":60,"commit_seconds":240,"left_seconds":"<left>"},"compare":["dev"]},"next":{"kind":"apply","actor":"person","command":"opv provision grant --env prod"},"do":null}
+
+## dry run --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## no terminal text exit: 6
+## no terminal text stdout
+
+## no terminal text stderr
+using <SCENARIO>/project/secrets.toml
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv provision grant --env prod
+
+## no terminal --json exit: 6
+## no terminal --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv provision grant --env prod"},"do":"run it in your own terminal","error":{"code":"terminal_required","category":"policy","message":"this step needs a person at a terminal, and there is none","subject":{"why":"no_tty"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv provision grant --env prod"}}}
+
+## no terminal --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv provision grant --env prod
+
+## edited producer text exit: 2
+## edited producer text stdout
+
+## edited producer text stderr
+using <SCENARIO>/project/secrets.toml
+opv: the file producer/consent.json of producer consent changed: its SHA-256 is not the sha256 the contract pins
+Do: review the change to producer/consent.json; once it is right, set sha256 of [producers.consent] to the file's new SHA-256
+Next: opv provision grant --env prod --dry-run
+
+## edited producer --json exit: 2
+## edited producer --json stdout
+{"schema_version":4,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv provision grant --env prod --dry-run --json"},"do":"review the change to producer/consent.json; once it is right, set sha256 of [producers.consent] to the file's new SHA-256","error":{"code":"producer_changed","category":"config","message":"the file producer/consent.json of producer consent changed: its SHA-256 is not the sha256 the contract pins","subject":{"file":"producer/consent.json","producer":"consent"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"review the change to producer/consent.json; once it is right, set sha256 of [producers.consent] to the file's new SHA-256","next":{"kind":"run","actor":"assistant","command":"opv provision grant --env prod --dry-run --json"}}}
+
+## edited producer --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the file producer/consent.json of producer consent changed: its SHA-256 is not the sha256 the contract pins
+Do: review the change to producer/consent.json; once it is right, set sha256 of [producers.consent] to the file's new SHA-256
+Next: opv provision grant --env prod --dry-run --json
+
+## partial ready text exit: 0
+## partial ready text stdout
+ready: 1 blocking · 3 findings · receipt rcpt-<id>
+PRODUCT  Production
+shared   n/a
+web      8/10 · 1 finding
+Targets:
+  prod fly Fly · app e2e-app-prod ready
+  prod gh GitHub · repos e2e-org/e2e-app environment production ready
+  prod k8s Kubernetes · context e2e-cluster namespace e2e-prod deployment e2e-app ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [owner] keys_blocking prod → opv provision grant --env prod --fill-missing
+  [owner] environment_gap prod web/PERSONAL_LLM_KEY → opv propose key web/PERSONAL_LLM_KEY --env prod
+Next (owner): opv provision grant --env prod --fill-missing
+
+## partial ready text stderr
+using <SCENARIO>/project/secrets.toml
+
+## partial ready --json exit: 0
+## partial ready --json stdout
+{"schema_version":4,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"prod","title":"Production","product":"shared","target":"Fly","target_name":"fly","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"Fly","target_name":"fly","keys":10,"saved":8,"findings":1,"delivered":true},{"environment":"prod","title":"Production","product":"shared","target":"GitHub","target_name":"gh","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"GitHub","target_name":"gh","keys":10,"saved":8,"findings":1,"delivered":true},{"environment":"prod","title":"Production","product":"shared","target":"Kubernetes","target_name":"k8s","keys":2,"saved":2,"findings":0,"delivered":false},{"environment":"prod","title":"Production","product":"web","target":"Kubernetes","target_name":"k8s","keys":10,"saved":8,"findings":1,"delivered":true}],"sets":[{"set":"grant","environment":"prod","state":"partial"}],"targets":[{"environment":"prod","name":"fly","provider":"Fly","locator":"app e2e-app-prod","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"k8s","provider":"Kubernetes","locator":"context e2e-cluster namespace e2e-prod deployment e2e-app","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"keys_blocking","scope":{"environment":"prod","set":"grant"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv provision grant --env prod --fill-missing","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"prod","product":"web","key":"PERSONAL_LLM_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key web/PERSONAL_LLM_KEY --env prod","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv provision grant --env prod --fill-missing"},"do":null}
+
+## partial ready --json stderr
+using <SCENARIO>/project/secrets.toml
