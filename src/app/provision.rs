@@ -953,11 +953,13 @@ impl Run<'_> {
             request: &request,
             timeout: producer.timeout,
         };
+        let input_values: Vec<&SecretValue> = inputs.iter().map(|&(_, v)| v).collect();
         let context = produce_doc::Context {
             env: self.req.env,
             nonce: &nonce,
             outputs: &outputs,
             open_url_hosts: &producer.open_url_hosts,
+            inputs: &input_values,
         };
         console.show(&format!("running producer {}", p.name))?;
         let mut sink = Sink {
