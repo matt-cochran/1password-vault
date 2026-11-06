@@ -331,6 +331,13 @@ fn hand_over(cmd: &mut std::process::Command, env: Inherited) -> std::io::Result
 #[cfg(not(target_os = "linux"))]
 struct EnvBlock;
 
+/// Off Linux the `Command` holds the values itself, so there is nothing to zeroize here; the
+/// explicit `Drop` keeps "dropped right after spawn" the same on every platform.
+#[cfg(not(target_os = "linux"))]
+impl Drop for EnvBlock {
+    fn drop(&mut self) {}
+}
+
 #[cfg(not(target_os = "linux"))]
 fn hand_over(cmd: &mut std::process::Command, env: Inherited) -> std::io::Result<EnvBlock> {
     cmd.env_clear().envs(env.0.iter().map(|(k, v)| (k, v)));
