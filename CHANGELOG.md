@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] - 2026-11-06
+
+0.18.2 lets a sealed target carry deliver-only keys, gives a misplaced `.opv config` its own error, and saves a 1Password read in `registry-push`.
+
+### Changed
+
+- **A sealed target seals deliver-only keys supplied at sync (#287).** A `source = "infrastructure"` key on a sealed target now loads (0.18.0 refused it, #275). `opv sync --supply-stdin` seals its supplied value into the bundle, and the signed header names it under `supplied` (names only). A sync that would re-seal such a key without a supplied value is refused with `not_supplied`, naming the key, and writes nothing. Bundles without `supplied` open as before.
+- **`registry-push` reads the target's deploy credentials once (#289),** reusing the token from sign-in. The token still reaches docker on stdin only.
+
+### Fixed
+
+- **A `.opv` `config = "<path>"` outside the repository fails as `config_outside_repository` (exit 2) (#288),** naming the `.opv` and the path, instead of "permission denied".
+
 ## [0.18.1] - 2026-11-06
 
 0.18.1 closes the Low findings left from the 0.18.0 security review (#279).
