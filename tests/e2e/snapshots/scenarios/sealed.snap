@@ -45,7 +45,7 @@ verified prod/web revision <revision> (project project, target box)
   signer      SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY
   recipient   not checked (no identity given)
   sealed      <time> by opv <version>, plan <id>
-  contract    sha256:69b533dcf408e59fd084e56588fe1789b9882710c5262f3ae847a09402645840
+  contract    sha256:529c99aa916ff8f7ba79355ea17fc707556a852951c234c6a221da955788b688
   payload     not decrypted (--verify-only)
   runtime dir RAM-backed, ready for the file keys
 names (7):
@@ -62,7 +62,7 @@ opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32G
 
 ## unseal --verify-only --json exit: 0
 ## unseal --verify-only --json stdout
-{"schema_version":4,"ok":true,"schema":"opv.unseal/1","bundle":{"format":"opv-sealed/1","project":"project","environment":"prod","product":"web","target":"box","revision":"<revision>","created_at":"<time>","opv_version":"<version>","plan_id":"<id>","contract_digest":"sha256:69b533dcf408e59fd084e56588fe1789b9882710c5262f3ae847a09402645840","signer":"SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY","recipient":null},"names":[{"name":"API_KEY","destination":"env:API_KEY"},{"name":"DATABASE_URL","destination":"env:DATABASE_URL"},{"name":"LOG_LEVEL","destination":"env:LOG_LEVEL"},{"name":"OTEL_RESOURCE","destination":"file:otel/resource"},{"name":"SESSION_SECRET","destination":"env:SESSION_SECRET"},{"name":"TLS_CERTIFICATE","destination":"file:tls/certificate"},{"name":"TLS_PRIVATE_KEY","destination":"file:tls/private-key"}],"checked":{"signature":true,"recipient":false,"payload":false,"runtime_dir":"ram_backed"},"overridden":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
+{"schema_version":4,"ok":true,"schema":"opv.unseal/1","bundle":{"format":"opv-sealed/1","project":"project","environment":"prod","product":"web","target":"box","revision":"<revision>","created_at":"<time>","opv_version":"<version>","plan_id":"<id>","contract_digest":"sha256:529c99aa916ff8f7ba79355ea17fc707556a852951c234c6a221da955788b688","signer":"SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY","recipient":null},"names":[{"name":"API_KEY","destination":"env:API_KEY"},{"name":"DATABASE_URL","destination":"env:DATABASE_URL"},{"name":"LOG_LEVEL","destination":"env:LOG_LEVEL"},{"name":"OTEL_RESOURCE","destination":"file:otel/resource"},{"name":"SESSION_SECRET","destination":"env:SESSION_SECRET"},{"name":"TLS_CERTIFICATE","destination":"file:tls/certificate"},{"name":"TLS_PRIVATE_KEY","destination":"file:tls/private-key"}],"checked":{"signature":true,"recipient":false,"payload":false,"runtime_dir":"ram_backed"},"overridden":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
 
 ## unseal --verify-only --json stderr
 opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY 7 names
@@ -73,7 +73,7 @@ verified prod/web revision <revision> (project project, target box)
   signer      SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY
   recipient   sha256:40ef75a4870713f1 (this identity)
   sealed      <time> by opv <version>, plan <id>
-  contract    sha256:69b533dcf408e59fd084e56588fe1789b9882710c5262f3ae847a09402645840
+  contract    sha256:529c99aa916ff8f7ba79355ea17fc707556a852951c234c6a221da955788b688
   payload     decrypted in memory; matches the signed header
 names (7):
   API_KEY          env:API_KEY
@@ -93,9 +93,6 @@ API_KEY
 DATABASE_URL
 HOME
 LOG_LEVEL
-OPV_NO_SKILL
-OPV_SIM_WORLD
-OPV_TEST_SUID_DUMPABLE
 PATH
 PWD
 SESSION_SECRET
@@ -127,7 +124,7 @@ verified prod/web revision <revision> (project project, target box)
   signer      SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY
   recipient   not checked (no identity given)
   sealed      <time> by opv <version>, plan <id>
-  contract    sha256:5ddc7bb1218671cc199854f8ebd4a5b06deb3a6eb0ba0801aab582d435d6ea26
+  contract    sha256:3c052e4745e282818549cb16c932837e24a08279b44c85854f44deb72b61bafe
   payload     not decrypted (--verify-only)
   runtime dir RAM-backed, ready for the file keys
 names (6):

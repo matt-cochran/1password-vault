@@ -36,7 +36,9 @@ use super::config::SealedTarget;
 use super::provider::LABEL;
 use crate::bundle::allowed_signers::AllowedSigners;
 use crate::bundle::crypto::{self, CryptoError, SignatureRefusal};
-use crate::bundle::format::{self, FORMAT, Header, MAX_NAMES, MAX_VALUE, NAMESPACE, Name};
+use crate::bundle::format::{
+    self, ChildEnvironment, FORMAT, Header, MAX_NAMES, MAX_VALUE, NAMESPACE, Name,
+};
 use crate::cause::{Cause, FieldRule, InputKind, IoKind, LocalOp};
 use crate::domain::{SecretValue, StoreEntry};
 use crate::error::Error;
@@ -139,6 +141,11 @@ fn secrets_dir_env(names: &[Name], placed: Option<&PlacedProduct>) -> Option<Str
         .flatten()
 }
 
+/// Whether `product` is configured `environment = "declared_only"` (#279 S5).
+fn declared_only(placed: Option<&PlacedProduct>) -> bool {
+    placed.is_some_and(|p| p.declared_only)
+}
+
 impl SealedTarget {
     /// The recipients' fingerprints, sorted as a header holds them.
     fn sorted_recipients(&self) -> Vec<String> {
@@ -170,11 +177,13 @@ impl SealedTarget {
     fn stale_reasons(&self, header: &Header) -> Vec<&'static str> {
         let recipients = self.sorted_recipients();
         let (names, sde) = self.expected_contract(&header.product, &header.names);
+        let declared = declared_only(self.placement.products.get(&header.product));
         let expected = format::contract_digest(
             &names,
             sde.as_deref(),
             &recipients,
             &self.signer_fingerprint,
+            declared,
         );
         if expected == header.contract_digest {
             return Vec::new();
@@ -188,6 +197,9 @@ impl SealedTarget {
         }
         if names != header.names || sde != header.secrets_dir_env {
             why.push("names changed");
+        }
+        if declared != header.declared_only() {
+            why.push("environment changed");
         }
         if why.is_empty() {
             why.push("contract changed");
@@ -347,7 +359,9 @@ impl<'a> SealedStore<'a> {
                 destination: destination(n, self.file_of(n)),
             })
             .collect();
-        let sde = secrets_dir_env(&names, self.target.placement.products.get(product));
+        let placed = self.target.placement.products.get(product);
+        let sde = secrets_dir_env(&names, placed);
+        let declared = declared_only(placed);
         let recipients = self.target.sorted_recipients();
         let header = Header {
             format: FORMAT.to_string(),
@@ -364,11 +378,17 @@ impl<'a> SealedStore<'a> {
                 sde.as_deref(),
                 &recipients,
                 &self.target.signer_fingerprint,
+                declared,
             ),
             recipients,
             signer: self.target.signer_fingerprint.clone(),
             names,
             secrets_dir_env: sde,
+            child_environment: Some(if declared {
+                ChildEnvironment::DeclaredOnly
+            } else {
+                ChildEnvironment::Inherit
+            }),
         };
         let keys = self
             .target

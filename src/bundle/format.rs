@@ -70,6 +70,29 @@ pub struct Header {
     pub names: Vec<Name>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets_dir_env: Option<String>,
+    /// The product's `local.environment` when it was sealed (#279 S5): `declared_only`
+    /// gives the command only the bundle's variables and the basic environment. Absent in
+    /// bundles sealed before 0.18.1, which means `inherit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_environment: Option<ChildEnvironment>,
+}
+
+/// What `opv unseal --exec` passes on from the runtime's environment (#137, #279 S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildEnvironment {
+    /// The whole environment, minus `OP_*` and the identity variable.
+    Inherit,
+    /// Only the bundle's variables and the basic environment (PATH, HOME, locale, ...).
+    DeclaredOnly,
+}
+
+impl Header {
+    /// Whether the command gets only the bundle's variables and the basic environment; a
+    /// header without the field (sealed before 0.18.1) inherits.
+    pub fn declared_only(&self) -> bool {
+        self.child_environment == Some(ChildEnvironment::DeclaredOnly)
+    }
 }
 
 /// Why a bundle part was refused. One variant per named refusal in the design; names and
@@ -188,12 +211,14 @@ pub fn parse_header(line: &[u8]) -> Result<Header, FormatError> {
 }
 
 /// The `sha256:` contract digest over the canonical JSON of the sorted `(name, destination)`
-/// list, `secrets_dir_env`, the recipients and the signer (§5.2).
+/// list, `secrets_dir_env`, the recipients and the signer (§5.2), and `child_environment`
+/// when it is `declared_only` (#279 S5; an `inherit` contract keeps its 0.18.0 digest).
 pub fn contract_digest(
     names: &[Name],
     secrets_dir_env: Option<&str>,
     recipients: &[String],
     signer: &str,
+    declared_only: bool,
 ) -> String {
     let mut object = serde_json::Map::new();
     let mut sorted = names.to_vec();
@@ -211,6 +236,12 @@ pub fn contract_digest(
         object.insert(
             "secrets_dir_env".to_string(),
             Value::String(env.to_string()),
+        );
+    }
+    if declared_only {
+        object.insert(
+            "child_environment".to_string(),
+            Value::String("declared_only".to_string()),
         );
     }
     let bytes = serde_json::to_vec(&canonicalize(Value::Object(object))).unwrap_or_default();

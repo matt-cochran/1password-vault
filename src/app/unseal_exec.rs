@@ -70,8 +70,25 @@ pub(crate) fn run_with(
     for name in overridden(&names, &inherited.0, identity_var) {
         let _ = std::io::Write::write_all(&mut crate::output::stderr(), notice(&name).as_bytes());
     }
+    let start_failed = |e: std::io::Error| -> Error {
+        Cause::ChildStartFailed {
+            program: program.clone(),
+            workdir: None,
+            io: IoKind::from(e.kind()),
+            remote: None,
+        }
+        .into()
+    };
+    // With file keys, the stopping signals are caught from before the directory exists
+    // (#279 S6): one that arrives while the files are written starts nothing, and the
+    // directory is removed.
+    let forwarder = if has_file_keys(&opened.header) {
+        Some(Forwarder::install().map_err(start_failed)?)
+    } else {
+        None
+    };
     // The RAM directory, before any file is written or the command started (R2).
-    let dir = if has_file_keys(&opened.header) {
+    let dir = if forwarder.is_some() {
         Some(private_dir(ram_dir)?)
     } else {
         None
@@ -82,41 +99,32 @@ pub(crate) fn run_with(
                 .map_err(|e| crate::app::local_delivery::private_dir_failed(private.path(), &e))?;
         }
     }
-    let mut env = Inherited(child_env(
+    let env = Inherited(child_env(
         &inherited.0,
         identity_var,
         &vars,
         opened.header.secrets_dir_env.as_deref(),
         dir.as_ref().map(|(p, _)| p.utf8()),
+        opened.header.declared_only(),
     ));
     drop(inherited);
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(&command[1..])
-        .env_clear()
-        .envs(env.0.iter().map(|(k, v)| (k, v)));
-    env.0.iter_mut().for_each(|(k, v)| wipe(k, v));
-    drop(env);
     drop(vars);
     drop(files);
     drop(opened); // the values, zeroized
     crate::hardening::cloexec_inherited();
-    let start_failed = |e: std::io::Error| -> Error {
-        Cause::ChildStartFailed {
-            program: program.clone(),
-            workdir: None,
-            io: IoKind::from(e.kind()),
-            remote: None,
-        }
-        .into()
-    };
     #[cfg(unix)]
     if dir.is_none() {
         use std::os::unix::process::CommandExt as _;
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(&command[1..])
+            .env_clear()
+            .envs(env.0.iter().map(|(k, v)| (k, v)));
+        drop(env); // wiped; the command's copies end with this process image
         // Replaces this process; returns only when the command cannot start.
         let e = cmd.exec();
         return Err(start_failed(e));
     }
-    let status = supervise(&mut cmd).map_err(start_failed);
+    let status = supervise(program, &command[1..], env, forwarder).map_err(start_failed);
     drop(dir); // removes the directory and every file in it
     status
 }
@@ -175,14 +183,16 @@ fn notice(name: &str) -> String {
 }
 
 /// The child's environment: `inherited` without `OP_*`, the identity variable, the bundle's
-/// variables and the directory variable; then the bundle's variables and, with a
-/// directory, `dir_env` naming it.
+/// variables and the directory variable, and under `declared_only` (#137, #279 S5) without
+/// anything but the basic environment ([`crate::host::is_basic_env`]); then the bundle's
+/// variables and, with a directory, `dir_env` naming it.
 fn child_env(
     inherited: &[(OsString, OsString)],
     identity_var: Option<&str>,
     vars: &[(&str, &[u8])],
     dir_env: Option<&str>,
     dir: Option<&str>,
+    declared_only: bool,
 ) -> Vec<(OsString, OsString)> {
     let dir_pair = dir_env.zip(dir);
     let replaced = |k: &OsString| {
@@ -194,6 +204,7 @@ fn child_env(
             !k.as_encoded_bytes().starts_with(b"OP_")
                 && identity_var.is_none_or(|v| k != v)
                 && !replaced(k)
+                && (!declared_only || k.to_str().is_some_and(crate::host::is_basic_env))
         })
         .cloned()
         .collect();
@@ -265,60 +276,190 @@ fn private_dir(
     Ok((private, open))
 }
 
-/// Spawn the command, forward the stopping signals to it while it runs, and return its exit
-/// code (128 + the signal that ended it).
-#[cfg(unix)]
-fn supervise(cmd: &mut std::process::Command) -> std::io::Result<i32> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
-    use std::os::unix::process::ExitStatusExt as _;
-    use std::sync::{Arc, Mutex};
+/// The command's environment as `NAME=value\0` buffers that opv alone holds and zeroizes
+/// when dropped (#279 S6): the `Command` itself never gets a copy. Linux: the forked child
+/// points `environ` at them just before `execvp`, as std does with an environment it built.
+#[cfg(target_os = "linux")]
+struct EnvBlock {
+    _entries: Vec<zeroize::Zeroizing<Vec<u8>>>,
+    _ptrs: Vec<*const libc::c_char>,
+}
 
-    /// The running child's pid (`None` once reaped), and a signal that came before it ran.
-    #[derive(Default)]
-    struct Slot {
-        pid: Option<i32>,
-        pending: Option<i32>,
+/// Hand `env` to `cmd` without `cmd` holding a copy; the returned block must outlive the
+/// spawn and is dropped (zeroized) right after it. `env` is wiped here. A NUL byte, which
+/// no environment can carry, is refused as std refuses it.
+#[cfg(target_os = "linux")]
+fn hand_over(cmd: &mut std::process::Command, env: Inherited) -> std::io::Result<EnvBlock> {
+    use std::os::unix::process::CommandExt as _;
+    unsafe extern "C" {
+        static mut environ: *const *const libc::c_char;
     }
-    let slot = Arc::new(Mutex::new(Slot::default()));
-    fn lock(s: &Mutex<Slot>) -> std::sync::MutexGuard<'_, Slot> {
-        s.lock().unwrap_or_else(|e| e.into_inner())
-    }
-    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT])?;
-    let handle = signals.handle();
-    let forwarder = {
-        let slot = Arc::clone(&slot);
-        std::thread::spawn(move || {
-            for sig in signals.forever() {
-                let mut s = lock(&slot);
-                match s.pid {
-                    // SAFETY: a plain kill on the pid of a child spawned and not yet reaped
-                    // (the slot is cleared under this lock before it is reaped).
-                    Some(pid) => unsafe {
-                        libc::kill(pid, sig);
-                    },
-                    None => s.pending = Some(sig),
-                }
-            }
-        })
-    };
-    let spawned = cmd.spawn();
-    let result = spawned.and_then(|mut child| {
-        let pid = child.id() as i32;
-        {
-            let mut s = lock(&slot);
-            s.pid = Some(pid);
-            if let Some(sig) = s.pending.take() {
-                // SAFETY: as above; the child was just spawned and is not reaped.
-                unsafe { libc::kill(pid, sig) };
-            }
+    let mut entries = Vec::with_capacity(env.0.len());
+    for (k, v) in &env.0 {
+        let (k, v) = (k.as_encoded_bytes(), v.as_encoded_bytes());
+        if k.contains(&0) || v.contains(&0) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
         }
-        wait_exited(pid);
-        lock(&slot).pid = None;
-        child.wait()
-    });
-    handle.close();
-    let _ = forwarder.join();
-    let status = result?;
+        let mut entry = zeroize::Zeroizing::new(Vec::with_capacity(k.len() + v.len() + 2));
+        entry.extend_from_slice(k);
+        entry.push(b'=');
+        entry.extend_from_slice(v);
+        entry.push(0);
+        entries.push(entry);
+    }
+    drop(env);
+    let mut ptrs: Vec<*const libc::c_char> = entries.iter().map(|e| e.as_ptr().cast()).collect();
+    ptrs.push(std::ptr::null());
+    let envp = ptrs.as_ptr() as usize;
+    // SAFETY: runs in the forked child before `execvp`; a single pointer store is
+    // async-signal-safe. `envp` points into the block, which the parent keeps alive until
+    // `spawn` returns, and the child's copy of the memory is its own.
+    unsafe {
+        cmd.pre_exec(move || {
+            std::ptr::addr_of_mut!(environ).write(envp as *const *const libc::c_char);
+            Ok(())
+        });
+    }
+    Ok(EnvBlock {
+        _entries: entries,
+        _ptrs: ptrs,
+    })
+}
+
+/// Off Linux (where file keys never run): std holds the copies until `cmd` is dropped,
+/// right after the spawn.
+#[cfg(not(target_os = "linux"))]
+struct EnvBlock;
+
+#[cfg(not(target_os = "linux"))]
+fn hand_over(cmd: &mut std::process::Command, env: Inherited) -> std::io::Result<EnvBlock> {
+    cmd.env_clear().envs(env.0.iter().map(|(k, v)| (k, v)));
+    drop(env);
+    Ok(EnvBlock)
+}
+
+/// The running child's pid (`None` once reaped), and a signal that came before it ran.
+#[cfg(unix)]
+#[derive(Default)]
+struct Slot {
+    pid: Option<i32>,
+    pending: Option<i32>,
+}
+
+/// SIGINT, SIGTERM, SIGHUP and SIGQUIT caught and forwarded to the command while it runs;
+/// one that arrives before it starts is kept (#279 S6). Dropping it stops the forwarding.
+#[cfg(unix)]
+struct Forwarder {
+    slot: std::sync::Arc<std::sync::Mutex<Slot>>,
+    handle: signal_hook::iterator::Handle,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+fn lock(s: &std::sync::Mutex<Slot>) -> std::sync::MutexGuard<'_, Slot> {
+    s.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(unix)]
+impl Forwarder {
+    fn install() -> std::io::Result<Self> {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(Slot::default()));
+        let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT])?;
+        let handle = signals.handle();
+        let thread = {
+            let slot = std::sync::Arc::clone(&slot);
+            std::thread::spawn(move || {
+                for sig in signals.forever() {
+                    let mut s = lock(&slot);
+                    match s.pid {
+                        // SAFETY: a plain kill on the pid of a child spawned and not yet
+                        // reaped (the slot is cleared under this lock before it is reaped).
+                        Some(pid) => unsafe {
+                            libc::kill(pid, sig);
+                        },
+                        None => s.pending = Some(sig),
+                    }
+                }
+            })
+        };
+        Ok(Self {
+            slot,
+            handle,
+            thread: Some(thread),
+        })
+    }
+
+    /// The stopping signal that arrived before the command started, if any.
+    fn pending(&self) -> Option<i32> {
+        lock(&self.slot).pending
+    }
+
+    /// The command runs as `pid` (`None`: reaped); a signal kept until now is sent to it.
+    fn track(&self, pid: Option<i32>) {
+        let mut s = lock(&self.slot);
+        s.pid = pid;
+        if let (Some(pid), Some(sig)) = (pid, s.pending.take()) {
+            // SAFETY: as in the forwarder; the child was just spawned and is not reaped.
+            unsafe { libc::kill(pid, sig) };
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Forwarder {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Off Unix the console delivers Ctrl-C to the command itself: nothing to forward.
+#[cfg(not(unix))]
+struct Forwarder;
+
+#[cfg(not(unix))]
+impl Forwarder {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Start `program` with `args` and `env`, forward the stopping signals to it while it runs,
+/// and return its exit code (128 + the signal that ended it). A stopping signal that came
+/// before the start starts nothing and is the exit code. opv's copies of the environment
+/// are zeroized as soon as the command is spawned (#279 S6).
+#[cfg(unix)]
+fn supervise(
+    program: &str,
+    args: &[String],
+    env: Inherited,
+    forwarder: Option<Forwarder>,
+) -> std::io::Result<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    let forwarder = match forwarder {
+        Some(f) => f,
+        None => Forwarder::install()?,
+    };
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    let block = hand_over(&mut cmd, env)?;
+    if let Some(sig) = forwarder.pending() {
+        return Ok(128 + sig);
+    }
+    let spawned = cmd.spawn();
+    drop(cmd);
+    drop(block); // the values, zeroized: the child has its own copy
+    let mut child = spawned?;
+    let pid = child.id() as i32;
+    forwarder.track(Some(pid));
+    wait_exited(pid);
+    forwarder.track(None);
+    let status = child.wait();
+    drop(forwarder);
+    let status = status?;
     Ok(status
         .signal()
         .map_or_else(|| status.code().unwrap_or(1), |sig| 128 + sig))
@@ -347,8 +488,19 @@ fn wait_exited(pid: i32) {
 
 /// Off Unix: spawn and wait; the console delivers Ctrl-C to the command itself.
 #[cfg(not(unix))]
-fn supervise(cmd: &mut std::process::Command) -> std::io::Result<i32> {
-    let status = cmd.status()?;
+fn supervise(
+    program: &str,
+    args: &[String],
+    env: Inherited,
+    _forwarder: Option<Forwarder>,
+) -> std::io::Result<i32> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    let block = hand_over(&mut cmd, env)?;
+    let spawned = cmd.spawn();
+    drop(cmd);
+    drop(block);
+    let status = spawned?.wait()?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -378,10 +530,56 @@ mod tests {
             &vars,
             Some("SECRETS_DIR"),
             Some("/r"),
+            false,
         );
         assert_eq!(
             env,
             os(&[("PATH", "/bin"), ("PORT", "bundle"), ("SECRETS_DIR", "/r")])
+        );
+    }
+
+    #[test]
+    fn under_declared_only_the_child_inherits_only_the_basic_environment() {
+        let inherited = os(&[("PATH", "/bin"), ("EXTRA", "m1"), ("HOME", "/h")]);
+        let vars: [(&str, &[u8]); 1] = [("PORT", b"bundle")];
+        let env = child_env(&inherited, None, &vars, None, None, true);
+        assert_eq!(
+            env,
+            os(&[("PATH", "/bin"), ("HOME", "/h"), ("PORT", "bundle")])
+        );
+    }
+
+    /// #279 S6: opv's `Command` never holds a copy of the environment (the values live
+    /// only in the zeroizing block, which the child reads after the fork).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_command_holds_no_copy_of_the_environment() {
+        let mut cmd = std::process::Command::new("true");
+        let _block = hand_over(&mut cmd, Inherited(os(&[("API_TOKEN", "m1")]))).unwrap();
+        assert_eq!(cmd.get_envs().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_handed_over_environment_reaches_the_child() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "printf %s \"$API_TOKEN\""])
+            .stdout(std::process::Stdio::piped());
+        let block = hand_over(&mut cmd, Inherited(os(&[("API_TOKEN", "m1")]))).unwrap();
+        let child = cmd.spawn().unwrap();
+        drop(block);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.stdout, b"m1");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nul_byte_in_the_environment_is_refused() {
+        let mut cmd = std::process::Command::new("true");
+        let err = hand_over(&mut cmd, Inherited(os(&[("A", "x\0y")]))).map(|_| ());
+        assert_eq!(
+            err.map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::InvalidInput)
         );
     }
 
@@ -426,9 +624,9 @@ mod tests {
         assert!(refused.iter().all(|p| !safe_relative_path(p)));
     }
 
-    #[test]
-    fn file_keys_without_a_ram_dir_are_refused() {
-        let req = Request {
+    /// The KAT bundle (a 0.18.0 bundle with a file key) for `prod/api`.
+    fn kat_request() -> Request {
+        Request {
             bundle: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/sealed/kat/bundle.opv-sealed"),
             env: "prod".into(),
@@ -443,9 +641,53 @@ mod tests {
             min_revision: None,
             verify_only: false,
             json: false,
-        };
+        }
+    }
+
+    #[test]
+    fn file_keys_without_a_ram_dir_are_refused() {
         let no_dir = || Err(RamDir::Unset);
-        let err = run_with(&req, &["true".to_string()], &no_dir).expect_err("refused");
+        let err = run_with(&kat_request(), &["true".to_string()], &no_dir).expect_err("refused");
         assert_eq!(err.code_str(), "ram_dir_unavailable");
+    }
+
+    /// #279 S6: a SIGTERM to opv while the private directory is made (the `ram_dir` seam
+    /// runs after the forwarder is installed, before any file is written) reaches the
+    /// command or stops it from starting. Returns the exit code, whether the command ran to
+    /// its marker, and what is left in the runtime directory.
+    #[cfg(target_os = "linux")]
+    fn sigterm_while_preparing() -> (i32, bool, Vec<std::ffi::OsString>) {
+        let rt = tempfile::tempdir().unwrap();
+        let marker = rt.path().join("ran");
+        let base = rt.path().join("runtime");
+        std::fs::create_dir(&base).unwrap();
+        let base_c = base.clone();
+        let ram = move || {
+            // SAFETY: a signal to this process; the forwarder already catches SIGTERM.
+            unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+            Ok(base_c.clone())
+        };
+        let script = format!("sleep 2; touch '{}'", marker.display());
+        let command = ["sh".to_string(), "-c".to_string(), script];
+        let code = run_with(&kat_request(), &command, &ram).expect("supervised");
+        let left = std::fs::read_dir(&base)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        (code, marker.exists(), left)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sigterm_while_the_files_are_written_ends_the_command_with_143() {
+        let (code, ran, _) = sigterm_while_preparing();
+        assert!(code == 143 && !ran, "code {code}, ran {ran}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sigterm_while_the_files_are_written_leaves_no_directory() {
+        let (_, _, left) = sigterm_while_preparing();
+        assert!(left.is_empty(), "{left:?}");
     }
 }
