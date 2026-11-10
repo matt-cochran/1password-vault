@@ -21,8 +21,8 @@ function files(root: string, dir = root): Record<string, string> {
     if (stat.isDirectory()) Object.assign(result, files(root, file));
     else {
       const key = relative(root, file).replaceAll('\\', '/');
-      if (key === 'manifest.json' || key === 'input.json') continue;
-      if (!/^(dist|npm|qualification)\/[A-Za-z0-9_.-]+$/.test(key)) throw new Error('Unexpected release artifact path');
+      if (key === 'manifest.json') continue;
+      if (!/^(?:(dist|npm|qualification)\/[A-Za-z0-9_.-]+|input\.json)$/.test(key)) throw new Error('Unexpected release artifact path');
       result[key] = createHash('sha256').update(readFileSync(file)).digest('hex');
     }
   }
@@ -44,10 +44,11 @@ export function validate(manifest: Manifest, run: Run, repository: string, tree:
     const q = manifest.qualifications[platform]; validateQualification(q, manifest.input, platform);
     if (manifest.files[`qualification/${platform}.json`] !== hash(JSON.stringify(q) + '\n')) throw new Error('Qualification receipt bytes mismatch');
   }
-  const original = Object.fromEntries(Object.entries(manifest.files).filter(([name]) => !name.startsWith('qualification/')));
+  if (manifest.files['input.json'] !== hash(JSON.stringify(manifest.input) + '\n')) throw new Error('Qualified input metadata bytes mismatch');
+  const original = Object.fromEntries(Object.entries(manifest.files).filter(([name]) => !name.startsWith('qualification/') && name !== 'input.json'));
   if (JSON.stringify(Object.entries(original).sort()) !== JSON.stringify(Object.entries(manifest.input.files).sort())) throw new Error('Qualified input bytes mismatch');
   for (const [name, hash] of Object.entries(manifest.files)) {
-    if (!/^(dist|npm|qualification)\/[A-Za-z0-9_.-]+$/.test(name) || !digest.test(hash)) throw new Error('Invalid release file declaration');
+    if (!/^(?:(dist|npm|qualification)\/[A-Za-z0-9_.-]+|input\.json)$/.test(name) || !digest.test(hash)) throw new Error('Invalid release file declaration');
   }
   if (JSON.stringify(Object.entries(manifest.files).sort()) !== JSON.stringify(Object.entries(actual).sort())) throw new Error('Release artifact checksum mismatch');
   for (const target of targets) if (!manifest.files[`dist/opv-${target}`]) throw new Error('Missing platform binary');

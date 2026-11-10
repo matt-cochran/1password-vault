@@ -67,10 +67,13 @@ export function qualify(directory: string): void {
     const npmEntry = [join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'),
       join(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js')].find(existsSync);
     if (!npmEntry) throw new Error('Native npm CLI is unavailable');
-    execute(process.execPath, [npmEntry, 'install', '--prefix', npmPrefix, '--offline', '--no-audit', '--no-fund', ...[...platformTarball, ...mainTarball].map(p => join(root, 'npm', p))]);
-    const npmRoot = join(npmPrefix, 'node_modules/@matthew-cochran');
+    execute(process.execPath, [npmEntry, 'install', '--global', '--prefix', npmPrefix, '--offline', '--no-audit', '--no-fund', ...[...platformTarball, ...mainTarball].map(p => join(root, 'npm', p))]);
+    const npmRoot = join(npmPrefix, process.platform === 'win32' ? 'node_modules' : 'lib/node_modules', '@matthew-cochran');
     const installedBinary = join(npmRoot, `opv-${platform}`, 'bin', process.platform === 'win32' ? 'opv.exe' : 'opv');
     if (hash(readFileSync(installedBinary)) !== hash(readFileSync(native))) throw new Error('Installed npm binary differs from retained native asset');
+    const canonical = process.platform === 'win32' ? join(home, 'AppData/Local/Programs/opv/opv.exe') : join(home, '.local/bin/opv');
+    if (hash(readFileSync(canonical)) !== hash(readFileSync(native))) throw new Error('Global npm postinstall did not preserve exact candidate binary bytes');
+    env.npm_config_global = 'true';
     const npmResults = probe(process.execPath, [join(npmRoot, 'opv/bin/opv.js')], 'npm');
     if (JSON.stringify(nativeResults) !== JSON.stringify(npmResults)) throw new Error('Native/npm embedded capability parity mismatch');
     const result: Qualification = { schema: 1, platform, version: input.version, source_sha: input.source_sha, tree: input.tree,

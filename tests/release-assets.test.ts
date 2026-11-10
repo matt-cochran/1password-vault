@@ -9,6 +9,7 @@ for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl',
 actual['dist/opv'] = 'd'.repeat(64); actual['dist/SHA256SUMS'] = 'd'.repeat(64);
 for (let n = 0; n < 7; n++) actual[`npm/package-${n}.tgz`] = 'd'.repeat(64);
 const input = { version: '0.18.3', tree, source_sha: 'b'.repeat(40), run_id: 12, run_attempt: 2, files: { ...actual } };
+actual['input.json'] = hash(JSON.stringify(input) + '\n');
 const qualifications = Object.fromEntries(Object.keys(qualificationPlatforms).map(platform => {
   const q: Qualification = { schema: 1, platform, version: input.version, source_sha: input.source_sha, tree, run_id: 12, run_attempt: 2,
     input_sha256: hash(JSON.stringify(input)), binary_sha256: 'd'.repeat(64), checks: [...checks] };
@@ -187,4 +188,10 @@ test('qualified receipt bytes and original input checksums cannot be substituted
   assert.throws(() => validate({ ...manifest, qualifications: { ...qualifications, 'linux-x64': changed } }, run, repository, tree, actual));
   const changedInput = { ...input, files: { ...input.files, 'dist/opv': 'e'.repeat(64) } };
   assert.throws(() => validate({ ...manifest, input: changedInput }, run, repository, tree, actual));
+});
+
+
+test('retained input metadata bytes are immutable too', () => {
+  assert.throws(() => validate(manifest, run, repository, tree, { ...actual, 'input.json': 'e'.repeat(64) }));
+  assert.throws(() => validate({ ...manifest, files: { ...actual, 'input.json': 'e'.repeat(64) } }, run, repository, tree, { ...actual, 'input.json': 'e'.repeat(64) }));
 });

@@ -587,6 +587,7 @@ fn a_generated_ed25519_key_is_delivered_byte_exact_in_a_private_file() {
     use std::os::unix::fs::PermissionsExt;
     let value = make(Recipe::SshEd25519).unwrap();
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let open = crate::app::local_delivery::OpenDir::open_private(dir.path()).unwrap();
     crate::app::local_delivery::write_file(&open, "signing-key", value.expose().as_bytes())
         .unwrap();
