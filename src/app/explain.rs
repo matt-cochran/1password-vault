@@ -1210,6 +1210,15 @@ mod tests {
     }
 
     #[test]
+    fn prints_ssh_ed25519_rule() {
+        let f = fleet_with(
+            "[products.extra.keys.SSH_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = { ssh_ed25519 = true }\n",
+        );
+        let out = explain(&f, "extra/SSH_KEY", Some("prod")).unwrap();
+        assert!(out.contains("ssh_ed25519 = true"), "{out}");
+    }
+
+    #[test]
     fn prints_no_rules_as_dash() {
         let f =
             fleet_with("[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n");

@@ -187,6 +187,7 @@ fn rules_loosened(base: &Rules, head: &Rules) -> bool {
         || (base.email_list && !head.email_list)
         || (base.https_url && !head.https_url)
         || (base.age_identity && !head.age_identity)
+        || (base.ssh_ed25519 && !head.ssh_ed25519)
         || dropped_entries(base.not_prefix.as_ref(), head.not_prefix.as_ref())
         || dropped_strings(&base.refuse_in, &head.refuse_in)
         || widened_strings(base.r#enum.as_ref(), head.r#enum.as_ref())
@@ -219,6 +220,44 @@ fn widened_strings(base: Option<&Vec<String>>, head: Option<&Vec<String>>) -> bo
     };
     let head = head.map(Vec::as_slice).unwrap_or_default();
     head.iter().any(|entry| !base.contains(entry))
+}
+
+#[cfg(test)]
+mod surface_text_tests {
+    use super::{Relaxation, RelaxationKind, relaxations};
+
+    const ENVS: &str = "[environments.dev]\ntier = \"shared\"\n\
+        boundaries.app = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\n\
+        [environments.prod]\ntier = \"production\"\n\
+        boundaries.app = { vault_id = \"vprod000000000000000000001\", item_id = \"app\" }\n\n";
+
+    fn diff(base_key: &str, head_key: &str) -> Vec<Relaxation> {
+        let base =
+            crate::config::parse(&format!("{ENVS}[products.app.keys.API_KEY]\n{base_key}\n"))
+                .expect("base contract parses");
+        let head =
+            crate::config::parse(&format!("{ENVS}[products.app.keys.API_KEY]\n{head_key}\n"))
+                .expect("head contract parses");
+        relaxations(&base, &head)
+    }
+
+    /// #293: dropping an `ssh_ed25519` rule loosens the contract like dropping
+    /// `age_identity`.
+    #[test]
+    fn removing_an_ssh_ed25519_rule_is_a_rule_removed_relaxation() {
+        assert_eq!(
+            diff(
+                "kind = \"secret\"\nrules = { ssh_ed25519 = true }\n",
+                "kind = \"secret\"\n",
+            ),
+            vec![Relaxation::new(
+                "app",
+                "API_KEY",
+                None,
+                RelaxationKind::RuleRemoved,
+            )],
+        );
+    }
 }
 
 #[cfg(test)]

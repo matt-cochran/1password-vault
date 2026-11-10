@@ -483,7 +483,8 @@ Examples:
 
 const PROPOSE_GENERATE_QUICK: &str = "\
 Examples:
-  opv propose generate dev api/SESSION_KEY # a key with base64_bytes = 32: 32 random bytes";
+  opv propose generate dev api/SESSION_KEY # a key with base64_bytes = 32: 32 random bytes
+  opv propose generate dev api/SSH_KEY     # a key with ssh_ed25519 = true: an OpenSSH Ed25519 key";
 
 const APPLY_QUICK: &str = "\
 Examples:
@@ -1644,7 +1645,8 @@ enum ProposeCmd {
         #[command(flatten)]
         out: ProposeOut,
     },
-    /// Generated values for rule-backed keys (base64_bytes / hex_bytes).
+    /// Generated values for rule-backed keys (base64_bytes, hex_bytes, age_identity or
+    /// ssh_ed25519).
     #[command(before_help = PROPOSE_GENERATE_QUICK)]
     Generate {
         /// Environment name from the configuration.
@@ -6244,6 +6246,23 @@ mod tests {
         for (name, long, _) in leaf_helps() {
             assert!(long.trim_end().ends_with(GLOBAL_LINE), "{name}: {long}");
         }
+    }
+
+    /// #293: `opv propose generate --help` names every recipe a rule-backed key can carry.
+    #[test]
+    fn propose_generate_help_names_all_four_recipes() {
+        let mut cmd = cli_command();
+        let propose = cmd.find_subcommand_mut("propose").unwrap();
+        let generate = propose.find_subcommand_mut("generate").unwrap();
+        let help = generate.render_long_help().to_string();
+        let named: Vec<&str> = ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| help.contains(recipe))
+            .collect();
+        assert_eq!(
+            named,
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+        );
     }
 
     /// H9: the root help still documents the global options in full.

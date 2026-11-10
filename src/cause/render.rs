@@ -1864,9 +1864,15 @@ fn generate_refused(
     let pk = format!("{product}/{key}");
     let open = Next::Check(cmd(&["open"], &[pk.as_str(), "--env", env.as_str()]));
     match reason {
-        GenerateRefusal::ProviderIssued | GenerateRefusal::NoByteCount => plan(
+        GenerateRefusal::ProviderIssued => plan(
             fill(format!(
                 "get {pk} for environment {env} from the provider that issues it, and type it in 1Password"
+            )),
+            open,
+        ),
+        GenerateRefusal::NoByteCount => plan(
+            fill(format!(
+                "give {pk} a generation recipe (base64_bytes, hex_bytes, age_identity or ssh_ed25519) and regenerate it, or get it from the provider that issues it and type it in 1Password"
             )),
             open,
         ),
@@ -1883,7 +1889,7 @@ fn generate_refused(
         ),
         GenerateRefusal::ByteCountOutOfRange => plan(
             inspect(format!(
-                "give {pk} one of base64_bytes or hex_bytes, between 16 and 1024"
+                "give {pk} one generation recipe: base64_bytes or hex_bytes between 16 and 1024, or age_identity or ssh_ed25519"
             )),
             Next::Run(cmd(&["config", "edit"], &[])),
         ),
@@ -5830,6 +5836,57 @@ pub fn document(
             next_value(&p.next, inv)
         },
     })
+}
+
+#[cfg(test)]
+mod surface_text_tests {
+    use super::*;
+
+    fn generate_refused(reason: GenerateRefusal) -> Cause {
+        Cause::Guard {
+            guard: Guard::GenerateRefused {
+                product: ProductName::new("web"),
+                key: KeyName::new("TOKEN"),
+                env: EnvName::new("prod"),
+                reason,
+            },
+        }
+    }
+
+    fn named_recipes(words: &str) -> Vec<&'static str> {
+        ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| words.contains(recipe))
+            .collect()
+    }
+
+    fn do_text(reason: GenerateRefusal) -> String {
+        let inv = Invocation::from_cli(&[
+            "opv".to_string(),
+            "apply".into(),
+            "--generate".into(),
+            "prod:web/TOKEN".into(),
+        ]);
+        generate_refused(reason).do_text(&inv).unwrap_or_default()
+    }
+
+    /// #293: the do for a key with no recipe names every recipe a key can carry.
+    #[test]
+    fn no_byte_count_plan_names_all_four_recipes() {
+        assert_eq!(
+            named_recipes(&do_text(GenerateRefusal::NoByteCount)),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
+    }
+
+    /// #293: the do for an out-of-range byte count names every recipe a key can carry.
+    #[test]
+    fn byte_count_out_of_range_plan_names_all_four_recipes() {
+        assert_eq!(
+            named_recipes(&do_text(GenerateRefusal::ByteCountOutOfRange)),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
+    }
 }
 
 #[cfg(test)]

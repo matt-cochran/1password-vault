@@ -1341,9 +1341,9 @@ pub enum ItemProblem {
 pub enum GenerateRefusal {
     /// A prefix rule says the provider issues it.
     ProviderIssued,
-    /// The rules give no byte length.
+    /// The rules give no generate recipe (no byte count, no identity flag).
     NoByteCount,
-    /// The rules give a byte count outside 16..=1024, or both forms.
+    /// The rules give a byte count outside 16..=1024, or both byte-count forms.
     ByteCountOutOfRange,
     /// A personal key: each person keeps their own value.
     Personal,
@@ -1691,10 +1691,10 @@ impl GenerateRefusal {
         match self {
             GenerateRefusal::ProviderIssued => "its prefix rule says the provider issues it",
             GenerateRefusal::NoByteCount => {
-                "its rules give no byte length (base64_bytes or hex_bytes), so the provider issues it"
+                "its rules give no generation recipe (base64_bytes, hex_bytes, age_identity or ssh_ed25519), so the provider issues it"
             }
             GenerateRefusal::ByteCountOutOfRange => {
-                "its rules must give one of base64_bytes or hex_bytes, between 16 and 1024"
+                "its rules must give one generation recipe: base64_bytes or hex_bytes between 16 and 1024, or age_identity or ssh_ed25519"
             }
             GenerateRefusal::Personal => "it is a personal key, so each person has their own value",
             GenerateRefusal::Shared { .. } => {
@@ -2757,6 +2757,36 @@ impl RetryClass {
             RetryClass::Never => "never",
             RetryClass::CheckFirst => "check_first",
         }
+    }
+}
+
+#[cfg(test)]
+mod surface_text_tests {
+    use super::GenerateRefusal;
+
+    fn named_recipes(words: &str) -> Vec<&'static str> {
+        ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| words.contains(recipe))
+            .collect()
+    }
+
+    /// #293: the refusal for a key with no recipe names every recipe a key can carry.
+    #[test]
+    fn no_byte_count_words_name_all_four_recipes() {
+        assert_eq!(
+            named_recipes(GenerateRefusal::NoByteCount.words()),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
+    }
+
+    /// #293: the refusal for an out-of-range byte count names every recipe a key can carry.
+    #[test]
+    fn byte_count_out_of_range_words_name_all_four_recipes() {
+        assert_eq!(
+            named_recipes(GenerateRefusal::ByteCountOutOfRange.words()),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
     }
 }
 
