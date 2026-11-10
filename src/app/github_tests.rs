@@ -934,3 +934,24 @@ fn github_file_variables_and_nul_are_blocked_before_any_secret_write() {
         assert!(!sim.writes_started());
     }
 }
+
+#[test]
+fn github_legacy_file_backed_single_line_config_remains_an_ordinary_variable() {
+    let value = "service.name=fixture";
+    let (fleet, sim) = file_secret_world(value, "config");
+    let (result, _) = sync_on(&sim, &fleet, &SyncOpts::default());
+    assert!(result.is_ok());
+    let world = sim.world.borrow();
+    for repo in ["example-org/a", "example-org/b"] {
+        assert_eq!(
+            world.variables[&(repo.into(), Some("staging".into()))]["APP_KEY"],
+            value
+        );
+    }
+    assert!(
+        !sim.calls
+            .borrow()
+            .iter()
+            .any(|call| call.args.iter().any(|arg| arg.ends_with("/public-key")))
+    );
+}

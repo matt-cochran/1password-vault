@@ -431,17 +431,16 @@ pub fn build_with_gate(
                     .target
                     .and_then(|t| env.targets.get(t))
                     .map(|t| t.config.channels());
-                let api_secret = channels
-                    .as_ref()
-                    .is_some_and(|c| matches!(c.files, FileCapability::ApiSecret));
+                let api_secret = spec.kind == Kind::Secret
+                    && channels
+                        .as_ref()
+                        .is_some_and(|c| matches!(c.files, FileCapability::ApiSecret));
                 if spec.file.is_some() && api_secret && rules::applies(spec, env_name, env, product)
                 {
-                    if spec.kind != Kind::Secret
-                        || !matches!(
-                            channels.as_ref().map(|c| &c.secret),
-                            Some(Channel::Store { .. })
-                        )
-                    {
+                    if !matches!(
+                        channels.as_ref().map(|c| &c.secret),
+                        Some(Channel::Store { .. })
+                    ) {
                         return Err(KeyState::RuleFailed(
                             "file",
                             Reason::Fixed("file API payload requires a secret-store channel"),
@@ -461,10 +460,9 @@ pub fn build_with_gate(
                 let verbatim = spec.file.is_some()
                     && (opts.target.is_none()
                         || channels.as_ref().is_some_and(|c| {
-                            matches!(
-                                c.files,
-                                FileCapability::Native { .. } | FileCapability::ApiSecret
-                            )
+                            matches!(c.files, FileCapability::Native { .. })
+                                || (matches!(c.files, FileCapability::ApiSecret)
+                                    && spec.kind == Kind::Secret)
                         }));
                 rules::check_verbatim(product, key, spec, env_name, env, value, verbatim)
                     .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))

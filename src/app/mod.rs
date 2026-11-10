@@ -1223,7 +1223,7 @@ pub(crate) fn target_cell(
     };
     let form = match channels.files {
         FileCapability::Native { .. } => "file (verbatim)".to_string(),
-        FileCapability::ApiSecret => "API secret (verbatim)".to_string(),
+        FileCapability::ApiSecret if r.kind == Kind::Secret => "API secret (verbatim)".to_string(),
         _ => match spec.and_then(|s| s.rules.transform.as_deref()) {
             Some(t) => format!("env ({t})"),
             None => "env".to_string(),
@@ -1253,7 +1253,7 @@ pub(crate) fn file_destination_lines(
         })
         .map(|r| match channels.files {
             FileCapability::Native { .. } => String::new(),
-            FileCapability::ApiSecret => format!(
+            FileCapability::ApiSecret if r.kind == Kind::Secret => format!(
                 "{}: note: {} file source via secret API (verbatim)",
                 placement(env_name, target),
                 key_label(&r.product, &r.key)
@@ -1264,7 +1264,7 @@ pub(crate) fn file_destination_lines(
                 key_label(&r.product, &r.key),
                 note
             ),
-            FileCapability::None => format!(
+            FileCapability::None | FileCapability::ApiSecret => format!(
                 "{}: warning: {} file destination not honoured on {}",
                 placement(env_name, target),
                 key_label(&r.product, &r.key),
