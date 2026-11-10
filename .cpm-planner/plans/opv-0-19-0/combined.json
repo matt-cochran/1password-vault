@@ -19,7 +19,9 @@
       "owned_files": [
         "src/domain/model.rs",
         "src/app/generate.rs",
-        "src/config.rs"
+        "src/config.rs",
+        "src/app/generate_age_tests.rs",
+        "src/app/generate_ssh_tests.rs"
       ],
       "prerequisites": [
         {
@@ -139,7 +141,8 @@
     {
       "id": "ssh-keygen",
       "owned_files": [
-        "src/app/generate_ssh.rs"
+        "src/app/generate_ssh.rs",
+        "src/app/generate.rs"
       ],
       "prerequisites": [
         {
@@ -373,9 +376,10 @@
       "id": "credential-lifecycle-contract",
       "owned_files": [
         "src/domain/credential.rs",
+        "src/domain/credential_tests.rs",
+        "src/domain/mod.rs",
         "src/provider.rs",
-        "src/config/bindings.rs",
-        "src/domain/mod.rs"
+        "src/config/bindings.rs"
       ],
       "prerequisites": [
         {
@@ -420,7 +424,8 @@
         "src/app/access_create.rs",
         "src/app/target_credentials.rs",
         "src/adapters/fly/login.rs",
-        "src/app/expiry_recording_tests.rs"
+        "src/app/expiry_recording_tests.rs",
+        "src/adapters/fly/config.rs"
       ],
       "prerequisites": [
         {
