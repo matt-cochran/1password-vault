@@ -103,6 +103,25 @@ fn the_age_identity_recipe_names_itself() {
     );
 }
 
+// #294: an `ssh_ed25519 = true` key is a fresh Ed25519 OpenSSH keypair.
+
+#[test]
+fn an_ssh_ed25519_key_gets_the_ssh_ed25519_recipe() {
+    let s = session_key_with(|s| {
+        s.rules.base64_bytes = None;
+        s.rules.ssh_ed25519 = true;
+    });
+    assert_eq!(
+        recipe("api", "SESSION_KEY", "dev", &s).unwrap(),
+        Recipe::SshEd25519
+    );
+}
+
+#[test]
+fn the_ssh_ed25519_recipe_names_itself() {
+    assert_eq!(Recipe::SshEd25519.describe(), "an Ed25519 OpenSSH key");
+}
+
 #[test]
 fn an_age_identity_prints_its_recipient() {
     let (fleet, op, id) = world();
@@ -291,6 +310,57 @@ fn a_personal_key_is_refused_as_personal() {
     let s = session_key_with(|s| s.personal = true);
     let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
     assert!(why_of(&e).contains("personal"), "{e}");
+}
+
+// R4 (#293/#294): one `KeySpec` predicate decides the generate shape, and `recipe()`
+// agrees with it: an identity rule never makes a personal or shared key generatable.
+
+#[test]
+fn a_personal_age_identity_key_has_no_generate_recipe() {
+    let s = session_key_with(|s| {
+        s.personal = true;
+        s.rules.base64_bytes = None;
+        s.rules.age_identity = true;
+    });
+    assert!(!s.has_generate_recipe());
+}
+
+#[test]
+fn a_personal_age_identity_key_is_refused_as_personal() {
+    let s = session_key_with(|s| {
+        s.personal = true;
+        s.rules.base64_bytes = None;
+        s.rules.age_identity = true;
+    });
+    let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
+    assert!(why_of(&e).contains("personal"), "{e}");
+}
+
+#[test]
+fn a_shared_ssh_ed25519_key_has_no_generate_recipe() {
+    let s = session_key_with(|s| {
+        s.from = Some("api/SESSION_KEY".into());
+        s.rules.base64_bytes = None;
+        s.rules.ssh_ed25519 = true;
+    });
+    assert!(!s.has_generate_recipe());
+}
+
+#[test]
+fn a_shared_ssh_ed25519_key_is_refused_as_shared() {
+    let s = session_key_with(|s| {
+        s.from = Some("api/SESSION_KEY".into());
+        s.rules.base64_bytes = None;
+        s.rules.ssh_ed25519 = true;
+    });
+    let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
+    assert_eq!(
+        why_of(&e),
+        GenerateRefusal::Shared {
+            from: "api/SESSION_KEY".into()
+        }
+        .words()
+    );
 }
 
 #[test]

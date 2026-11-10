@@ -35,6 +35,8 @@ pub enum Recipe {
     /// A fresh age X25519 identity (`AGE-SECRET-KEY-1…`), whose public `age1…`
     /// recipient is printed for the sealed target's `recipients` (§7.1).
     AgeIdentity,
+    /// A fresh Ed25519 OpenSSH keypair (#294), encoded the way `ssh-keygen` writes one.
+    SshEd25519,
 }
 
 impl Recipe {
@@ -44,6 +46,7 @@ impl Recipe {
             Recipe::Base64(n) => format!("base64, {n} random bytes"),
             Recipe::Hex(n) => format!("hex, {n} random bytes"),
             Recipe::AgeIdentity => "an age X25519 identity".to_string(),
+            Recipe::SshEd25519 => "an Ed25519 OpenSSH key".to_string(),
         }
     }
 }
@@ -72,26 +75,36 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     if super::deliver_only::is_infrastructure(spec) {
         return refuse(GenerateRefusal::Infrastructure);
     }
-    // An age identity carries its meaning in the flag, not a byte count, so it is chosen
-    // before any shape rule that would otherwise refuse it (§7.1).
-    if r.age_identity {
-        return Ok(Recipe::AgeIdentity);
-    }
-    if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
-        return refuse(GenerateRefusal::ProviderIssued);
-    }
     if spec.personal {
         return refuse(GenerateRefusal::Personal);
     }
     if let Some(from) = &spec.from {
         return refuse(GenerateRefusal::Shared { from: from.clone() });
     }
-    match (r.base64_bytes, r.hex_bytes) {
-        (Some(n), None) if (16..=1024).contains(&n) => Ok(Recipe::Base64(n)),
-        (None, Some(n)) if (16..=1024).contains(&n) => Ok(Recipe::Hex(n)),
-        (Some(_) | None, Some(_) | None) if r.base64_bytes.is_some() || r.hex_bytes.is_some() => {
+    // An identity carries its meaning in the flag, not a byte count or a prefix, so it is
+    // chosen before any shape rule that would otherwise refuse it (§7.1).
+    if r.age_identity {
+        return Ok(Recipe::AgeIdentity);
+    }
+    if r.ssh_ed25519 {
+        return Ok(Recipe::SshEd25519);
+    }
+    if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
+        return refuse(GenerateRefusal::ProviderIssued);
+    }
+    // The positive shape is decided by the same domain predicate the config validator uses
+    // ([`KeySpec::has_generate_recipe`]), so the two can never disagree. Everything that is
+    // left is a key with exactly one in-range byte count.
+    if !spec.has_generate_recipe() {
+        return if r.base64_bytes.is_some() || r.hex_bytes.is_some() {
             refuse(GenerateRefusal::ByteCountOutOfRange)
-        }
+        } else {
+            refuse(GenerateRefusal::NoByteCount)
+        };
+    }
+    match (r.base64_bytes, r.hex_bytes) {
+        (Some(n), None) => Ok(Recipe::Base64(n)),
+        (None, Some(n)) => Ok(Recipe::Hex(n)),
         _ => refuse(GenerateRefusal::NoByteCount),
     }
 }
@@ -112,13 +125,16 @@ pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
     let n = match recipe {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
         Recipe::AgeIdentity => return Ok(make_identity().0),
+        Recipe::SshEd25519 => unimplemented!("ssh_ed25519 keygen: ssh-keygen deliverable"),
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
     getrandom::fill(&mut bytes).map_err(|_| -> Error { random_source_failed() })?;
     let text = match recipe {
         Recipe::Base64(_) => base64::engine::general_purpose::STANDARD.encode(&*bytes),
         Recipe::Hex(_) => hex::encode(&*bytes),
-        Recipe::AgeIdentity => unreachable!("handled by the early return above"),
+        Recipe::AgeIdentity | Recipe::SshEd25519 => {
+            unreachable!("handled by the early return above")
+        }
     };
     Ok(SecretValue::new(text))
 }
@@ -271,3 +287,11 @@ pub fn plan(
 #[cfg(test)]
 #[path = "generate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "generate_age_tests.rs"]
+mod age_tests;
+
+#[cfg(test)]
+#[path = "generate_ssh_tests.rs"]
+mod ssh_tests;

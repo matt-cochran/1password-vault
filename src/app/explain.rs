@@ -935,6 +935,7 @@ fn describe_rules(r: &Rules) -> Vec<String> {
         refuse_in,
         transform,
         age_identity,
+        ssh_ed25519,
     } = r;
     let mut out = Vec::new();
     if let Some(p) = prefix {
@@ -989,6 +990,9 @@ fn describe_rules(r: &Rules) -> Vec<String> {
     }
     if *age_identity {
         out.push("age_identity = true".into());
+    }
+    if *ssh_ed25519 {
+        out.push("ssh_ed25519 = true".into());
     }
     out
 }

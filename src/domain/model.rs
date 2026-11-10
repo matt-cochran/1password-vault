@@ -43,6 +43,10 @@ pub struct Rules {
     /// (design `sealed-target` §3.1-8, T14).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub age_identity: bool,
+    /// The key holds a fresh Ed25519 OpenSSH keypair (`ssh-ed25519 …`), made by opv with
+    /// `ssh-keygen`'s encoding (#294). Mutually exclusive with `age_identity`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ssh_ed25519: bool,
 }
 
 /// A string or a list of strings in TOML (`x = "a"` or `x = ["a", "b"]`).
@@ -203,14 +207,19 @@ impl KeySpec {
     /// Whether this key's rules give a generate recipe: the pure part of
     /// [`crate::app::generate::recipe`]. Mirrors the refusals there (a provider-issued prefix
     /// rule, a personal key, a shared key, or no in-range byte count), so `source =
-    /// "generated"` names a key opv can actually generate. `generate.rs` evaluates the same
-    /// conditions.
+    /// "generated"` names a key opv can actually generate. `generate.rs` gates its positive
+    /// answer on this same predicate, so the two can never disagree.
     pub fn has_generate_recipe(&self) -> bool {
         let r = &self.rules;
-        if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
+        if self.personal || self.from.is_some() {
             return false;
         }
-        if self.personal || self.from.is_some() {
+        // An identity carries its meaning in the flag, so a prefix rule describing its text
+        // (`AGE-SECRET-KEY-1`) does not make it provider-issued (§7.1).
+        if r.age_identity || r.ssh_ed25519 {
+            return true;
+        }
+        if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
             return false;
         }
         matches!(

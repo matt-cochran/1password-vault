@@ -141,6 +141,10 @@ fn records_reads_each_targets_ci_service_account_expiry() {
             out[0].target.as_deref(),
             out[0].expires_on.as_deref()
         ),
-        (CredentialKind::ServiceAccount, Some("web"), Some("2026-12-01"))
+        (
+            CredentialKind::ServiceAccount,
+            Some("web"),
+            Some("2026-12-01")
+        )
     );
 }
