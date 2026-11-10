@@ -10,14 +10,16 @@ use serde::Deserialize;
 use super::containerapp::ContainerApp;
 use super::keyvault::KeyVault;
 use super::preflight;
-use crate::cause::{Cause, ConfigCheck, DottedPath, FieldRule};
+use crate::cause::{Cause, ConfigCheck, DottedPath, FieldRule, PatternId};
 use crate::config::{check_ident, is_id};
+use crate::domain::FederatedIdentity;
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
-    Provider, Section, StoreConfig, StoreNameRules, TargetConfig, eq_as, init_lines,
+    Channel, Channels, Check, DeployLogin, FileCapability, FleetRefusal, InitField, NameRules,
+    Preflight, PreflightMode, Provider, Section, StoreConfig, StoreNameRules, TargetConfig, eq_as,
+    init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -56,6 +58,9 @@ pub struct AzureTarget {
     /// `azure.companion_jobs`: Container Apps jobs in the app's resource group that read the
     /// same secrets (#238); empty when none is listed.
     pub companion_jobs: Vec<String>,
+    /// `azure.federated`: the non-secret ids of the CI deploy identity (#297); `None` in
+    /// secret mode (`deploy_credentials`).
+    pub federated: Option<FederatedIdentity>,
     /// The vault's `properties.vaultUri`, read once per run (NR-6); not configuration.
     pub vault_uri: ResolvedUri,
 }
@@ -130,6 +135,19 @@ struct RawAzure {
     config: Option<String>,
     #[serde(default)]
     companion_jobs: Vec<String>,
+    #[serde(default)]
+    federated: Option<RawFederated>,
+}
+
+/// `azure.federated` (#297): the tenant, client and subscription ids of a CI deploy
+/// identity. All non-secret; checked as the secret-mode ids are ([`super::login::is_guid`],
+/// [`super::login::is_domain`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFederated {
+    tenant_id: String,
+    client_id: String,
+    subscription_id: String,
 }
 
 /// The env-name template `opv init` writes when none is given.
@@ -186,6 +204,18 @@ static INIT_FIELDS: [InitField; 9] = [
 
 /// The `azure` field listing the app's companion jobs (#238).
 const COMPANION_JOBS: &str = "companion_jobs";
+
+/// `azure.federated.<field>` breaks `rule` (#297). Kept as a path of its own parts, so a
+/// bad id still shows its line and column.
+fn invalid_federated(field: &str, rule: FieldRule) -> Error {
+    Cause::ConfigInvalid {
+        source: crate::domain::model::ReadFrom::default().0,
+        at: None,
+        field: DottedPath(vec!["azure".into(), "federated".into(), field.into()]),
+        rule,
+    }
+    .into()
+}
 
 /// `azure.<field>` breaks `rule` (FR-28). The section does not carry its place in the
 /// file, so the field is named within the section.
@@ -263,6 +293,61 @@ impl Provider for AzureProvider {
 
     fn deploy_login(&self) -> Result<Box<dyn crate::provider::DeployLogin>, Error> {
         Ok(Box::new(super::login::start()?))
+    }
+
+    fn federated_login(
+        &self,
+        target: &dyn TargetConfig,
+    ) -> Option<Result<Box<dyn DeployLogin>, Error>> {
+        let a = target.as_any().downcast_ref::<AzureTarget>()?;
+        let f = a.federated.as_ref()?;
+        Some(Ok(Box::new(super::login::FederatedLogin::new(
+            f.tenant_id.clone(),
+            f.client_id.clone(),
+            f.subscription_id.clone(),
+        ))))
+    }
+
+    fn ci_needs_id_token(&self, target: &dyn TargetConfig) -> bool {
+        target
+            .as_any()
+            .downcast_ref::<AzureTarget>()
+            .is_some_and(|a| a.federated.is_some())
+    }
+
+    /// A target cannot both declare the ambient federated identity and hold a
+    /// `deploy_credentials` item (#297): the two are the same decision, made once.
+    fn check_fleet(&self, fleet: &crate::domain::Fleet) -> Result<(), Box<FleetRefusal>> {
+        for (env, e) in &fleet.environments {
+            for (name, t) in &e.targets {
+                let Some(a) = t.config.as_any().downcast_ref::<AzureTarget>() else {
+                    continue;
+                };
+                if a.federated.is_none() || t.deploy_credentials.is_none() {
+                    continue;
+                }
+                let base = ["environments", env.as_str(), "targets", name.as_str()];
+                let path = base
+                    .iter()
+                    .copied()
+                    .chain(["azure", "federated"])
+                    .map(str::to_string)
+                    .collect();
+                let other = base
+                    .iter()
+                    .copied()
+                    .chain(["deploy_credentials"])
+                    .map(str::to_string)
+                    .collect();
+                return Err(Box::new(FleetRefusal {
+                    path,
+                    rule: FieldRule::ConflictsWith {
+                        field: DottedPath(other),
+                    },
+                }));
+            }
+        }
+        Ok(())
     }
 
     fn setup_hint(&self) -> String {
@@ -373,6 +458,40 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
             ));
         }
     };
+    let federated = match &a.federated {
+        None => None,
+        Some(f) => {
+            if !super::login::is_guid(&f.tenant_id) && !super::login::is_domain(&f.tenant_id) {
+                return Err(invalid_federated(
+                    "tenant_id",
+                    FieldRule::Pattern {
+                        id: PatternId::AzureTenant,
+                    },
+                ));
+            }
+            if !super::login::is_guid(&f.client_id) {
+                return Err(invalid_federated(
+                    "client_id",
+                    FieldRule::Pattern {
+                        id: PatternId::Guid,
+                    },
+                ));
+            }
+            if !super::login::is_guid(&f.subscription_id) {
+                return Err(invalid_federated(
+                    "subscription_id",
+                    FieldRule::Pattern {
+                        id: PatternId::Guid,
+                    },
+                ));
+            }
+            Some(FederatedIdentity {
+                tenant_id: f.tenant_id.clone(),
+                client_id: f.client_id.clone(),
+                subscription_id: f.subscription_id.to_ascii_lowercase(),
+            })
+        }
+    };
     Ok(AzureTarget {
         subscription: a.subscription.0,
         key_vault: a.key_vault,
@@ -383,6 +502,7 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
         env_name_template: template,
         config,
         companion_jobs: a.companion_jobs,
+        federated,
         vault_uri: ResolvedUri::default(),
     })
 }
@@ -1120,6 +1240,105 @@ environments = ["prod"]
         assert!(
             section.contains("azure.companion_jobs = [\"a\", \"b\"]\n"),
             "{section}"
+        );
+    }
+
+    // federated (#297) --------------------------------------------------------------------
+
+    const FED_TENANT: &str = "11111111-1111-1111-1111-111111111111";
+    const FED_CLIENT: &str = "22222222-2222-2222-2222-222222222222";
+    const FED_SUB: &str = "33333333-3333-3333-3333-333333333333";
+
+    /// The base target with `[environments.prod.targets.app.azure.federated]` appended.
+    fn with_federated(tenant: &str, client: &str, sub: &str) -> String {
+        let fed = format!(
+            "\n[environments.prod.targets.app.azure.federated]\n\
+             tenant_id = \"{tenant}\"\nclient_id = \"{client}\"\nsubscription_id = \"{sub}\"\n"
+        );
+        azure_doc(&format!("{AZURE_ENV}{fed}"), KEYS)
+    }
+
+    /// R1: an `azure.federated` table loads its three non-secret ids.
+    #[test]
+    fn azure_federated_table_parses_the_non_secret_ids() {
+        let f = parse(&with_federated(FED_TENANT, FED_CLIENT, FED_SUB)).unwrap();
+        assert_eq!(
+            azure_of(&f, "prod").federated,
+            Some(FederatedIdentity {
+                tenant_id: FED_TENANT.into(),
+                client_id: FED_CLIENT.into(),
+                subscription_id: FED_SUB.into(),
+            })
+        );
+    }
+
+    /// R1: the federated tenant uses the same check as `check_ids`.
+    #[test]
+    fn azure_federated_tenant_must_be_a_guid_or_domain() {
+        let e = azure_err(&with_federated("not an id!", FED_CLIENT, FED_SUB));
+        assert!(
+            e.contains("azure.federated.tenant_id must be a tenant ID"),
+            "{e}"
+        );
+    }
+
+    /// R1: the federated client id uses the same check as `check_ids`.
+    #[test]
+    fn azure_federated_client_must_be_a_guid() {
+        let e = azure_err(&with_federated(FED_TENANT, "my-app", FED_SUB));
+        assert!(
+            e.contains("azure.federated.client_id must be a GUID"),
+            "{e}"
+        );
+    }
+
+    /// R1: the federated subscription id uses the same check as `check_ids`.
+    #[test]
+    fn azure_federated_subscription_must_be_a_guid() {
+        let e = azure_err(&with_federated(FED_TENANT, FED_CLIENT, "my-sub"));
+        assert!(
+            e.contains("azure.federated.subscription_id must be a GUID"),
+            "{e}"
+        );
+    }
+
+    /// R2: a target without `federated` has no federated login.
+    #[test]
+    fn azure_provider_returns_no_federated_login_without_a_federated_table() {
+        let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
+        assert!(PROVIDER.federated_login(azure_of(&f, "prod")).is_none());
+    }
+
+    /// R2: a federated target gets the verifier of its ambient identity.
+    #[test]
+    fn azure_provider_returns_a_federated_login_for_a_federated_target() {
+        let f = parse(&with_federated(FED_TENANT, FED_CLIENT, FED_SUB)).unwrap();
+        assert!(PROVIDER.federated_login(azure_of(&f, "prod")).is_some());
+    }
+
+    /// R2: only a federated target needs `id-token: write` in its CI job.
+    #[test]
+    fn azure_ci_needs_id_token_only_for_a_federated_target() {
+        let f = parse(&with_federated(FED_TENANT, FED_CLIENT, FED_SUB)).unwrap();
+        assert!(PROVIDER.ci_needs_id_token(azure_of(&f, "prod")));
+    }
+
+    /// R1: a target cannot declare federated mode and `deploy_credentials` together.
+    #[test]
+    fn federated_and_deploy_credentials_together_are_refused_naming_both_fields() {
+        let env = AZURE_ENV.replace(
+            "state_vault_id = \"s\"",
+            "state_vault_id = \"s\"\ndeploy_credentials = \"op://ops/azure-prod\"",
+        );
+        let fed = format!(
+            "\n[environments.prod.targets.app.azure.federated]\n\
+             tenant_id = \"{FED_TENANT}\"\nclient_id = \"{FED_CLIENT}\"\nsubscription_id = \"{FED_SUB}\"\n"
+        );
+        let e = azure_err(&azure_doc(&format!("{env}{fed}"), KEYS));
+        assert!(
+            e.contains("azure.federated cannot be set together with")
+                && e.contains("deploy_credentials"),
+            "{e}"
         );
     }
 }

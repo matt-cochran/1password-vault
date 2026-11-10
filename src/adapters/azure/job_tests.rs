@@ -46,6 +46,7 @@ fn target(identity: &str) -> AzureTarget {
         identity: identity.into(),
         env_name_template: "{KEY}".into(),
         config: ConfigRoute::Env,
+        federated: None,
         vault_uri,
     }
 }

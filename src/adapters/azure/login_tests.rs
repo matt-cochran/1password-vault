@@ -2,6 +2,7 @@
 //! on any Unix with a temporary directory standing in for `$XDG_RUNTIME_DIR`.
 
 use super::*;
+use crate::host::{FakeEnv, Host};
 use crate::ramdir::private_dir;
 use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
@@ -360,4 +361,137 @@ fn an_unanswered_az_login_is_provider_unavailable() {
     r.push_unknown("timeout");
     let e = l.sign_in(values(), &r).unwrap_err();
     assert_eq!(e.code_str(), "provider_unavailable");
+}
+
+// Federated deploy sign-in (#297) ---------------------------------------------------------
+
+const FED_TENANT: &str = "11111111-1111-1111-1111-111111111111";
+const FED_CLIENT: &str = "22222222-2222-2222-2222-222222222222";
+const FED_SUB: &str = "33333333-3333-3333-3333-333333333333";
+
+fn federated_login() -> FederatedLogin {
+    FederatedLogin::new(FED_TENANT.into(), FED_CLIENT.into(), FED_SUB.into())
+}
+
+/// `az account show -o json`'s reply for a service principal `client` in `tenant`/`sub`.
+fn account_json(tenant: &str, client: &str, sub: &str, kind: &str) -> Output {
+    Output::success(
+        format!(
+            "{{\"id\":\"{sub}\",\"tenantId\":\"{tenant}\",\
+             \"user\":{{\"name\":\"{client}\",\"type\":\"{kind}\"}}}}"
+        )
+        .into_bytes(),
+    )
+}
+
+/// R4: the sign-in accepts the ambient identity when every field is the configured one.
+#[test]
+fn federated_sign_in_accepts_the_configured_service_principal() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(
+        FED_TENANT,
+        FED_CLIENT,
+        FED_SUB,
+        "servicePrincipal",
+    )]);
+    assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_ok());
+}
+
+/// R4: a different tenant is another identity, so the sign-in is refused.
+#[test]
+fn federated_sign_in_refuses_a_different_tenant() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(
+        "99999999-9999-9999-9999-999999999999",
+        FED_CLIENT,
+        FED_SUB,
+        "servicePrincipal",
+    )]);
+    assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_err());
+}
+
+/// R4: a different client id is another identity, so the sign-in is refused.
+#[test]
+fn federated_sign_in_refuses_a_different_client() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(
+        FED_TENANT,
+        "99999999-9999-9999-9999-999999999999",
+        FED_SUB,
+        "servicePrincipal",
+    )]);
+    assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_err());
+}
+
+/// R4: a different subscription id is another identity, so the sign-in is refused.
+#[test]
+fn federated_sign_in_refuses_a_different_subscription() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(
+        FED_TENANT,
+        FED_CLIENT,
+        "99999999-9999-9999-9999-999999999999",
+        "servicePrincipal",
+    )]);
+    assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_err());
+}
+
+/// R4: a person's own `az login` is not a service principal, so it is refused.
+#[test]
+fn federated_sign_in_refuses_a_non_service_principal() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(FED_TENANT, FED_CLIENT, FED_SUB, "user")]);
+    assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_err());
+}
+
+/// R4: a non-zero `az account show` is the missing sign-in, named as the CI workflow's.
+#[test]
+fn federated_sign_in_names_the_ci_workflow_when_no_sign_in_is_present() {
+    let mut l = federated_login();
+    let r = FakeRunner::new(crate::runner::fake::failed_read(1));
+    let host = Host::from_env(&FakeEnv::new("linux").var("GITHUB_ACTIONS"));
+    crate::host::with_test_host(host, || {
+        let e = with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).unwrap_err();
+        assert!(e.mentions("opv ci workflow"), "{e}");
+    });
+}
+
+/// R3: outside GitHub Actions the federated login refuses before any `az` call.
+#[test]
+fn federated_sign_in_refuses_outside_github_actions() {
+    let mut l = federated_login();
+    let r = FakeRunner::default();
+    let e = with_github_actions(false, || l.sign_in(BTreeMap::new(), &r)).unwrap_err();
+    assert_eq!(e.code_str(), "target_not_signed_in");
+}
+
+/// R4: verification reads the ambient identity before any other call.
+#[test]
+fn federated_sign_in_reads_az_account_show_as_json() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(
+        FED_TENANT,
+        FED_CLIENT,
+        FED_SUB,
+        "servicePrincipal",
+    )]);
+    with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).unwrap();
+    assert_eq!(
+        r.calls.borrow()[0].args.join(" "),
+        "account show -o json --only-show-errors"
+    );
+}
+
+/// R5: the federated login adds nothing to the runner's ambient `az` environment.
+#[test]
+fn federated_login_adds_no_environment() {
+    let l = federated_login();
+    assert!(l.env("az").is_empty());
+}
+
+/// R5: the federated login holds no value to hand to another program.
+#[test]
+fn federated_login_holds_no_secret() {
+    let l = federated_login();
+    assert!(l.held("AZURE_CLIENT_SECRET").is_none());
 }
