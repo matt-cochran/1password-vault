@@ -560,3 +560,83 @@ fn listing_in_a_missing_environment_leaves_the_setup_to_a_person() {
     let e = listing_in_missing_environment().unwrap_err();
     assert!(e.human_required());
 }
+
+#[test]
+fn utf8_file_secret_uses_sealed_api_json_and_preserves_every_trailing_byte() {
+    use base64::Engine as _;
+    let key = crypto_box::SecretKey::from([73u8; 32]);
+    let public = base64::engine::general_purpose::STANDARD.encode(key.public_key().as_bytes());
+    for text in [
+        "-----BEGIN PRIVATE KEY-----\nDISPOSABLE-FIXTURE\n-----END PRIVATE KEY-----\n",
+        " {\"unicode\":\"λ\",\"literal\":\"$NAME\\n\"}\r\n\r\n",
+    ] {
+        let response = json_output(serde_json::json!({"key_id":"fixture-key", "key":public}));
+        let r = FakeRunner::new([response, Output::success("")]);
+        let repos = repos();
+        let value = SecretValue::new(text.to_string());
+        let scope = Scope {
+            repos: &repos,
+            environment: Some("protected env"),
+        };
+        set_secrets(&r, scope, &[("APP_KEY".into(), &value)]).unwrap();
+        let calls = r.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].args,
+            [
+                "api",
+                "--method",
+                "GET",
+                "repos/example-org/example-repo/environments/protected%20env/secrets/public-key"
+            ]
+        );
+        assert_eq!(
+            calls[1].args,
+            [
+                "api",
+                "--method",
+                "PUT",
+                "repos/example-org/example-repo/environments/protected%20env/secrets/APP_KEY",
+                "--input",
+                "-",
+                "--silent"
+            ]
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(calls[1].stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["key_id"], "fixture-key");
+        let encrypted = base64::engine::general_purpose::STANDARD
+            .decode(payload["encrypted_value"].as_str().unwrap())
+            .unwrap();
+        let decrypted = key.unseal(&encrypted).unwrap();
+        assert!(
+            decrypted == text.as_bytes(),
+            "sealed API payload must preserve the exact source bytes"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|c| !c.args.iter().any(|a| a.contains(text)))
+        );
+        assert!(!String::from_utf8_lossy(calls[1].stdin.as_deref().unwrap()).contains(text));
+    }
+}
+
+fn json_output(value: serde_json::Value) -> Output {
+    Output::success(serde_json::to_vec(&value).unwrap())
+}
+
+#[test]
+fn malformed_api_public_keys_refuse_before_any_secret_mutation() {
+    for value in [
+        serde_json::json!({"key_id":"fixture-key","key":"invalid"}),
+        serde_json::json!({"key_id":"","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}),
+    ] {
+        let r = FakeRunner::new([json_output(value)]);
+        let repos = repos();
+        let text = SecretValue::new("disposable multiline\n".into());
+        assert!(set_secrets(&r, scope(&repos), &[("APP_KEY".into(), &text)]).is_err());
+        assert_eq!(r.calls.borrow().len(), 1);
+        assert!(r.calls.borrow()[0].stdin.is_none());
+    }
+}

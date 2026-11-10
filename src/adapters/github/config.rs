@@ -312,7 +312,7 @@ impl TargetConfig for GithubTarget {
                 label: "GitHub secret",
             },
             config: Channel::Variables,
-            files: FileCapability::None,
+            files: FileCapability::ApiSecret,
         }
     }
     fn open<'a>(

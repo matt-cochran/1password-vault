@@ -809,7 +809,7 @@ fn documents() -> Value {
             "supplied_at_sync? (true for an infrastructure key: supplied at sync, never stored in 1Password; it then has no boundary, reference, inspect or readers)",
             "shared_from", "shared_by",
             "reference", "inspect", "readers: {deploy: [service account], ci}",
-            "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
+            "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account, file_delivery? {channel: secret_api, utf8_verbatim: true, filesystem: false}}"
         ],
         "version": [
             "opv: {version}",
@@ -833,6 +833,7 @@ fn documents() -> Value {
         ],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
         "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written, generated?, generated_by?, fragment? {toml, json, removed?, load_error {code, message}|null}}: the contract diff (names and rules, never a value or an id); generated: true when the configuration is generated, so the change goes into its generator and next is opv propose structure; generated_by names the generator its first line names (null when none) and fragment holds only the declarations the generator must emit, with the error the file would raise once merged; propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
+        "generation_rules": "exactly one of base64_bytes (16..1024), hex_bytes (16..1024), age_identity=true, ssh_ed25519=true; source=generated requires a supported recipe; structured identities require kind=secret, ssh_ed25519 also requires file delivery; propose generate is read-only, apply is person-only and refuses existing values; public recipient/public key/fingerprint only",
         "apply": "{plan_id, confirmed, steps_run, created, fields_added, generated [{environment, product, key}], record_written, config_written}: names and public ids only",
         "set": "{key, environment, state}: the key's value state after the entry (a word, never the value)",
         "provision": "opv.provision/1 (see schemas): the receipt, or with --dry-run the plan; names, versions and hashes only, never a value",
