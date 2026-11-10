@@ -27,6 +27,9 @@ use crate::domain::{KeySpec, SecretValue, key_label};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
+#[path = "generate_ssh.rs"]
+pub(crate) mod generate_ssh;
+
 /// How a key's value is generated: its encoding and byte count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recipe {
@@ -125,7 +128,7 @@ pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
     let n = match recipe {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
         Recipe::AgeIdentity => return Ok(make_identity().0),
-        Recipe::SshEd25519 => unimplemented!("ssh_ed25519 keygen: ssh-keygen deliverable"),
+        Recipe::SshEd25519 => return Ok(generate_ssh::make_ed25519()?.0),
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
     getrandom::fill(&mut bytes).map_err(|_| -> Error { random_source_failed() })?;
@@ -187,17 +190,24 @@ pub fn run_on(
         }
     }
     let mut writes: Vec<(String, String, SecretValue)> = Vec::with_capacity(chosen.len());
-    let mut recipients: Vec<Option<String>> = Vec::with_capacity(chosen.len());
+    let mut public_lines: Vec<Vec<String>> = Vec::with_capacity(chosen.len());
     for (p, k, rcp) in &chosen {
         match rcp {
             Recipe::AgeIdentity => {
                 let (value, recipient) = make_identity();
                 writes.push((p.clone(), k.clone(), value));
-                recipients.push(Some(recipient));
+                public_lines.push(vec![recipient]);
+            }
+            Recipe::SshEd25519 => {
+                let (value, ssh_public) = generate_ssh::make_ed25519()?;
+                // The private key is a secret before it can reach a write or an error path.
+                crate::scrub::register_secret(value.expose());
+                writes.push((p.clone(), k.clone(), value));
+                public_lines.push(vec![ssh_public.openssh, ssh_public.fingerprint]);
             }
             _ => {
                 writes.push((p.clone(), k.clone(), make(*rcp)?));
-                recipients.push(None);
+                public_lines.push(Vec::new());
             }
         }
     }
@@ -211,7 +221,7 @@ pub fn run_on(
             .collect(),
     };
     super::import::write_values(fleet, env, &writes, &by, r)?;
-    for ((p, k, rcp), recipient) in chosen.iter().zip(&recipients) {
+    for ((p, k, rcp), lines) in chosen.iter().zip(&public_lines) {
         writeln!(
             out,
             "generated {} in 1Password ({}); the value was never shown",
@@ -219,10 +229,10 @@ pub fn run_on(
             rcp.describe()
         )
         .map_err(write_err)?;
-        // The identity is a secret; only its public recipient is shown, so the person can
-        // put it in the sealed target's `recipients` (§7.1).
-        if let Some(recipient) = recipient {
-            writeln!(out, "{recipient}").map_err(write_err)?;
+        // Only public material is shown: an age recipient, or an SSH public key and its
+        // fingerprint, so the person can put it in the consumer's trust configuration.
+        for line in lines {
+            writeln!(out, "{line}").map_err(write_err)?;
         }
     }
     let next = crate::cause::Cmd {
