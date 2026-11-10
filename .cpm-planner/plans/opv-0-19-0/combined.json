@@ -194,9 +194,8 @@
       ],
       "prerequisites": [
         {
-          "id": "generate-rule-core",
-          "consumes": "Recipe::SshEd25519 variant",
-          "kind": "interface"
+          "id": "ssh-keygen",
+          "consumes": "working SshEd25519 keygen and public-key output"
         }
       ],
       "estimate": {
@@ -779,6 +778,51 @@
       }
     },
     {
+      "id": "identity-value-rules",
+      "owned_files": [
+        "src/domain/rules.rs",
+        "src/domain/rules_identity_tests.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "generate-rule-core",
+          "consumes": "age_identity and ssh_ed25519 rule fields",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.5,
+        "pessimistic": 4.0
+      },
+      "earning_rule": "fifty_fifty",
+      "metadata": {
+        "artifact": "rules engine: a stored age_identity value must parse as an age X25519 identity and an ssh_ed25519 value as an unencrypted Ed25519 OpenSSH private key (fixed reasons, never the value); an ssh_ed25519 value skips single_line/no_surrounding_space and is staged byte-exact",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#293",
+          "#294"
+        ],
+        "verify": [
+          "cargo test --features fake rules",
+          "cargo clippy --all-targets --features fake -- -D warnings"
+        ],
+        "junior": {
+          "acceptance": [
+            "malformed age identity fails with a fixed reason naming key and rule",
+            "malformed or non-Ed25519 or encrypted OpenSSH key fails with a fixed reason",
+            "a valid multiline ssh_ed25519 value passes and is staged unchanged",
+            "no failure message contains the value"
+          ],
+          "checks": [
+            "cargo test --features fake rules",
+            "cargo clippy --all-targets --features fake -- -D warnings"
+          ]
+        }
+      }
+    },
+    {
       "id": "integration-candidate",
       "owned_files": [
         "Cargo.toml",
@@ -813,6 +857,10 @@
         {
           "id": "azure-federated-doctor",
           "consumes": "federated doctor"
+        },
+        {
+          "id": "identity-value-rules",
+          "consumes": "identity value validation"
         }
       ],
       "estimate": {
@@ -989,10 +1037,6 @@
         {
           "id": "ssh-acceptance-tests",
           "consumes": "failing #294 acceptance tests"
-        },
-        {
-          "id": "ssh-keygen",
-          "consumes": "keygen implementation"
         },
         {
           "id": "ssh-provision-wiring",
