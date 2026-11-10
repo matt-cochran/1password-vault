@@ -734,7 +734,8 @@
         "src/schema.rs",
         "src/cause/mod.rs",
         "src/cause/render.rs",
-        "src/mcp.rs"
+        "src/mcp.rs",
+        "src/adapters/azure/login.rs"
       ],
       "prerequisites": [
         {
@@ -742,9 +743,8 @@
           "consumes": "help/schema/cause files with generation texts merged"
         },
         {
-          "id": "credential-lifecycle-contract",
-          "consumes": "credential kinds, states and error codes",
-          "kind": "interface"
+          "id": "azure-federated-login",
+          "consumes": "FederatedLogin refusal sites to give distinct causes"
         }
       ],
       "estimate": {
@@ -754,7 +754,7 @@
       },
       "earning_rule": "fifty_fifty",
       "metadata": {
-        "artifact": "--rotate, --federated, --expiry-check flags, credential error codes and Next: texts in clap, opv schema, MCP and cause rendering",
+        "artifact": "--rotate, --federated, --expiry-check flags, credential error codes and Next: texts in clap, opv schema, MCP and cause rendering; two new causes (federated sign-in outside GitHub Actions, ambient identity mismatch) with one Next: each, used by FederatedLogin in place of the generic signed-out refusal",
         "owner": "agent",
         "track": "development",
         "issues": [
