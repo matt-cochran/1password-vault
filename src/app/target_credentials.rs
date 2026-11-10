@@ -384,6 +384,14 @@ pub fn run(
         ];
         after_mint(e, done)
     })?;
+    // #296: the value-free expiry of the credential just minted, beside the contract. The
+    // provider's lifetime was asked for at the confirmation; the same configuration write
+    // records the reference, this records when it lapses.
+    record_minted_expiry(
+        config,
+        &crate::domain::credential::deploy_expires_path(env, name),
+        provider.minted_lifetime_days(),
+    )?;
     writeln!(
         out,
         "minted {credential:?} and stored it as item {} in vault {}; nothing was printed",
@@ -451,6 +459,29 @@ fn store(path: &Path) -> Result<Declaring, Error> {
     Ok(Declaring(FileStore {
         path: PathBuf::from(path),
     }))
+}
+
+/// Record the value-free expiry `date` at the dotted bindings `path`, beside the contract
+/// at `config` (#296). The other records are kept; the credential's value is never here.
+pub(crate) fn record_expiry(config: &Path, path: &str, date: &str) -> Result<(), Error> {
+    let mut bindings = crate::config::bindings::read_sibling(config)?;
+    bindings.insert(path, date);
+    crate::config::bindings::write_sibling(config, &bindings)
+}
+
+/// Record the expiry of a credential minted with `lifetime_days` for `path`, from today
+/// (UTC): nothing when the provider declares no lifetime (#296).
+pub(crate) fn record_minted_expiry(
+    config: &Path,
+    path: &str,
+    lifetime_days: Option<i64>,
+) -> Result<(), Error> {
+    match lifetime_days
+        .and_then(|days| crate::domain::credential::add_days(&crate::app::retire::today(), days))
+    {
+        Some(date) => record_expiry(config, path, &date),
+        None => Ok(()),
+    }
 }
 
 /// Record `deploy_credentials` on an existing target in the configuration at `path`

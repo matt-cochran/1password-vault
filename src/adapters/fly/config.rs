@@ -179,6 +179,12 @@ impl Provider for FlyProvider {
         Some(super::login::CLEANUP_HINT)
     }
 
+    /// A Fly deploy token is minted with a 90-day expiry (`--expiry 2160h`): the lifetime
+    /// recorded beside the credential in `secrets.bindings.toml` (#296).
+    fn minted_lifetime_days(&self) -> Option<i64> {
+        Some(i64::from(super::login::TOKEN_EXPIRY_HOURS / 24))
+    }
+
     /// C21 (A22): `flyctl tokens list --app <app>` shows the token opv minted.
     fn mint_refind(&self, target: &dyn TargetConfig) -> Option<crate::cause::VendorCmd> {
         let t = target.as_any().downcast_ref::<FlyTarget>()?;
@@ -499,6 +505,11 @@ mod tests {
     }
 
     /// Under deploy credentials a failed `auth whoami` is expected, not a sign-out.
+    #[test]
+    fn a_minted_deploy_token_lasts_ninety_days() {
+        assert_eq!(FlyProvider.minted_lifetime_days(), Some(90));
+    }
+
     #[test]
     fn whoami_failing_under_deploy_credentials_is_a_warning() {
         let fake = FakeRunner::new([crate::runner::Output::failure(1)]);

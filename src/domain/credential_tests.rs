@@ -148,3 +148,11 @@ fn records_reads_each_targets_ci_service_account_expiry() {
         )
     );
 }
+
+#[test]
+fn ninety_days_after_a_date_crosses_the_year_end() {
+    assert_eq!(
+        crate::domain::credential::add_days("2026-11-10", 90).as_deref(),
+        Some("2027-02-08")
+    );
+}
