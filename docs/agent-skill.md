@@ -130,6 +130,8 @@ For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys)
 then propose it with `opv_propose` `kind: generate` (CLI: `opv propose generate <env>
 <product/KEY>`), and have the person run `opv apply <plan_id>`: the value goes straight into
 1Password and is never shown. Never suggest `openssl rand` or pasting generated values.
+A key with `ssh_ed25519 = true` (an SSH signing key) is generated the same way and never
+with `ssh-keygen`: opv prints only its public key and `SHA256:` fingerprint.
 
 A held immutable key on Fly that blocks a product's delivery revision can be attested
 (`opv_propose` `kind: attest`, then the person's `opv apply <plan_id> --attest …`): explain
@@ -160,6 +162,16 @@ boundary vault to write. For the job file, run `opv ci workflow <env> --target <
 [--github-env <env>]` instead of writing YAML; committing it is a change the user approves.
 A `pending_revoke` finding means an old identity still reads the vault: once
 `opv delivery verify` passes, the user removes it in 1Password.
+
+Rotation is also the person's step. On `credential_expiring` or `credential_expired` (in
+`opv ready`), hand them the finding's command (`opv access <env> [--target <name>] --rotate
+--github <owner/repo>` or `opv target credentials <env> --target <name> --rotate`) and
+wait; they revoke the old credential afterwards. Never rotate or revoke one yourself.
+
+An Azure target with `azure.federated` deploys only from a GitHub Actions job that signed
+in through OIDC. `federated_outside_ci` on a local `status`, `plan`, `sync` or
+`doctor --env` is expected: do not sign in with `az login` to get past it; use the CI
+workflow its `next` names (`opv ci workflow <env> --target <name>`).
 
 ## Pick the flow from `opv ready --json`
 
