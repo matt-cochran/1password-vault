@@ -73,6 +73,14 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "HandoffPipeContested",
         "Windows-only named pipe; Azure has no simulator",
     ),
+    // #297: raised only by the Azure federated login (src/adapters/azure/login.rs), and
+    // opv-sim answers `az` as not installed. Reached by src/adapters/azure/login_tests.rs
+    // (`federated_sign_in_refuses_outside_github_actions`,
+    // `federated_sign_in_names_a_mismatch_by_its_own_code`) and src/cause/render_tests.rs.
+    (
+        "FederatedRefused",
+        "Azure federated login only; Azure has no simulator",
+    ),
     // Built only after `op service-account create` (src/app/access_create.rs), which opv-sim
     // does not model and nobody has recorded.
     (
