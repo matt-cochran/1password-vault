@@ -1,4 +1,4 @@
-import { hash, checks, platforms as qualificationPlatforms, validateQualification, type Qualification } from '../scripts/qualify-distribution.ts';
+import { hash, checks, platforms as qualificationPlatforms, validateQualification, validateNpmMetadata, type Qualification } from '../scripts/qualify-distribution.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { findRetainedCandidate, npmPublishAction, orderNpmTarballs, publishNpmTarballs, validate, waitForIntegrity, type Manifest } from '../scripts/release-assets.ts';
@@ -194,4 +194,17 @@ test('qualified receipt bytes and original input checksums cannot be substituted
 test('retained input metadata bytes are immutable too', () => {
   assert.throws(() => validate(manifest, run, repository, tree, { ...actual, 'input.json': 'e'.repeat(64) }));
   assert.throws(() => validate({ ...manifest, files: { ...actual, 'input.json': 'e'.repeat(64) } }, run, repository, tree, { ...actual, 'input.json': 'e'.repeat(64) }));
+});
+
+
+test('fresh npm install cannot mask wrong package versions or optional dependency wiring', () => {
+  const main = { name: '@matthew-cochran/opv', version: '0.18.3', optionalDependencies: Object.fromEntries(Object.keys(qualificationPlatforms).map(p => [`@matthew-cochran/opv-${p}`, '0.18.3'])) };
+  const native = { name: '@matthew-cochran/opv-linux-x64', version: '0.18.3', os: ['linux'], cpu: ['x64'] };
+  validateNpmMetadata(main, native, '0.18.3', 'linux-x64');
+  for (const wrong of [{ ...main, version: '0.18.2' }, { ...main, name: '@another/opv' },
+    { ...main, optionalDependencies: { ...main.optionalDependencies, '@matthew-cochran/opv-linux-x64': '0.18.2' } },
+    { ...main, optionalDependencies: { ...main.optionalDependencies, '@another/package': '0.18.3' } },
+    { ...main, optionalDependencies: {} }]) assert.throws(() => validateNpmMetadata(wrong, native, '0.18.3', 'linux-x64'));
+  for (const wrong of [{ ...native, version: '0.18.2' }, { ...native, name: '@another/opv-linux-x64' },
+    { ...native, os: ['darwin'] }, { ...native, cpu: ['arm64'] }]) assert.throws(() => validateNpmMetadata(main, wrong, '0.18.3', 'linux-x64'));
 });

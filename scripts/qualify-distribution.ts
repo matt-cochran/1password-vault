@@ -19,6 +19,14 @@ export function validateQualification(q: Qualification, input: any, platform: st
       || q.binary_sha256 !== input.files[`dist/opv-${platforms[platform as keyof typeof platforms]}`]
       || JSON.stringify(q.checks) !== JSON.stringify(checks)) throw new Error('Distribution qualification binding or required checks mismatch');
 }
+export function validateNpmMetadata(main: any, native: any, version: string, platform: string): void {
+  const expected = Object.fromEntries(Object.keys(platforms).map(p => [`@matthew-cochran/opv-${p}`, version]));
+  if (main.name !== '@matthew-cochran/opv' || main.version !== version
+      || native.name !== `@matthew-cochran/opv-${platform}` || native.version !== version
+      || JSON.stringify(Object.entries(main.optionalDependencies ?? {}).sort()) !== JSON.stringify(Object.entries(expected).sort())
+      || JSON.stringify(native.os) !== JSON.stringify([platform.split('-')[0]])
+      || JSON.stringify(native.cpu) !== JSON.stringify([platform.split('-')[1]])) throw new Error('Candidate npm package metadata/dependency version mismatch');
+}
 export function qualify(directory: string): void {
   const root = resolve(directory);
   const input = JSON.parse(readFileSync(join(root, 'input.json'), 'utf8'));
@@ -69,6 +77,8 @@ export function qualify(directory: string): void {
     if (!npmEntry) throw new Error('Native npm CLI is unavailable');
     execute(process.execPath, [npmEntry, 'install', '--global', '--prefix', npmPrefix, '--offline', '--no-audit', '--no-fund', ...[...platformTarball, ...mainTarball].map(p => join(root, 'npm', p))]);
     const npmRoot = join(npmPrefix, process.platform === 'win32' ? 'node_modules' : 'lib/node_modules', '@matthew-cochran');
+    validateNpmMetadata(JSON.parse(readFileSync(join(npmRoot, 'opv/package.json'), 'utf8')),
+      JSON.parse(readFileSync(join(npmRoot, `opv-${platform}/package.json`), 'utf8')), input.version, platform);
     const installedBinary = join(npmRoot, `opv-${platform}`, 'bin', process.platform === 'win32' ? 'opv.exe' : 'opv');
     if (hash(readFileSync(installedBinary)) !== hash(readFileSync(native))) throw new Error('Installed npm binary differs from retained native asset');
     const canonical = process.platform === 'win32' ? join(home, 'AppData/Local/Programs/opv/opv.exe') : join(home, '.local/bin/opv');
