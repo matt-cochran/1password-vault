@@ -19,7 +19,7 @@ use crate::cause::render::cmd_text;
 use crate::cause::{Cause, Cmd, UsageProblem};
 use crate::domain::{Environment, Fleet};
 use crate::error::Error;
-use crate::provider::Provider;
+use crate::provider::{Provider, TargetConfig};
 
 /// Print the workflow for target `target` of `env`, or refuse before writing anything.
 pub fn run(
@@ -44,8 +44,9 @@ pub fn run(
         deploy,
         confirm: e.confirm_env,
     };
-    let mut yaml = sign_in_note(&job, t.provider(), recorded).unwrap_or_default();
-    yaml.push_str(&workflow(&job, t.provider().ci_setup_step()));
+    let provider = t.provider();
+    let mut yaml = sign_in_note(&job, provider, t, recorded).unwrap_or_default();
+    yaml.push_str(&workflow(&job, provider, t));
     out.write_all(yaml.as_bytes()).map_err(write_err)
 }
 
@@ -63,6 +64,13 @@ pub fn run_on_change(fleet: &Fleet, every: u8, out: &mut dyn Write) -> Result<()
 pub fn run_drift(fleet: &Fleet, out: &mut dyn Write) -> Result<(), Error> {
     let envs = recipe_envs(fleet)?;
     out.write_all(drift(&envs).as_bytes()).map_err(write_err)
+}
+
+/// Print the daily credential-expiry check (#296): run `opv ready --json` with the CI
+/// reader token and open or update one issue when a credential is expiring or expired.
+/// Read-only output; the workflow reports and never mints or rotates a credential.
+pub fn run_expiry_check(_fleet: &Fleet, out: &mut dyn Write) -> Result<(), Error> {
+    out.write_all(expiry_check().as_bytes()).map_err(write_err)
 }
 
 /// The environments the two recipes cover: each with at least one target, in the
@@ -229,6 +237,55 @@ fn provider_setup(e: &Environment) -> Vec<&'static str> {
     steps
 }
 
+/// The daily credential-expiry check (#296): `opv ready --json` with the CI reader token,
+/// then one issue named `opv: CI credential expiry` opened or updated when a
+/// `credential_expiring` or `credential_expired` finding is present. Reports only.
+fn expiry_check() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut s = String::new();
+    s.push_str("# .github/workflows/opv-credential-expiry.yml\n");
+    s.push_str("# Runs daily (and on demand): checks whether a CI credential is expiring or has\n");
+    s.push_str("# expired, then opens or updates one issue. It only reports.\n");
+    s.push_str("name: \"opv: CI credential expiry\"\n");
+    s.push_str("on:\n");
+    s.push_str("  schedule: [{cron: \"17 5 * * *\"}]\n");
+    s.push_str("  workflow_dispatch:\n");
+    s.push_str("permissions:\n  contents: read\n  issues: write\n");
+    s.push_str("jobs:\n");
+    s.push_str("  expiry:\n");
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str("    env:\n");
+    s.push_str("      GH_TOKEN: ${{ github.token }}\n");
+    s.push_str("      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n");
+    s.push_str("      OP_CACHE: \"false\"\n");
+    s.push_str(&format!(
+        "      OPV_VERSION: v{version}   # pin the release you tested; bump it deliberately\n"
+    ));
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n");
+    s.push_str(&install_opv());
+    s.push_str("      - name: Report expiring or expired CI credentials\n");
+    s.push_str("        run: |\n");
+    s.push_str("          set -euo pipefail\n");
+    s.push_str("          ready=$(opv ready --json)\n");
+    s.push_str("          printf '%s\\n' \"$ready\" > ready.json\n");
+    s.push_str("          findings=$(printf '%s\\n' \"$ready\" | jq -r '[.findings[]? | select(.code == \"credential_expiring\" or .code == \"credential_expired\")] | length')\n");
+    s.push_str("          if [ \"$findings\" -eq 0 ]; then\n");
+    s.push_str("            echo \"no credential expiry findings\"\n");
+    s.push_str("            exit 0\n");
+    s.push_str("          fi\n");
+    s.push_str("          summary=$(printf '%s\\n' \"$ready\" | jq -r '[.findings[]? | select(.code == \"credential_expiring\" or .code == \"credential_expired\")] | .[] | \"- \" + .code + \": \" + (.message // .key // \"see opv ready\")')\n");
+    s.push_str("          title=\"opv: CI credential expiry\"\n");
+    s.push_str("          body=$(printf '%s\\n\\n%s\\n\\n%s\\n' \\\n");
+    s.push_str("            \"opv found CI credentials that are expiring or expired.\" \\\n");
+    s.push_str("            \"$summary\" \\\n");
+    s.push_str(
+        "            \"Run opv ready locally for the next step. This workflow only reports.\")\n",
+    );
+    s.push_str(crate::adapters::ci_secrets::OPEN_OR_UPDATE_ISSUE);
+    s
+}
+
 /// The whole drift workflow: one `drift` job over `envs`' matrix. `--fail-on-drift` names
 /// `target_drift`, `delivery verify --json` names `delivery_unverified` (both exit 8).
 fn drift(envs: &[&Environment]) -> String {
@@ -274,9 +331,14 @@ struct Job<'a> {
 /// The header lines that say the job cannot sign in to the target as printed, and what a
 /// person runs first (06.24); `None` when it can: the target's deploy credentials are
 /// recorded, or its provider's CI setup step signs the job in.
-fn sign_in_note(job: &Job<'_>, provider: &dyn Provider, recorded: bool) -> Option<String> {
+fn sign_in_note(
+    job: &Job<'_>,
+    provider: &dyn Provider,
+    target_config: &dyn crate::provider::TargetConfig,
+    recorded: bool,
+) -> Option<String> {
     let (env, target, label) = (job.env, job.target, provider.label());
-    if recorded {
+    if recorded || provider.ci_needs_id_token(target_config) {
         return None;
     }
     if provider.deploy_credential_fields().is_err() {
@@ -314,13 +376,23 @@ fn sign_in_note(job: &Job<'_>, provider: &dyn Provider, recorded: bool) -> Optio
     ))
 }
 
-/// The whole workflow as text. `setup` is the target provider's CI setup step, indented as
-/// a `steps:` entry, or `None` when the provider needs none.
-fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
+/// The whole workflow as text. The target's provider supplies its setup step (indented as a
+/// `steps:` entry, or `None`), whether the job needs an OIDC token, and its teardown step.
+fn workflow(job: &Job<'_>, provider: &dyn Provider, target_config: &dyn TargetConfig) -> String {
     let (env, target, github_env) = (job.env, job.target, job.github_env);
     let version = env!("CARGO_PKG_VERSION");
     let id = format!("sync-{env}-{target}");
+    let needs_id_token = provider.ci_needs_id_token(target_config);
+    let setup = provider.ci_setup_step_for(target_config);
+    let teardown = provider.ci_teardown_step_for(target_config);
     let mut s = String::new();
+    if needs_id_token {
+        s.push_str(
+            "# this job signs in through GitHub OIDC, so no deploy secret is stored.\n\
+             # Protect the GitHub environment with a main-only branch rule and required reviewers:\n\
+             # those protection rules are the security boundary for who can deploy.\n",
+        );
+    }
     let github_env_flag = github_env
         .map(|g| format!(" --github-env {g}"))
         .unwrap_or_default();
@@ -331,7 +403,11 @@ fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
     ));
     s.push_str(&format!("name: {id}\n\n"));
     s.push_str("on:\n  pull_request:\n  pull_request_review:\n    types: [submitted]\n  workflow_dispatch:\n\n");
-    s.push_str("permissions:\n  contents: read\n\n");
+    if needs_id_token {
+        s.push_str("permissions:\n  contents: read\n  id-token: write\n\n");
+    } else {
+        s.push_str("permissions:\n  contents: read\n\n");
+    }
     s.push_str(&format!("jobs:\n  {id}:\n"));
     s.push_str("    if: github.event_name == 'workflow_dispatch'\n");
     s.push_str("    runs-on: ubuntu-latest\n");
@@ -348,9 +424,11 @@ fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
     s.push_str("      - uses: actions/checkout@v4\n");
     s.push_str("      - name: Install the 1Password CLI\n");
     s.push_str("        uses: 1password/install-cli-action@v1\n");
-    if let Some(step) = setup {
+    if let Some(step) = setup.as_deref() {
         s.push_str(step);
-        s.push('\n');
+        if !step.ends_with('\n') {
+            s.push('\n');
+        }
     }
     s.push_str("      - name: Install opv\n");
     s.push_str("        run: |\n");
@@ -379,6 +457,12 @@ fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
     s.push_str(&format!(
         "        run: opv delivery verify {env} --target {target} --receipt {target}.receipt.json\n"
     ));
+    if let Some(step) = teardown.as_deref() {
+        s.push_str(step);
+        if !step.ends_with('\n') {
+            s.push('\n');
+        }
+    }
     s.push_str(&pull_request_jobs(job));
     s
 }

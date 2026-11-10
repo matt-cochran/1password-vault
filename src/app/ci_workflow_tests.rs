@@ -882,3 +882,175 @@ fn supply_check_of_an_unreadable_file_is_input_unreadable() {
         Some(Cause::InputUnreadable { .. })
     ));
 }
+
+// --- #296: the credential-expiry check workflow -----------------------------------------
+
+/// `opv ci workflow --expiry-check` for the fixture configuration, as text.
+fn expiry_workflow() -> String {
+    let mut out = Vec::new();
+    run_expiry_check(&fixture_fleet(), &mut out).unwrap();
+    text_of(&out)
+}
+
+#[test]
+fn expiry_workflow_runs_daily() {
+    assert!(
+        expiry_workflow().contains("schedule: [{cron: \"17 5 * * *\"}]"),
+        "{}",
+        expiry_workflow()
+    );
+}
+
+#[test]
+fn expiry_workflow_allows_manual_dispatch() {
+    assert!(expiry_workflow().contains("  workflow_dispatch:\n"));
+}
+
+#[test]
+fn expiry_workflow_can_write_issues() {
+    assert!(expiry_workflow().contains("  issues: write\n"));
+}
+
+#[test]
+fn expiry_workflow_installs_opv() {
+    assert!(expiry_workflow().contains("      - name: Install opv\n"));
+}
+
+#[test]
+fn expiry_workflow_reads_the_ci_reader_token() {
+    assert!(
+        expiry_workflow()
+            .contains("OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}")
+    );
+}
+
+#[test]
+fn expiry_workflow_runs_ready_json() {
+    assert!(expiry_workflow().contains("opv ready --json"));
+}
+
+#[test]
+fn expiry_workflow_selects_expiring_findings() {
+    assert!(expiry_workflow().contains("credential_expiring"));
+}
+
+#[test]
+fn expiry_workflow_selects_expired_findings() {
+    assert!(expiry_workflow().contains("credential_expired"));
+}
+
+#[test]
+fn expiry_workflow_names_one_issue() {
+    assert!(expiry_workflow().contains("title=\"opv: CI credential expiry\""));
+}
+
+#[test]
+fn expiry_workflow_opens_the_issue() {
+    assert!(expiry_workflow().contains("gh issue create"));
+}
+
+#[test]
+fn expiry_workflow_updates_the_existing_issue() {
+    assert!(expiry_workflow().contains("gh issue edit"));
+}
+
+#[test]
+fn expiry_workflow_never_rotates_a_credential() {
+    assert!(!expiry_workflow().contains("--rotate"));
+}
+
+#[cfg(unix)]
+#[test]
+fn expiry_workflow_passes_bash_n() {
+    assert!(every_script_parses(&expiry_workflow()));
+}
+
+#[test]
+fn expiry_workflow_references_only_the_service_account_secret() {
+    let yaml = expiry_workflow();
+    assert_eq!(
+        yaml.matches("${{ secrets.").count(),
+        yaml.matches("${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}")
+            .count()
+    );
+}
+
+// --- #297: federated Azure jobs sign in with OIDC and sign out ---------------------------
+
+const AZURE_FEDERATED_FLEET: &str = "\
+[environments.prod]
+boundaries.api = { vault_id = \"v1\", item_id = \"i1\" }
+
+[environments.prod.targets.app]
+state_vault_id = \"s1\"
+
+[environments.prod.targets.app.azure]
+subscription = \"33333333-3333-3333-3333-333333333333\"
+key_vault = \"kv-myapp-prod\"
+resource_group = \"rg-myapp\"
+container_app = \"ca-myapp\"
+identity = \"system\"
+env_name = \"FLEET__{PRODUCT}__{KEY}\"
+
+[environments.prod.targets.app.azure.federated]
+tenant_id = \"11111111-1111-1111-1111-111111111111\"
+client_id = \"22222222-2222-2222-2222-222222222222\"
+subscription_id = \"33333333-3333-3333-3333-333333333333\"
+
+[products.api.keys.TOKEN]
+kind = \"secret\"
+environments = [\"prod\"]
+";
+
+/// The printed workflow for the federated Azure fixture, as text.
+fn azure_workflow(github_env: Option<&str>) -> String {
+    let fleet = config::parse(AZURE_FEDERATED_FLEET).unwrap();
+    let mut out = Vec::new();
+    run(&fleet, "prod", "app", github_env, false, &mut out).unwrap();
+    text_of(&out)
+}
+
+#[test]
+fn federated_azure_job_requests_an_id_token() {
+    assert!(azure_workflow(None).contains("  id-token: write\n"));
+}
+
+#[test]
+fn federated_azure_job_signs_in_with_azure_login() {
+    assert!(azure_workflow(None).contains("uses: azure/login@v2"));
+}
+
+#[test]
+fn federated_azure_job_passes_the_client_id() {
+    assert!(azure_workflow(None).contains("client-id: 22222222-2222-2222-2222-222222222222"));
+}
+
+#[test]
+fn federated_azure_job_declares_the_github_environment() {
+    assert!(azure_workflow(Some("production")).contains("    environment: production\n"));
+}
+
+#[test]
+fn federated_azure_job_signs_out_under_always() {
+    assert!(azure_workflow(None).contains("        if: always()\n        run: az logout\n"));
+}
+
+#[test]
+fn federated_azure_header_recommends_environment_protection() {
+    assert!(azure_workflow(None).contains("main-only branch rule and required reviewers"));
+}
+
+#[test]
+fn federated_azure_job_references_only_the_service_account_secret() {
+    let yaml = azure_workflow(None);
+    assert_eq!(
+        yaml.matches("${{ secrets.").count(),
+        yaml.matches("${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}")
+            .count()
+    );
+}
+
+#[test]
+fn fly_job_declares_no_id_token_permission() {
+    assert!(!fly_workflow(None, false).contains("id-token:"));
+}

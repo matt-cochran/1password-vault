@@ -315,6 +315,28 @@ impl Provider for AzureProvider {
             .is_some_and(|a| a.federated.is_some())
     }
 
+    /// A federated target signs the CI job in with `azure/login@v2` and its non-secret ids
+    /// (#297); a secret-mode target keeps today's output (no provider setup step).
+    fn ci_setup_step_for(&self, target: &dyn TargetConfig) -> Option<String> {
+        let a = target.as_any().downcast_ref::<AzureTarget>()?;
+        let f = a.federated.as_ref()?;
+        Some(format!(
+            "      - name: Sign in to Azure with GitHub OIDC\n        uses: azure/login@v2\n        with:\n          client-id: {}\n          tenant-id: {}\n          subscription-id: {}\n",
+            f.client_id, f.tenant_id, f.subscription_id
+        ))
+    }
+
+    /// A federated target signs the job out at the end, even when a step failed (#297), so
+    /// a self-hosted runner keeps no session on disk.
+    fn ci_teardown_step_for(&self, target: &dyn TargetConfig) -> Option<String> {
+        let a = target.as_any().downcast_ref::<AzureTarget>()?;
+        a.federated.as_ref()?;
+        Some(
+            "      - name: Sign out of Azure\n        if: always()\n        run: az logout"
+                .to_string(),
+        )
+    }
+
     /// A target cannot both declare the ambient federated identity and hold a
     /// `deploy_credentials` item (#297): the two are the same decision, made once.
     fn check_fleet(&self, fleet: &crate::domain::Fleet) -> Result<(), Box<FleetRefusal>> {
