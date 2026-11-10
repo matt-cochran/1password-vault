@@ -1,3 +1,4 @@
+import { hash, platforms, validateQualification, type Qualification } from './qualify-distribution.ts';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -5,7 +6,7 @@ import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 type Run = { id: number; run_attempt: number; status: string; conclusion: string; event: string; head_branch: string; head_sha: string; path: string; head_repository: { full_name: string } };
-export type Manifest = { schema: 1; repository: string; workflow: 'release.yml'; tree: string; source_sha: string; run_id: number; run_attempt: number; files: Record<string, string> };
+export type Manifest = { schema: 2; version: string; qualifications: Record<string, Qualification>; input: any; repository: string; workflow: 'release.yml'; tree: string; source_sha: string; run_id: number; run_attempt: number; files: Record<string, string> };
 const sha = /^[a-f0-9]{40}$/;
 const digest = /^[a-f0-9]{64}$/;
 const targets = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc.exe', 'aarch64-pc-windows-msvc.exe'];
@@ -20,8 +21,8 @@ function files(root: string, dir = root): Record<string, string> {
     if (stat.isDirectory()) Object.assign(result, files(root, file));
     else {
       const key = relative(root, file).replaceAll('\\', '/');
-      if (key === 'manifest.json') continue;
-      if (!/^(dist|npm)\/[A-Za-z0-9_.-]+$/.test(key)) throw new Error('Unexpected release artifact path');
+      if (key === 'manifest.json' || key === 'input.json') continue;
+      if (!/^(dist|npm|qualification)\/[A-Za-z0-9_.-]+$/.test(key)) throw new Error('Unexpected release artifact path');
       result[key] = createHash('sha256').update(readFileSync(file)).digest('hex');
     }
   }
@@ -31,11 +32,22 @@ export function validate(manifest: Manifest, run: Run, repository: string, tree:
   if (run.status !== 'completed' || run.conclusion !== 'success' || run.head_repository?.full_name !== repository
       || run.path !== '.github/workflows/release.yml' || run.head_branch !== 'staging'
       || !['push', 'workflow_dispatch'].includes(run.event)) throw new Error('Untrusted staging release run');
-  if (manifest.schema !== 1 || manifest.repository !== repository || manifest.workflow !== 'release.yml'
+  if (manifest.schema !== 2 || manifest.repository !== repository || manifest.workflow !== 'release.yml'
       || manifest.tree !== tree || !sha.test(tree) || manifest.source_sha !== run.head_sha || !sha.test(manifest.source_sha)
-      || manifest.run_id !== run.id || manifest.run_attempt !== run.run_attempt) throw new Error('Release provenance mismatch');
+      || manifest.run_id !== run.id || manifest.run_attempt !== run.run_attempt
+      || !Number.isSafeInteger(manifest.run_id) || manifest.run_id < 1 || !Number.isSafeInteger(manifest.run_attempt) || manifest.run_attempt < 1) throw new Error('Release provenance mismatch');
+  if (!/^\d+\.\d+\.\d+$/.test(manifest.version) || manifest.input?.version !== manifest.version
+      || manifest.input?.source_sha !== manifest.source_sha || manifest.input?.tree !== manifest.tree
+      || manifest.input?.run_id !== manifest.run_id || manifest.input?.run_attempt !== manifest.run_attempt
+      || JSON.stringify(Object.keys(manifest.qualifications ?? {}).sort()) !== JSON.stringify(Object.keys(platforms).sort())) throw new Error('Missing exact distribution qualification');
+  for (const platform of Object.keys(platforms)) {
+    const q = manifest.qualifications[platform]; validateQualification(q, manifest.input, platform);
+    if (manifest.files[`qualification/${platform}.json`] !== hash(JSON.stringify(q) + '\n')) throw new Error('Qualification receipt bytes mismatch');
+  }
+  const original = Object.fromEntries(Object.entries(manifest.files).filter(([name]) => !name.startsWith('qualification/')));
+  if (JSON.stringify(Object.entries(original).sort()) !== JSON.stringify(Object.entries(manifest.input.files).sort())) throw new Error('Qualified input bytes mismatch');
   for (const [name, hash] of Object.entries(manifest.files)) {
-    if (!/^(dist|npm)\/[A-Za-z0-9_.-]+$/.test(name) || !digest.test(hash)) throw new Error('Invalid release file declaration');
+    if (!/^(dist|npm|qualification)\/[A-Za-z0-9_.-]+$/.test(name) || !digest.test(hash)) throw new Error('Invalid release file declaration');
   }
   if (JSON.stringify(Object.entries(manifest.files).sort()) !== JSON.stringify(Object.entries(actual).sort())) throw new Error('Release artifact checksum mismatch');
   for (const target of targets) if (!manifest.files[`dist/opv-${target}`]) throw new Error('Missing platform binary');
@@ -197,9 +209,19 @@ export async function main(): Promise<void> {
   const repository = process.env.GITHUB_REPOSITORY!;
   const tree = command(['git', 'rev-parse', 'HEAD^{tree}']);
   if (!sha.test(tree)) throw new Error('Invalid source tree');
+  if (mode === 'prepare') {
+    const input = { version: readFileSync('Cargo.toml', 'utf8').match(/^version = "([^"]+)"/m)![1],
+      source_sha: command(['git', 'rev-parse', 'HEAD']), tree, run_id: Number(process.env.GITHUB_RUN_ID),
+      run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT), files: files(root) };
+    writeFileSync(join(root, 'input.json'), JSON.stringify(input) + '\n', { flag: 'wx' });
+    output('artifact', `opv-inputs-${tree}-${input.run_attempt}`);
+    return;
+  }
   if (mode === 'record') {
     if (process.env.GITHUB_REF !== 'refs/heads/staging') throw new Error('Release candidates are built only on staging');
-    const manifest: Manifest = { schema: 1, repository, workflow: 'release.yml', tree,
+    const input = JSON.parse(readFileSync(join(root, 'input.json'), 'utf8'));
+    const qualifications = Object.fromEntries(Object.keys(platforms).map(platform => [platform, JSON.parse(readFileSync(join(root, 'qualification', `${platform}.json`), 'utf8'))]));
+    const manifest: Manifest = { schema: 2, version: input.version, qualifications, input, repository, workflow: 'release.yml', tree,
       source_sha: command(['git', 'rev-parse', 'HEAD']), run_id: Number(process.env.GITHUB_RUN_ID), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT), files: files(root) };
     // Validate the record against the expected successful completion before upload.
     validate(manifest, { id: manifest.run_id, run_attempt: manifest.run_attempt, status: 'completed', conclusion: 'success', event: process.env.GITHUB_EVENT_NAME!, head_branch: 'staging', head_sha: manifest.source_sha, path: '.github/workflows/release.yml', head_repository: { full_name: repository } }, repository, tree, manifest.files);

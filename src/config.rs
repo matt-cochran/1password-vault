@@ -2227,6 +2227,32 @@ fn validate_key(
             },
         ));
     }
+    let rules = &spec.rules;
+    let structured = usize::from(rules.age_identity) + usize::from(rules.ssh_ed25519);
+    if structured > 0
+        && structured
+            + usize::from(rules.base64_bytes.is_some())
+            + usize::from(rules.hex_bytes.is_some())
+            != 1
+    {
+        return Err(invalid(
+            &["rules"],
+            FieldRule::Type {
+                expected: "exactly one generation format: age_identity, ssh_ed25519, base64_bytes or hex_bytes",
+            },
+        ));
+    }
+    if (rules.age_identity || rules.ssh_ed25519) && spec.kind != crate::domain::Kind::Secret {
+        return Err(invalid(
+            &["kind"],
+            FieldRule::Type {
+                expected: "secret for a private cryptographic identity",
+            },
+        ));
+    }
+    if rules.ssh_ed25519 && spec.file.is_none() {
+        return Err(invalid(&["file"], FieldRule::Missing));
+    }
     // Key attributes (Part V, `key-attrs`): `source` must agree with the declaration it
     // names (D-G: refused, never a finding). `derived` names another key via `from`;
     // `generated` names a key whose rules give a generate recipe, mirroring the refusals of
@@ -2247,7 +2273,7 @@ fn validate_key(
             return Err(invalid(
                 &["source"],
                 FieldRule::Type {
-                    expected: "generated only when the key has a base64_bytes or hex_bytes rule",
+                    expected: "generated only with one supported base64_bytes, hex_bytes, age_identity or ssh_ed25519 recipe",
                 },
             ));
         }

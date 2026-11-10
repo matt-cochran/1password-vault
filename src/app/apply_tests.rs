@@ -1048,3 +1048,115 @@ fn a_partial_archive_error_never_holds_a_value() {
     let e = half_archived(&op, &path).unwrap_err();
     assert!(!crate::error::report(&e).contains(MARKER));
 }
+
+#[test]
+fn reviewed_structured_generation_applies_for_shared_and_production_owners_only() {
+    for tier in ["shared", "production"] {
+        for rule in ["age_identity = true", "ssh_ed25519 = true"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("secrets.toml");
+            let op = FakeOp::default();
+            let id = op.insert("vdev0000000000000000000001", empty_item("app", "API_KEY"));
+            let text = CLEAN
+                .replace(
+                    "[environments.dev]",
+                    &format!("[environments.dev]\ntier = \"{tier}\""),
+                )
+                .replace(
+                    "rules = { base64_bytes = 32 }",
+                    &format!("source = \"generated\"\nfile = \"identity\"\nrules = {{ {rule} }}"),
+                );
+            write_split(
+                &path,
+                &format!("{text}\n[products.app.local]\nsecrets_dir_env = \"APP_SECRET_FILES\"\n")
+                    .replace("ITEM", &id),
+            )
+            .unwrap();
+            let opts = ApplyOpts {
+                generate: vec![("dev".into(), vec!["app/API_KEY".into()])],
+                ..ApplyOpts::default()
+            };
+            let p = crate::app::propose::structure::propose_structure(
+                &op,
+                &path,
+                "myapp",
+                ACCOUNT,
+                &[],
+                &opts.generate,
+            )
+            .unwrap();
+            let before = op.count(&["op", "item", "edit"]);
+            let declined = run_apply(
+                &op,
+                &tty(),
+                &path,
+                Some(&p.plan_id),
+                opts.clone(),
+                &mut |_| false,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(!declined.confirmed);
+            assert_eq!(op.count(&["op", "item", "edit"]), before);
+            for env in [
+                FakeEnv::new("linux").tty().var("OPV_AGENT"),
+                FakeEnv::new("linux"),
+                FakeEnv::new("linux").tty().var("OP_SERVICE_ACCOUNT_TOKEN"),
+            ] {
+                assert!(
+                    run_apply(
+                        &op,
+                        &env,
+                        &path,
+                        Some(&p.plan_id),
+                        opts.clone(),
+                        &mut |_| true,
+                        &mut Vec::new()
+                    )
+                    .is_err()
+                );
+                assert_eq!(op.count(&["op", "item", "edit"]), before);
+            }
+            let mut output = Vec::new();
+            let applied = run_apply(
+                &op,
+                &tty(),
+                &path,
+                Some(&p.plan_id),
+                opts.clone(),
+                &mut |_| true,
+                &mut output,
+            )
+            .unwrap();
+            assert!(applied.confirmed);
+            let items = op.items.borrow();
+            let value = items
+                .iter()
+                .flat_map(|i| i["fields"].as_array().unwrap())
+                .find(|f| f["label"] == "API_KEY")
+                .unwrap()["value"]
+                .as_str()
+                .unwrap();
+            assert!(!value.is_empty());
+            assert!(!String::from_utf8_lossy(&output).contains(value));
+            if rule.starts_with("age") {
+                assert!(value.parse::<age::x25519::Identity>().is_ok());
+            } else {
+                assert!(ssh_key::PrivateKey::from_openssh(value).is_ok());
+            }
+            drop(items);
+            assert!(
+                run_apply(
+                    &op,
+                    &tty(),
+                    &path,
+                    None,
+                    opts,
+                    &mut |_| true,
+                    &mut Vec::new()
+                )
+                .is_err()
+            );
+        }
+    }
+}

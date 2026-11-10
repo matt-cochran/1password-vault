@@ -11,6 +11,9 @@ name: Release
     - .github/workflows/release.yml
     - Cargo.toml
     - Cargo.lock
+    - scripts/release-assets.ts
+    - scripts/qualify-distribution.ts
+    - packaging/npm/**
   workflow_dispatch:
     inputs:
       dry_run:
@@ -130,7 +133,7 @@ jobs:
         name: opv-${{ matrix.target }}
         path: dist/opv-${{ matrix.target }}*
         if-no-files-found: error
-    if: github.ref == 'refs/heads/staging' && needs.check.outputs.found != 'true'
+    if: always() && needs.version.result == 'success' && ((github.ref == 'refs/heads/staging' && needs.release-checks.result == 'success' && needs.check.result == 'success' && needs.check.outputs.found != 'true') || github.event_name == 'pull_request')
   package:
     name: Package release assets
     needs:
@@ -139,6 +142,8 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     permissions:
       contents: read
+    outputs:
+      artifact: ${{ steps.retain.outputs.artifact }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -146,6 +151,7 @@ jobs:
         node-version: '24'
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
       with:
+        pattern: opv-*
         merge-multiple: 'true'
         path: dist
     - name: Create alias and checksums
@@ -169,19 +175,88 @@ jobs:
         name: release-assets
         path: dist/
         if-no-files-found: error
+    - name: Verify release provenance and qualification rejection tests
+      run: node tests/release-assets.test.ts
     - name: Retain complete immutable release candidate
       id: retain
       shell: bash
       run: "set -euo pipefail\nmkdir -p candidate/dist candidate/npm\ncp -R dist/. candidate/dist/\nfor pkg in ./npm-dist/@matthew-cochran/opv-*\
         \ ./npm-dist/opv; do\n  npm pack \"$pkg\" --ignore-scripts --pack-destination candidate/npm\ndone\nnode\
-        \ scripts/release-assets.ts record candidate\n"
+        \ scripts/release-assets.ts prepare candidate\n"
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
         name: ${{ steps.retain.outputs.artifact }}
         path: candidate/
         if-no-files-found: error
         retention-days: 90
-    if: github.ref == 'refs/heads/staging' && needs.check.outputs.found != 'true' && needs.build.result == 'success'
+    if: always() && needs.build.result == 'success' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/staging' && needs.check.outputs.found != 'true'))
+  qualify:
+    name: Qualify distribution (${{ matrix.platform }})
+    needs: package
+    if: always() && needs.package.result == 'success'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - {platform: linux-x64, os: ubuntu-24.04}
+        - {platform: linux-arm64, os: ubuntu-24.04-arm}
+        - {platform: darwin-x64, os: macos-15-intel}
+        - {platform: darwin-arm64, os: macos-15}
+        - {platform: win32-x64, os: windows-2025}
+        - {platform: win32-arm64, os: windows-11-arm}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: '24'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: ${{ needs.package.outputs.artifact }}
+        path: candidate
+    - name: Fresh native and npm install capability parity
+      run: node scripts/qualify-distribution.ts candidate
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: qualification-${{ matrix.platform }}
+        path: candidate/qualification/${{ matrix.platform }}.json
+        if-no-files-found: error
+  retain-qualified:
+    name: Retain qualified distribution
+    needs: [package, qualify]
+    if: always() && github.ref == 'refs/heads/staging' && needs.package.result == 'success' && needs.qualify.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: '24'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: ${{ needs.package.outputs.artifact }}
+        path: candidate
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        pattern: qualification-*
+        merge-multiple: true
+        path: candidate/qualification
+    - id: retain
+      name: Bind six positive qualifications to exact retained bytes
+      run: node scripts/release-assets.ts record candidate
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: ${{ steps.retain.outputs.artifact }}
+        path: candidate/
+        if-no-files-found: error
+        retention-days: 90
   publish:
     name: Publish release
     needs: resolve
