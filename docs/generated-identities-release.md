@@ -6,6 +6,16 @@ encodings. This is a source validation defect; a different published asset is no
 to explain the reproduction. 0.18.3 fixes that loader/generator disagreement and adds
 one explicitly file-delivered Ed25519 OpenSSH private-key recipe.
 
+The same candidate also fixes UTF-8 file-backed GitHub Actions secret delivery (#299).
+A declared `kind = "secret"` file payload preserves terminal LF/CRLF through the native
+secret API, using RustCrypto's libsodium-compatible sealed-box API and the public key of
+the exact configured repository/environment. Config variables, mounted-file claims and
+NUL payloads are refused. The credential-free source gate decrypts actual localhost HTTPS
+requests with libsodium and verifies disposable PKCS#1/PKCS#8 RSA JWTs through the exact
+pinned `actions/create-github-app-token` runtime consumer. No real account or key is used.
+Fresh native/npm qualification also checks the installed GitHub API-secret capability;
+assets from before this source change do not qualify this candidate.
+
 ```toml
 [environments.shared]
 tier = "shared"

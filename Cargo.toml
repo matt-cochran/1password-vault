@@ -36,6 +36,8 @@ secrecy = "0.10"
 zeroize = "1"
 thiserror = "2"
 base64 = "0.23"
+# GitHub API-secret sealed boxes preserve UTF-8 file bytes; gh stdin trims CR/LF.
+crypto_box = { version = "=0.9.1", features = ["seal"] }
 hex = "0.4"
 regex = "1"
 sha2 = "0.11"
@@ -105,3 +107,11 @@ doctest = false
 name = "e2e_matrix"
 path = "tests/e2e/matrix.rs"
 required-features = ["fake"]
+
+# Disposable localhost HTTPS integration harness, excluded from release builds.
+[[bin]]
+name = "opv-github-api-fixture"
+path = "tests/github-api/probe.rs"
+required-features = ["fake"]
+test = false
+doctest = false

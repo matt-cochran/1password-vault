@@ -285,6 +285,37 @@ impl Gh {
             return Output::success(self.world.borrow().item.clone());
         }
         match args {
+            ["api", "--method", "GET", path] if path.ends_with("/secrets/public-key") => {
+                use base64::Engine as _;
+                let key = crypto_box::SecretKey::from([73u8; 32]);
+                Output::success(serde_json::to_vec(&json!({"key_id":"fixture-key",
+                    "key":base64::engine::general_purpose::STANDARD.encode(key.public_key().as_bytes())})).unwrap())
+            }
+            ["api", "--method", "PUT", path, "--input", "-", "--silent"] => {
+                use base64::Engine as _;
+                let parts: Vec<_> = path.split('/').collect();
+                assert_eq!(parts[0], "repos");
+                let repo = format!("{}/{}", parts[1], parts[2]);
+                let env = (parts[3] == "environments").then(|| parts[4].to_string());
+                let name = parts.last().unwrap().to_string();
+                let payload: Value = serde_json::from_slice(stdin.unwrap()).unwrap();
+                assert_eq!(payload["key_id"], "fixture-key");
+                let cipher = base64::engine::general_purpose::STANDARD
+                    .decode(payload["encrypted_value"].as_str().unwrap())
+                    .unwrap();
+                let bytes = crypto_box::SecretKey::from([73u8; 32])
+                    .unseal(&cipher)
+                    .unwrap();
+                let value = String::from_utf8(bytes).unwrap();
+                let mut w = self.world.borrow_mut();
+                w.clock += 1;
+                let version = w.clock;
+                w.secrets
+                    .entry((repo, env))
+                    .or_default()
+                    .insert(name, (value, version));
+                ok()
+            }
             ["secret", "list", ..] | ["variable", "list", ..] => {
                 let (repo, env) = scope_of(args);
                 if args[0] == "secret" {
@@ -833,4 +864,73 @@ fn first_sync_interrupted_at_any_call_exits_9() {
 fn change_and_prune_interrupted_at_any_call_exits_9() {
     let bad = exits_9_when_interrupted(&change_and_prune, &prune());
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+fn file_secret_world(value: &str, kind: &str) -> (Fleet, Gh) {
+    let text = format!(
+        "{CI_KEYS_TWO}\n[products.allumata.local]\nsecrets_dir_env = \"APP_FILES\"\n[products.allumata.keys.APP_KEY]\nkind = \"{kind}\"\nenvironments = [\"ci\"]\nfile = \"source-key\"\n"
+    );
+    let fleet = fleet_with(&text);
+    let mut source: Value = serde_json::from_slice(&ci_item(POLICY_V1).stdout).unwrap();
+    source["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"appkey", "label":"APP_KEY",
+        "type":if kind == "secret" {"CONCEALED"} else {"STRING"},
+        "section":{"id":"allumata","label":"allumata"}, "value":value}));
+    (
+        fleet,
+        Gh::new(Output::success(serde_json::to_vec(&source).unwrap())),
+    )
+}
+
+#[test]
+fn planner_and_backend_preserve_utf8_file_payloads_in_every_github_secret_scope() {
+    for value in [
+        "-----BEGIN TEST PRIVATE KEY-----\nDISPOSABLE_299\n-----END TEST PRIVATE KEY-----\n",
+        "{\"text\":\"λ $NAME \\\\n\"}\r\n\r\n",
+    ] {
+        let (fleet, sim) = file_secret_world(value, "secret");
+        let (result, output) = sync_on(&sim, &fleet, &SyncOpts::default());
+        assert!(result.is_ok(), "native file-secret sync must succeed");
+        let w = sim.world.borrow();
+        for repo in ["example-org/a", "example-org/b"] {
+            let secrets = &w.secrets[&(repo.to_string(), Some("staging".into()))];
+            assert!(
+                secrets["APP_KEY"].0 == value,
+                "decrypted API payload must equal original bytes"
+            );
+            assert!(!secrets.contains_key("source-key"));
+        }
+        assert!(!output.contains("DISPOSABLE_299"));
+        assert!(
+            sim.calls
+                .borrow()
+                .iter()
+                .all(|c| !c.args.iter().any(|a| a.contains(value)))
+        );
+        assert!(
+            sim.calls
+                .borrow()
+                .iter()
+                .filter(|c| c.program == "gh")
+                .all(|c| c
+                    .stdin
+                    .as_deref()
+                    .is_none_or(|bytes| !String::from_utf8_lossy(bytes).contains(value)))
+        );
+    }
+}
+
+#[test]
+fn github_file_variables_and_nul_are_blocked_before_any_secret_write() {
+    for (value, kind) in [
+        ("not-a-variable\n", "config"),
+        ("not-an-action-input\0\n", "secret"),
+    ] {
+        let (fleet, sim) = file_secret_world(value, kind);
+        let (result, _) = sync_on(&sim, &fleet, &SyncOpts::default());
+        assert!(result.is_err());
+        assert!(!sim.writes_started());
+    }
 }

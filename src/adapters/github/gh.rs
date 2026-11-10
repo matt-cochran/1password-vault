@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
+use base64::Engine as _;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -114,6 +115,12 @@ pub fn secret_refusal(name: &str, value: &SecretValue) -> Option<(&'static str, 
     if value.expose().len() > super::MAX_SECRET_BYTES {
         return Some((SECRET_TOO_LARGE_RULE, SECRET_TOO_LARGE_REASON));
     }
+    if value.expose().contains('\0') {
+        return Some((
+            "github-secret-nul",
+            "NUL is not supported in a UTF-8 Actions secret",
+        ));
+    }
     None
 }
 
@@ -133,7 +140,8 @@ pub fn validate_secrets(batch: &[(String, &SecretValue)]) -> Result<(), Error> {
     Ok(())
 }
 
-/// `gh secret set` per name and repository, value on stdin only.
+/// One secret write per name/repository. CR/LF suffixes use sealed API JSON stdin;
+/// ordinary single-line values retain `gh secret set` stdin.
 pub fn set_secrets(
     r: &dyn CommandRunner,
     scope: Scope<'_>,
@@ -146,11 +154,60 @@ pub fn set_secrets(
     let mut names: Vec<(&str, &SecretValue)> =
         batch.iter().map(|(n, v)| (n.as_str(), *v)).collect();
     names.sort_by_key(|(name, _)| *name);
+    validate_secrets(batch)?;
+    // gh's ordinary stdin mode trims terminal CR/LF. Prepare exact API payloads
+    // before any mutation; flat secret writes retain their existing path.
+    let mut payloads = BTreeMap::new();
+    if names
+        .iter()
+        .any(|(_, value)| value.expose().ends_with(['\r', '\n']))
+    {
+        for repo in scope.repos {
+            let prefix = secret_api_prefix(repo, scope.environment);
+            let path = format!("{prefix}/public-key");
+            let argv = ["api", "--method", "GET", path.as_str()];
+            let out = read_out(
+                r,
+                "gh api",
+                &context(repo, scope.environment, false),
+                token_needs(scope.repos, scope.environment),
+                &Call::new(PROGRAM, &argv),
+            )
+            .map_err(|e| missing_environment(r, scope, repo, e))?;
+            let key: ApiPublicKey = parse_json(&out, "gh api")?;
+            for (name, value) in &names {
+                if value.expose().ends_with(['\r', '\n']) {
+                    let encrypted = key
+                        .key
+                        .seal(&mut crypto_box::aead::OsRng, value.expose().as_bytes())
+                        .map_err(|_| tool_unusable(io::ErrorKind::Other))?;
+                    let payload = serde_json::json!({"key_id": key.key_id,
+                        "encrypted_value": base64::engine::general_purpose::STANDARD.encode(encrypted)});
+                    payloads.insert((repo.as_str(), *name), payload.to_string().into_bytes());
+                }
+            }
+        }
+    }
     let mut written: Vec<(String, String)> = Vec::new();
     for (name, value) in names {
         for repo in scope.repos {
-            let argv = scoped(&["secret", "set", name], repo, scope.environment);
-            let call = Call::new(PROGRAM, &argv).with_stdin(Some(value.expose().as_bytes()));
+            let encrypted = payloads.get(&(repo.as_str(), name));
+            let path = format!("{}/{name}", secret_api_prefix(repo, scope.environment));
+            let argv = if encrypted.is_some() {
+                vec![
+                    "api",
+                    "--method",
+                    "PUT",
+                    path.as_str(),
+                    "--input",
+                    "-",
+                    "--silent",
+                ]
+            } else {
+                scoped(&["secret", "set", name], repo, scope.environment)
+            };
+            let input = encrypted.map_or_else(|| value.expose().as_bytes(), Vec::as_slice);
+            let call = Call::new(PROGRAM, &argv).with_stdin(Some(input));
             match invoke(r, Effect::Write, &call)? {
                 Outcome::Done(_) => written.push((repo.clone(), name.to_string())),
                 _ => {
@@ -166,6 +223,54 @@ pub fn set_secrets(
         }
     }
     Ok(())
+}
+
+/// Only the already-validated repository/environment locator selects API authority.
+fn secret_api_prefix(repo: &str, environment: Option<&str>) -> String {
+    match environment {
+        Some(env) => format!(
+            "repos/{repo}/environments/{}/secrets",
+            env.replace(' ', "%20")
+        ),
+        None => format!("repos/{repo}/actions/secrets"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiPublicKey {
+    #[serde(deserialize_with = "api_key_id")]
+    key_id: String,
+    #[serde(deserialize_with = "api_key")]
+    key: crypto_box::PublicKey,
+}
+fn api_key_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let id = String::deserialize(d)?;
+    if id.is_empty()
+        || id.len() > 256
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
+        return Err(serde::de::Error::custom(
+            "invalid GitHub public key identifier",
+        ));
+    }
+    Ok(id)
+}
+fn api_key<'de, D: serde::Deserializer<'de>>(d: D) -> Result<crypto_box::PublicKey, D::Error> {
+    let text = String::deserialize(d)?;
+    let invalid = || serde::de::Error::custom("invalid GitHub public key");
+    if text.len() != 44 {
+        return Err(invalid());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map_err(|_| invalid())?;
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| invalid())?;
+    if bytes == [0; 32] {
+        return Err(invalid());
+    }
+    Ok(crypto_box::PublicKey::from(bytes))
 }
 
 /// `gh secret delete` per name and repository; a 404 counts as already gone.

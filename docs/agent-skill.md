@@ -36,6 +36,11 @@ declared with `file = "<path>"` is filled from a file instead: the person runs
 `opv set <KEY> --env <env> --from-file <PATH>` in their own terminal, so its line breaks
 and trailing newline survive. You never read that file, never write it and never keep a
 copy of what is in it.
+For a GitHub Actions target, a UTF-8 file-backed **secret** is delivered under its secret
+name with exact line breaks (including terminal CRLF), not as a mounted file or config
+variable. `explain --target <target> --env <env> --json` advertises
+`file_delivery.channel = "secret_api"` and `utf8_verbatim = true` when supported. Do not
+compact or encode a PEM key to bypass an unsupported installed version; upgrade first.
 
 ## The assistant proposes; a person applies; CI delivers
 

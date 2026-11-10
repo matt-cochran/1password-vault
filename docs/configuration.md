@@ -595,13 +595,14 @@ products           = ["api"]               # optional: only these products' keys
 
 What happens on each command:
 
-- **Secrets** (concealed fields) are set with `gh secret set NAME`, the value on stdin. GitHub never shows a secret's value again, so `status` shows an existing one as `unknown` and every `sync` writes it again; an `immutable` key that is already there is held.
+- **Secrets** (concealed fields) use `gh secret set NAME` with the value on stdin, or encrypted API JSON when required to preserve terminal line breaks. GitHub never shows a secret's value again, so `status` shows an existing one as `unknown` and every `sync` writes it again; an `immutable` key that is already there is held.
+- **UTF-8 file-backed secrets** (`kind = "secret"`, `file = "app-key"`) preserve every byte, including trailing LF/CRLF. The file path names the owner's import source; the GitHub destination remains the configured secret name (`{KEY}` by default), never a file mount or environment-variable path. `sync` seals values that `gh secret set` would trim with GitHub's scoped public key, then sends only encrypted JSON to the native API. No base64 transform or export wrapper is required. File-backed config/variable channels and NUL bytes are refused before writing. Existing provider protection and approval rules still apply.
 - **Config** (text fields) is set with `gh variable set NAME`, the value on stdin. Variables can be read back, so `status` and `plan` show `new`, `same` or `changed`, and `sync` writes only what differs. A config key kept in a concealed field is refused here (`concealed-config`): a variable is readable by everyone who can read the repository.
 - Writes are live at once: there is nothing to deploy, and `sync --deploy` says so.
 - `--prune` deletes only names opv manages (secrets and variables alike); other secrets in the repository are listed as unmanaged and never touched.
 - Limits, shown by `status` and `plan` before any write: a secret over 47 952 bytes, an empty variable, or a variable over 48 000 bytes.
 
-Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories with **Secrets: write** and **Variables: write** (and **Environments: read** when you use `environment`). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
+Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories: **Secrets: write** and **Variables: write** for repository-level values, or **Environments: write** for GitHub-environment values (including the environment secret/variable reads). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
 
 ### HTTPS
 

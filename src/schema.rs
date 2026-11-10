@@ -809,7 +809,7 @@ fn documents() -> Value {
             "supplied_at_sync? (true for an infrastructure key: supplied at sync, never stored in 1Password; it then has no boundary, reference, inspect or readers)",
             "shared_from", "shared_by",
             "reference", "inspect", "readers: {deploy: [service account], ci}",
-            "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
+            "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account, file_delivery? {channel: secret_api, utf8_verbatim: true, filesystem: false}}"
         ],
         "version": [
             "opv: {version}",

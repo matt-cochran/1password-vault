@@ -814,7 +814,7 @@ fn explain_target_in(
     let credentials = t.deploy_credentials.as_ref();
     let account = deploy_account(project, env_name, name);
     if json {
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
             "target": name,
@@ -825,6 +825,12 @@ fn explain_target_in(
             "state_vault_id": &t.state_vault_id,
             "deploy_account": account,
         });
+        if matches!(
+            t.config.channels().files,
+            crate::provider::FileCapability::ApiSecret
+        ) {
+            doc["file_delivery"] = serde_json::json!({"channel": "secret_api", "utf8_verbatim": true, "filesystem": false});
+        }
         return writeln!(out, "{doc}").map_err(write_err);
     }
     let rows: Vec<(&str, String)> = vec![

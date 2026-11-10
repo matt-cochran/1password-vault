@@ -729,6 +729,9 @@ fn json_rows(
                 .and_then(|p| p.keys.get(&r.key));
             let native =
                 channels.is_some_and(|ch| matches!(ch.files, FileCapability::Native { .. }));
+            let api_secret = channels
+                .is_some_and(|ch| matches!(ch.files, FileCapability::ApiSecret))
+                && r.kind == Kind::Secret;
             let (via, delivered_as, form, path) =
                 if let Some(file) = spec.and_then(|s| s.file.as_deref()) {
                     let label = channels.and_then(|ch| {
@@ -745,6 +748,8 @@ fn json_rows(
                             Some("verbatim".to_string()),
                             Some(file.to_string()),
                         )
+                    } else if api_secret {
+                        (label, Some("secret"), Some("verbatim".to_string()), None)
                     } else {
                         (
                             label,
@@ -1218,6 +1223,7 @@ pub(crate) fn target_cell(
     };
     let form = match channels.files {
         FileCapability::Native { .. } => "file (verbatim)".to_string(),
+        FileCapability::ApiSecret => "API secret (verbatim)".to_string(),
         _ => match spec.and_then(|s| s.rules.transform.as_deref()) {
             Some(t) => format!("env ({t})"),
             None => "env".to_string(),
@@ -1247,6 +1253,11 @@ pub(crate) fn file_destination_lines(
         })
         .map(|r| match channels.files {
             FileCapability::Native { .. } => String::new(),
+            FileCapability::ApiSecret => format!(
+                "{}: note: {} file source via secret API (verbatim)",
+                placement(env_name, target),
+                key_label(&r.product, &r.key)
+            ),
             FileCapability::ViaApp { note } => format!(
                 "{}: note: {} file via the app ({})",
                 placement(env_name, target),

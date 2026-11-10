@@ -8,7 +8,7 @@
 //! | fn (in [`gh`]) | argv, per repository |
 //! |---|---|
 //! | `list_secrets` | `secret list -R <repo> [-e <env>] --json name,updatedAt` |
-//! | `set_secrets` | `secret set <NAME> -R <repo> [-e <env>]` (value on stdin), one call per name |
+//! | `set_secrets` | `secret set <NAME> -R <repo> [-e <env>]` (value on stdin), or public-key GET + sealed JSON API PUT for terminal CR/LF |
 //! | `delete_secrets` | `secret delete <NAME> -R <repo> [-e <env>]` |
 //! | `list_variables` | `variable list -R <repo> [-e <env>] --json name,value` |
 //! | `set_variables` | `variable set <NAME> -R <repo> [-e <env>]` (value on stdin) |

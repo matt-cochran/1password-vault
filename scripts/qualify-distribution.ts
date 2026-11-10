@@ -44,10 +44,11 @@ export function qualify(directory: string): void {
     writeFileSync(env.NPM_CONFIG_USERCONFIG!, '');
     const execute = (exe: string, args: string[]) => {
       const result = spawnSync(exe, args, { cwd: scratch, env, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
-      if (result.error || result.status !== 0) throw new Error(`Distribution check failed: ${args[0] ?? 'execute'}`);
+      if (result.error || result.status !== 0) throw new Error(`Distribution check failed: ${args.filter(arg => !arg.startsWith(scratch)).join(' ')}`);
       return result.stdout.trim();
     };
-    writeFileSync(join(scratch, 'secrets.toml'), `[environments.dev]\n[products.app.local]\nsecrets_dir_env = "APP_SECRET_FILES"\n[products.app.keys.AGE_IDENTITY]\nkind = "secret"\nsource = "generated"\nrules = { age_identity = true }\n[products.app.keys.SIGNING_IDENTITY]\nkind = "secret"\nsource = "generated"\nfile = "signing-key"\nrules = { ssh_ed25519 = true }\n`);
+    writeFileSync(join(scratch, 'secrets.toml'), `[environments.dev]\nboundaries.app = {}\n[environments.dev.targets.github-fixture]\nproducts = ["app"]\ngithub.repo = "example-org/app"\ngithub.environment = "fixture"\n[products.app.local]\nsecrets_dir_env = "APP_SECRET_FILES"\n[products.app.keys.AGE_IDENTITY]\nkind = "secret"\nsource = "generated"\nrules = { age_identity = true }\n[products.app.keys.SIGNING_IDENTITY]\nkind = "secret"\nsource = "generated"\nfile = "signing-key"\nrules = { ssh_ed25519 = true }\n`);
+    writeFileSync(join(scratch, 'secrets.bindings.toml'), 'environments.dev.boundaries.app.vault_id = "fixture-vault"\nenvironments.dev.boundaries.app.item_id = "fixture-item"\n');
     const native = join(scratch, process.platform === 'win32' ? 'opv.exe' : 'opv');
     const source = join(root, `dist/opv-${platforms[platform]}`); copyFileSync(source, native); chmodSync(native, 0o755);
     const probe = (exe: string, prefix: string[], scope: string) => {
@@ -55,6 +56,8 @@ export function qualify(directory: string): void {
       if (call(['--version']) !== `opv ${input.version}`) throw new Error(`${scope} version mismatch`);
       const contract = JSON.parse(call(['contract', '--json']));
       if (!JSON.stringify(contract).includes('SIGNING_IDENTITY') || !JSON.stringify(contract).includes('AGE_IDENTITY')) throw new Error('Generated contract capabilities missing');
+      const github = JSON.parse(call(['explain', '--target', 'github-fixture', '--env', 'dev', '--json']));
+      if (github.file_delivery?.channel !== 'secret_api' || github.file_delivery?.utf8_verbatim !== true || github.file_delivery?.filesystem !== false) throw new Error('Native GitHub UTF-8 API-secret file capability missing');
       const help = call(['propose', 'generate', '--help']);
       const schema = call(['schema']); const guide = call(['guide', 'agent']);
       for (const token of ['age_identity', 'ssh_ed25519']) if (![help, schema, guide].every(text => text.includes(token))) throw new Error('Help/schema/skill capability mismatch');
