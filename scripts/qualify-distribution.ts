@@ -60,7 +60,7 @@ export function qualify(directory: string): void {
       if (github.file_delivery?.channel !== 'secret_api' || github.file_delivery?.utf8_verbatim !== true || github.file_delivery?.filesystem !== false) throw new Error('Native GitHub UTF-8 API-secret file capability missing');
       const help = call(['propose', 'generate', '--help']);
       const schema = call(['schema']); const guide = call(['guide', 'agent']);
-      for (const token of ['age_identity', 'ssh_ed25519']) if (![help, schema, guide].every(text => text.includes(token))) throw new Error('Help/schema/skill capability mismatch');
+      for (const token of ['age_identity', 'ssh_ed25519']) for (const [surface, text] of Object.entries({ help, schema, guide })) if (!text.includes(token)) throw new Error(`Missing ${token} in ${scope} ${surface}`);
       const project = join(scratch, scope); mkdirSync(project);
       call(['skill', 'install', '--project', project, '--target', 'codex']);
       const skill = readFileSync(join(project, '.agents/skills/opv/SKILL.md'), 'utf8');
