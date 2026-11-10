@@ -206,7 +206,7 @@ lifecycle = "active"            # active | retiring | retired
 kind = "secret"
 environments = ["prod"]
 source = "generated"
-rules = { base64_bytes = 32 }   # generated needs a base64_bytes or hex_bytes rule
+rules = { base64_bytes = 32 }   # generated needs exactly one supported generation recipe
 
 [products.worker.keys.DATABASE_URL]
 kind = "secret"
@@ -214,7 +214,7 @@ from = "api/DATABASE_URL"
 source = "derived"              # the only source allowed with from
 ```
 
-- `source` is who or what produces the value: `person` (someone fetches it), `generated` (opv makes it from the key's byte-count rule) or `derived` (another key's value, named by `from`). `derived` requires `from`; `from` requires `derived`; `generated` requires a `base64_bytes` or `hex_bytes` rule. Any other combination is refused at load, naming the key.
+- `source` is who or what produces the value: `person` (someone fetches it), `generated` (opv makes it from the key's explicit generation rule) or `derived` (another key's value, named by `from`). `derived` requires `from`; `from` requires `derived`; `generated` requires exactly one supported recipe: `base64_bytes`, `hex_bytes`, `age_identity = true` or `ssh_ed25519 = true`. Structured identities require `kind = "secret"`; SSH identities also require `file` delivery. Any other combination is refused at load, naming the key.
 - `expires` is a calendar date written as a quoted string (`expires = "2026-06-30"`). An unquoted date or an impossible day is refused at load. Within 30 days of the date `opv ready` reports an advisory `expires_soon` finding; it never blocks a gate.
 - `lifecycle` is `active` (the default), `retiring` or `retired`. `opv propose retire` marks a key `retiring`. CI then runs `opv sync <env> --prune --retire` in tier order (every non-production environment before production) to remove it from the targets; a person finishes with `opv apply rp-<id>` (the id `opv ready` names), which archives the key's 1Password fields into an `archived · <date> · retired <product>/<KEY>` section and marks it `retired`. The key stays declared as `lifecycle = "retired"`: removal is a state, never a deletion. The steps and their refusals: [retiring a key](usage.md#retiring-a-key).
 
@@ -949,6 +949,8 @@ Those bytes are stored from a file, not typed: `opv set <[p/]KEY> --env <e> --fr
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
+| `age_identity = true` | one valid age X25519 private identity; owner generation reports only its public recipient |
+| `ssh_ed25519 = true` | one unencrypted Ed25519 OpenSSH private key, `kind = "secret"` and file delivery required; owner generation reports only public key and SHA256 fingerprint |
 | `hex_bytes = N` | valid hex that decodes to N bytes |
 | `email_list = true` | comma-separated list of email addresses |
 | `https_url = true` | an `https://` URL |
