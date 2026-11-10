@@ -85,6 +85,17 @@ pub trait Provider: Sync {
         let _ = (target, subject, r);
         None
     }
+    /// The login for `target` when it signs in from an ambient federated identity instead
+    /// of `deploy_credentials` (#297): `None` when the target is not federated (the
+    /// default). The login's `sign_in` receives no values; it only verifies the identity
+    /// the CI job already signed in as, refusing anything else before any provider call.
+    fn federated_login(
+        &self,
+        target: &dyn TargetConfig,
+    ) -> Option<Result<Box<dyn DeployLogin>, Error>> {
+        let _ = target;
+        None
+    }
     /// True when a CI job for `target` needs `permissions: id-token: write` to sign in
     /// (#297); false otherwise.
     fn ci_needs_id_token(&self, target: &dyn TargetConfig) -> bool {
