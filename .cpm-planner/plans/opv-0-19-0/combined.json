@@ -289,10 +289,6 @@
         {
           "id": "credential-cli-surface",
           "consumes": "credential flags and codes"
-        },
-        {
-          "id": "ci-workflow-credentials",
-          "consumes": "generated workflow shapes"
         }
       ],
       "estimate": {
@@ -510,7 +506,8 @@
       "id": "credential-rotation",
       "owned_files": [
         "src/app/credentials_rotate.rs",
-        "src/app/credentials_rotate_tests.rs"
+        "src/app/credentials_rotate_tests.rs",
+        "src/app/mod.rs"
       ],
       "prerequisites": [
         {
@@ -687,13 +684,13 @@
       "id": "ci-workflow-credentials",
       "owned_files": [
         "src/app/ci_workflow.rs",
-        "src/app/ci_workflow_tests.rs"
+        "src/app/ci_workflow_tests.rs",
+        "src/adapters/azure/config.rs"
       ],
       "prerequisites": [
         {
-          "id": "credential-lifecycle-contract",
-          "consumes": "credential kinds and expiry check",
-          "kind": "interface"
+          "id": "azure-federated-login",
+          "consumes": "AzureTarget.federated ids for the azure/login step"
         }
       ],
       "estimate": {
@@ -743,8 +740,12 @@
           "consumes": "help/schema/cause files with generation texts merged"
         },
         {
-          "id": "azure-federated-login",
-          "consumes": "FederatedLogin refusal sites to give distinct causes"
+          "id": "credential-rotation",
+          "consumes": "credentials_rotate::run_access / run_target to wire --rotate"
+        },
+        {
+          "id": "ci-workflow-credentials",
+          "consumes": "ci_workflow::run_expiry_check to wire --expiry-check"
         }
       ],
       "estimate": {
@@ -841,10 +842,6 @@
         {
           "id": "ssh-tests-green",
           "consumes": "green #294 tests and implementation"
-        },
-        {
-          "id": "credential-rotation",
-          "consumes": "rotation commands"
         },
         {
           "id": "expiry-reporting",
