@@ -319,6 +319,12 @@ pub fn meaning(code: &str) -> &'static str {
         "source_only" => {
             "the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own"
         }
+        "federated_outside_ci" => {
+            "the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one"
+        }
+        "federated_identity_mismatch" => {
+            "the CI job's ambient sign-in is not the federated identity configured for the target"
+        }
         "title_not_found" => "no 1Password vault or item has exactly this title",
         "title_ambiguous" => "more than one 1Password vault or item has exactly this title",
         // provision (#253)
@@ -527,6 +533,11 @@ fn variants(c: &Cause) -> Vec<Cause> {
         TitleLookup { .. } => vec![varied(c, |v| {
             if let TitleLookup { matches, .. } = v {
                 *matches = 2;
+            }
+        })],
+        FederatedRefused { .. } => vec![varied(c, |v| {
+            if let FederatedRefused { why, .. } = v {
+                *why = FederatedWhy::IdentityMismatch;
             }
         })],
         _ => Vec::new(),
@@ -1039,6 +1050,12 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             vault: Some(VaultId::new("vlt-atqr")),
             matches: 0,
             candidates: vec!["cand-xyz (id-xyz)".into()],
+        },
+        FederatedRefused {
+            why: FederatedWhy::OutsideCi,
+            env: Some(EnvName::new("prod")),
+            target: Some(TargetName::new("web")),
+            client_id: "22222222-2222-2222-2222-222222222222".into(),
         },
         PersonalNotSetUp {
             env: EnvName::new("env-dev"),

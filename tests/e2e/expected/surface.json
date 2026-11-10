@@ -10,6 +10,7 @@
         "github-env",
         "json",
         "project",
+        "rotate",
         "secret-name",
         "target"
       ],
@@ -64,6 +65,7 @@
         "deploy",
         "drift",
         "every",
+        "expiry-check",
         "github-env",
         "on-change",
         "supply",
@@ -550,6 +552,10 @@
       ],
       "flags": [
         "create",
+        "federated",
+        "github",
+        "github-env",
+        "rotate",
         "target"
       ],
       "name": "target credentials"

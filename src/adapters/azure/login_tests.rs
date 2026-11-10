@@ -436,6 +436,15 @@ fn federated_sign_in_refuses_a_different_subscription() {
     assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_err());
 }
 
+/// R4: another identity is refused as a mismatch, never as a missing sign-in.
+#[test]
+fn federated_sign_in_names_a_mismatch_by_its_own_code() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([account_json(FED_TENANT, FED_CLIENT, FED_SUB, "user")]);
+    let e = with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).unwrap_err();
+    assert_eq!(e.code_str(), "federated_identity_mismatch");
+}
+
 /// R4: a person's own `az login` is not a service principal, so it is refused.
 #[test]
 fn federated_sign_in_refuses_a_non_service_principal() {
@@ -462,7 +471,7 @@ fn federated_sign_in_refuses_outside_github_actions() {
     let mut l = federated_login();
     let r = FakeRunner::default();
     let e = with_github_actions(false, || l.sign_in(BTreeMap::new(), &r)).unwrap_err();
-    assert_eq!(e.code_str(), "target_not_signed_in");
+    assert_eq!(e.code_str(), "federated_outside_ci");
 }
 
 /// R4: verification reads the ambient identity before any other call.

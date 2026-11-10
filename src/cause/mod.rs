@@ -651,6 +651,18 @@ pub enum NotFoundState {
     LocalContextMissing,
 }
 
+/// Why opv refuses a federated deploy identity (#297).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FederatedWhy {
+    /// Run outside GitHub Actions: the identity only exists in a CI job (local commands
+    /// are refused, no fallback credential is kept for people).
+    OutsideCi,
+    /// The job's ambient sign-in is not the configured tenant, client and subscription, or
+    /// not a service principal (a person's own `az login` included).
+    IdentityMismatch,
+}
+
 /// Why the 1Password or target session is missing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -864,6 +876,16 @@ pub enum Cause {
     },
 
     // §4.3 sessions, accounts, credentials
+    /// A target's federated deploy identity (#297, `docs/design/azure-oidc.md`) that opv
+    /// will not use: it exists only in a GitHub Actions job that signed in first, and the
+    /// job's sign-in must be exactly the configured identity. Ids only, never a secret.
+    FederatedRefused {
+        why: FederatedWhy,
+        env: Option<EnvName>,
+        target: Option<TargetName>,
+        /// The configured client (application) id the job must be signed in as.
+        client_id: String,
+    },
     NotSignedIn {
         system: System,
         account: Option<AccountId>,
@@ -2337,6 +2359,7 @@ impl Cause {
             | TargetRefused { env: e, .. }
             | Unrecognized { env: e, .. }
             | RamDirUnavailable { env: e, .. }
+            | FederatedRefused { env: e, .. }
             | SourceOnly { env: e, .. } => {
                 if e.is_none() {
                     *e = Some(EnvName::new(env));
@@ -2359,6 +2382,9 @@ impl Cause {
             | Cause::Guard {
                 guard: Guard::MountPathInUse { target, .. },
             } if target.as_str().is_empty() => *target = TargetName::new(name),
+            Cause::FederatedRefused { target, .. } if target.is_none() => {
+                *target = Some(TargetName::new(name))
+            }
             _ => {}
         }
         self
@@ -2522,6 +2548,11 @@ impl Cause {
             InputUnreadable { .. } => "input_unreadable",
             ItemUnusable { .. } => "item_unusable",
             SecretNotStored { .. } => "secret_not_stored",
+            FederatedRefused {
+                why: FederatedWhy::OutsideCi,
+                ..
+            } => "federated_outside_ci",
+            FederatedRefused { .. } => "federated_identity_mismatch",
             SourceOnly { .. } => "source_only",
             TitleLookup { matches: 0, .. } => "title_not_found",
             TitleLookup { .. } => "title_ambiguous",
@@ -2633,12 +2664,17 @@ impl Cause {
             | KeysBlocking { .. }
             | ImportTierRefused { .. }
             | HandoffPipeContested { .. }
+            | FederatedRefused {
+                why: FederatedWhy::OutsideCi,
+                ..
+            }
             | Unsupported { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
             | AccountAmbiguous { .. }
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
+            | FederatedRefused { .. }
             | CredentialRejected { .. } => 7,
             ValuesNeeded { .. }
             | DeliveryUnverified { .. }
@@ -2710,6 +2746,10 @@ impl Cause {
             | UnexpectedOutput { .. }
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
+            | FederatedRefused {
+                why: FederatedWhy::OutsideCi,
+                ..
+            }
             | SourceOnly { .. }
             | SourceChanged { .. }
             | Unsupported { .. }

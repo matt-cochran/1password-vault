@@ -423,7 +423,9 @@ impl<'a> EnvRunner<'a> {
         };
         match &t.deploy_credentials {
             Some(reference) => self.sign_in_as_target(env_name, target_name, t, reference),
-            None => self.sign_in_federated(t),
+            None => self
+                .sign_in_federated(t)
+                .map_err(|e| e.in_env(env_name).in_target(target_name)),
         }
     }
 

@@ -3097,6 +3097,26 @@ impl Cause {
                 "product {product} is source-only (source_only = true): it holds shared values \
                  for other products' keys and is never run on its own"
             ),
+            FederatedRefused {
+                why,
+                target,
+                client_id,
+                ..
+            } => {
+                let t = target
+                    .as_ref()
+                    .map_or_else(|| "the target".to_string(), |t| format!("target {t}"));
+                match why {
+                    FederatedWhy::OutsideCi => format!(
+                        "{t} signs in with a federated identity that exists only in a GitHub \
+                         Actions job, so opv does not use it here"
+                    ),
+                    FederatedWhy::IdentityMismatch => format!(
+                        "this job's sign-in is not the federated identity of {t} (client \
+                         {client_id}, a service principal)"
+                    ),
+                }
+            }
             TitleLookup {
                 kind,
                 title,
@@ -5357,6 +5377,35 @@ impl Cause {
                         .and_then(|q| inspect(format!("name a product that reads it, such as {q}"))),
                     next,
                 )
+            }
+            FederatedRefused {
+                why,
+                env,
+                target,
+                client_id,
+            } => {
+                let (env, target) = (
+                    env.as_ref().map(|e| e.as_str().to_string()),
+                    target.as_ref().map(|t| t.as_str().to_string()),
+                );
+                // The identity only exists in CI, and the printed workflow signs the job in
+                // with exactly the configured ids: both refusals end at that workflow.
+                let next = match (env, target) {
+                    (Some(env), Some(target)) => {
+                        Next::Run(cmd(&["ci", "workflow"], &[&env, "--target", &target]))
+                    }
+                    _ => Next::Check(cmd(&["ci", "workflow", "--help"], &[])),
+                };
+                match why {
+                    FederatedWhy::OutsideCi => plan(None, next),
+                    FederatedWhy::IdentityMismatch => plan(
+                        inspect(format!(
+                            "sign the job in with azure/login using client-id {client_id} and \
+                             the configured tenant and subscription before opv runs"
+                        )),
+                        next,
+                    ),
+                }
             }
             TitleLookup {
                 kind,

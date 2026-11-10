@@ -194,6 +194,63 @@ fn target_section(env: &str, name: &str) -> String {
     format!("environments.{env}.targets.{name}")
 }
 
+/// `opv target credentials <env> --target <name> --create --federated --github <repo>
+/// --github-env <e>` (#297, `docs/design/azure-oidc.md`): a CI deploy identity with no
+/// secret, which the GitHub job signs in as through OIDC. The provider creates or reuses it
+/// in the person's own provider session, with exactly the target's least-privilege roles,
+/// trusting only the subject `repo:<repo>:environment:<e>`; opv prints its non-secret ids.
+/// Nothing is written to 1Password, and no value exists to show.
+#[allow(clippy::too_many_arguments)]
+pub fn run_federated(
+    fleet: &Fleet,
+    env: &str,
+    name: &str,
+    repo: &str,
+    github_env: &str,
+    r: &dyn CommandRunner,
+    ui: &mut dyn Interaction,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let target = target_of(fleet, env, name)?;
+    // The ambient identity and a recorded item are the same decision, made once.
+    if target.deploy_credentials.is_some() {
+        return Err(already_recorded(env, name));
+    }
+    let provider = target.config.provider();
+    let subject = format!("repo:{repo}:environment:{github_env}");
+    let locator = target.config.target_locator();
+    ui.show(&format!(
+        "Create a federated {} CI identity for {locator}:",
+        provider.label()
+    ))?;
+    ui.show(&format!("  trusts: {subject}"))?;
+    ui.show("  roles: the target's least-privilege deploy roles only")?;
+    ui.show("No secret is created: the GitHub job signs in through OIDC.")?;
+    if !ui.confirm("Go ahead?")? {
+        return Err(Cause::Guard {
+            guard: Guard::Declined,
+        }
+        .into());
+    }
+    let id = match provider.mint_federated(target.config.as_ref(), &subject, r) {
+        Some(Ok(id)) => id,
+        Some(Err(e)) => return Err(e),
+        None => return Err(cannot_mint()),
+    };
+    writeln!(
+        out,
+        "federated identity for {locator}: tenant {}, client {}, subscription {}; trusts {subject}",
+        id.tenant_id, id.client_id, id.subscription_id
+    )
+    .map_err(write_err)?;
+    writeln!(
+        out,
+        "Do: record these ids in the target's federated table, then print its workflow with opv ci workflow {env} --target {name} --github-env {github_env}"
+    )
+    .map_err(write_err)?;
+    writeln!(out, "Next: opv config edit").map_err(write_err)
+}
+
 /// Before anything is minted: the configuration at `config` can take `deploy_credentials`
 /// on this target. A generated file, or a target opv cannot edit, is refused here, so no
 /// token is made that could not be recorded (06.08).

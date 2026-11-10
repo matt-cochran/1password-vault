@@ -976,6 +976,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
 | `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
+| `federated_outside_ci` | 6 | never | no | the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one |
 | `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
@@ -1000,6 +1001,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
 | `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
+| `federated_identity_mismatch` | 7 | after_fix | no | the CI job's ambient sign-in is not the federated identity configured for the target |
 | `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
 | `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |

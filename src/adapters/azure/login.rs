@@ -30,8 +30,8 @@ use serde::Deserialize;
 
 use super::az::{self, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
 use crate::cause::{
-    Cause, DiagnoseContext, FieldRule, InputKind, IoKind, PatternId, Principal, RamDir, RamPurpose,
-    Unusable,
+    Cause, DiagnoseContext, FederatedWhy, FieldRule, InputKind, IoKind, PatternId, Principal,
+    RamDir, RamPurpose, Unusable,
 };
 use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
@@ -398,6 +398,20 @@ struct AccountUser {
     kind: String,
 }
 
+impl FederatedLogin {
+    /// The refusal for `why`, naming the configured client id; the caller fills in the
+    /// environment and target names (#297).
+    fn refused(&self, why: FederatedWhy) -> Error {
+        Cause::FederatedRefused {
+            why,
+            env: None,
+            target: None,
+            client_id: self.client_id.clone(),
+        }
+        .into()
+    }
+}
+
 impl DeployLogin for FederatedLogin {
     fn sign_in(
         &mut self,
@@ -407,7 +421,7 @@ impl DeployLogin for FederatedLogin {
         // Local commands never use federated mode: the identity only exists in a CI job
         // that signed in with `azure/login` first.
         if !in_github_actions() {
-            return Err(az::signed_out().into());
+            return Err(self.refused(FederatedWhy::OutsideCi));
         }
         // The only call this login makes: `az` uses the runner's ambient sign-in (SR-3).
         let args = ["account", "show", "-o", "json", ONLY_SHOW_ERRORS];
@@ -416,11 +430,11 @@ impl DeployLogin for FederatedLogin {
             Outcome::Done(out) => out,
             // A non-zero `az account show` is the job's own sign-in, which opv did not
             // replace or read.
-            Outcome::Refused(_) => return Err(az::signed_out().into()),
+            Outcome::Refused(_) => return Err(self.refused(FederatedWhy::IdentityMismatch)),
             Outcome::Unknown { .. } => return Err(az::failed(r, DiagnoseContext::default())),
         };
         let show: AccountShow = serde_json::from_slice(out.stdout.as_slice())
-            .map_err(|_| Error::from(az::signed_out()))?;
+            .map_err(|_| self.refused(FederatedWhy::IdentityMismatch))?;
         let matches = show.id.eq_ignore_ascii_case(&self.subscription_id)
             && show.tenant_id.eq_ignore_ascii_case(&self.tenant_id)
             && show.user.name.eq_ignore_ascii_case(&self.client_id)
@@ -428,7 +442,7 @@ impl DeployLogin for FederatedLogin {
         if matches {
             Ok(())
         } else {
-            Err(az::signed_out().into())
+            Err(self.refused(FederatedWhy::IdentityMismatch))
         }
     }
 
