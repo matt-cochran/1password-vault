@@ -373,8 +373,9 @@ thread_local! {
     static TEST_GITHUB_ACTIONS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-/// Run `f` with the Actions check forced to `inside` (unit tests only).
-#[cfg(test)]
+/// Run `f` with the Actions check forced to `inside` (unit tests only; the login tests run
+/// on unix).
+#[cfg(all(test, unix))]
 pub(crate) fn with_github_actions<T>(inside: bool, f: impl FnOnce() -> T) -> T {
     let prev = TEST_GITHUB_ACTIONS.with(|c| c.replace(Some(inside)));
     let out = f();
