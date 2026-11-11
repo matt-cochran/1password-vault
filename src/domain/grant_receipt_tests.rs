@@ -279,3 +279,19 @@ fn issued_names_that_differ_from_the_contract_are_permission_mismatch() {
         Outcome::NotVerified(Reason::PermissionMismatch)
     );
 }
+
+/// A target's CI identity writes its own state vault: the write the contract asks for there
+/// is no `write_permission`.
+#[test]
+fn a_write_the_contract_asks_for_is_verified() {
+    let now = vec![
+        grant("VA", Permission::ReadWrite),
+        grant("VB", Permission::Read),
+    ];
+    let mut r = receipt();
+    r.vaults[0].permissions.push("write_items".into());
+    assert_eq!(
+        evaluate(Some(&r), &now, &observed(), TODAY).permissions_issued,
+        Outcome::Verified
+    );
+}

@@ -19,6 +19,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | inspect | `opv plan <env> [--product <p>] [--target <t>] [--rotate <product/KEY>] [--json]` | anyone | what a sync would do, and its plan id |
 | inspect | `opv history <env> [--target <t>] [--json]` | anyone | what opv last wrote to the target |
 | inspect | `opv access [<env>] [--target <t>] [--project <p>] [--json]` | anyone | who can read and write each vault, and the owner's command to create a reader |
+| inspect | `opv access <env> [--target <t>] --verify [--json]` | CI | under the CI identity's own token: it is the account opv issued, with exactly the contract's vaults ([verify](#verifying-a-ci-identitys-grants---verify)) |
 | inspect | `opv doctor [--env <e> [--product <p>] [--target <t>]] [--settings] [--json]` | anyone | setup problems; it names a production-tier vault this session can read and a production platform login |
 | propose | `opv propose key <[p/]KEY> --kind … [--env …] [--except <env>=<reason>] [--source person\|generated\|derived\|infrastructure] [--shape <name>] [--rule <NAME[=VALUE]>] [--personal] [--from <p/KEY>] [--guidance …] [--allow-same-value] [--immutable] [--expires <date>]` | anyone | a new or changed key: the contract diff and plan |
 | propose | `opv propose env <env> [--tier local\|shared\|production]` | anyone | a new environment, inheriting every `all` key |
@@ -530,6 +531,10 @@ The states are `present`, `missing` and `read-only needed`; a vault whose access
 
 `opv access <env> [--target <name>] --rotate --github <owner/repo> [--github-env <environment>]` replaces the identity: it creates a successor service account named `<old name>-YYYYMMDD` with the same grants and puts its token in the existing GitHub secret, never shown. It refuses when that secret does not exist yet (use `--create` first). It ends with `Do:` revoke the old service account in 1Password; opv cannot. See [CI credential expiry and rotation](#ci-credential-expiry-and-rotation).
 
+### Verifying a CI identity's grants: `--verify`
+
+`opv access <env> [--target <name>] --verify [--json]` runs in CI under the identity's own token (`OP_SERVICE_ACCOUNT_TOKEN`) and makes two reads only, `op whoami` and `op vault list`: no item read, no write, no owner session. It compares them, and the grants opv computes from the contract now, with the issuance receipt in `secrets.bindings.toml` (`environments.<env>.ci_reader.receipt`, or `environments.<env>.targets.<t>.ci_identity.receipt`). It reports seven checks, each `verified`, `not_verified` with a fixed reason, or `not_supported`: `receipt` (`receipt_missing`, `receipt_invalid`), `identity` (`not_a_service_account`, `wrong_account`, `identity_mismatch`, `provider_read_incomplete`), `vault_set` (`extra_vault`, `missing_vault`, `provider_read_incomplete`), `contract` (`contract_changed`), `permissions_issued` (`write_permission`, `permission_mismatch`), `permissions_live` (always `not_supported`: 1Password shows no permission level for a service account, so permission levels are proven only at issuance) and `freshness` (`expired`). `--json` prints `{environment, target, checks: [{name, state, reason}], passes, permission_levels, note, not_supported_because}`. It exits 0 only when every check but `permissions_live` is verified; otherwise `grants_not_verified` (exit 6), whose `Next:` is the owner's `opv access <env> [--target <t>] --rotate --github <owner/repo>`. A project whose configuration lives in a 1Password manifest has no bindings file: every check is `not_supported` and it exits 6. Design: [ci-reader-grants](design/ci-reader-grants.md).
+
 `--json` gives `{environments: [{environment, report, commands, vaults, findings}]}`, where `vaults` holds each vault line (`vault_id`, `production`, `capability`, `writers`) and `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
 
 ## Delivery receipts: `opv sync --receipt` and `opv delivery verify`
@@ -1007,6 +1012,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
 | `federated_outside_ci` | 6 | never | no | the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one |
 | `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |
+| `grants_not_verified` | 6 | after_fix | no/yes | opv access --verify could not prove the CI identity's token is the one opv issued with exactly the contract's vaults; the owner re-issues it with --rotate |
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |

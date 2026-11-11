@@ -398,6 +398,11 @@ fn flatten(
     for (name, value) in table.iter() {
         prefix.push(name.get_ref().to_string());
         let refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        // A grant receipt is a record, not an id: [`read_receipt`] reads it (#304).
+        if is_receipt(&refs) {
+            prefix.pop();
+            continue;
+        }
         match value.get_ref() {
             DeValue::Table(inner) => flatten(doc, inner, prefix, ids)?,
             other => match other.as_str() {
@@ -423,6 +428,58 @@ fn flatten(
         prefix.pop();
     }
     Ok(())
+}
+
+/// The grant receipt tables (#304, FR-70): `environments.<env>.ci_reader.receipt` and
+/// `environments.<env>.targets.<t>.ci_identity.receipt`. Names, ids, dates and a digest; not
+/// ids of the contract, so [`Bindings::parse`] leaves them to [`read_receipt`].
+fn is_receipt(path: &[&str]) -> bool {
+    matches!(
+        path,
+        ["environments", _, "ci_reader", "receipt"]
+            | ["environments", _, "targets", _, "ci_identity", "receipt"]
+    )
+}
+
+/// The grant receipt of `env`'s CI reader (or, with `target`, of that target's CI identity)
+/// in the bindings sibling of the contract at `config_path`, as the receipt table's own TOML
+/// text for [`crate::domain::grant_receipt::GrantReceipt::from_toml`]. `None` when the file
+/// or the receipt is absent. A receipt that is not a table is returned as empty text (an
+/// invalid receipt, never a missing one). The text holds no value (SR-1).
+pub fn read_receipt(
+    config_path: &Path,
+    env: &str,
+    target: Option<&str>,
+) -> Result<Option<String>, Error> {
+    let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let path = dir.join(FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unreadable(&path, &e)),
+    };
+    let Ok(root) = text.parse::<toml::Table>() else {
+        // `parse` reports the file's syntax error when the configuration loads.
+        return Ok(Some(String::new()));
+    };
+    let mut steps = vec!["environments", env];
+    match target {
+        Some(t) => steps.extend(["targets", t, "ci_identity", "receipt"]),
+        None => steps.extend(["ci_reader", "receipt"]),
+    }
+    let mut node = &root;
+    let (last, walk) = steps.split_last().expect("a receipt path is never empty");
+    for step in walk {
+        match node.get(*step).and_then(toml::Value::as_table) {
+            Some(inner) => node = inner,
+            None => return Ok(None),
+        }
+    }
+    Ok(match node.get(*last) {
+        None => None,
+        Some(toml::Value::Table(receipt)) => Some(toml::to_string(receipt).unwrap_or_default()),
+        Some(_) => Some(String::new()),
+    })
 }
 
 /// True when `doc` declares a table at `path` (the boundary or target an id belongs to).

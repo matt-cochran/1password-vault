@@ -12,7 +12,8 @@
         "project",
         "rotate",
         "secret-name",
-        "target"
+        "target",
+        "verify"
       ],
       "name": "access"
     },

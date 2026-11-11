@@ -47,6 +47,7 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 - [ ] `scenarios/copies_differ.snap` (text only)
 - [ ] `scenarios/create_outcome_unknown.snap` (create_outcome_unknown)
 - [ ] `scenarios/delivery_unverified.snap` (delivery_unverified)
+- [ ] `scenarios/grants_not_verified.snap` (grants_not_verified)
 - [ ] `scenarios/guard.snap` (policy_refused)
 - [ ] `scenarios/in_no_account_on_the_machine.snap` (ids_not_in_account)
 - [ ] `scenarios/input_invalid.snap` (input_invalid)

@@ -1278,6 +1278,12 @@ mod cases {
         .mcp("opv_state", json!({"section": "access"}))
     }
 
+    /// #304: the signed-in session is no CI reader opv issued, and the contract records no
+    /// grant receipt: `--verify` names the owner's re-issue command.
+    pub fn grants_not_verified() -> Case {
+        case(Scenario::new(), &["access", "prod", "--verify"])
+    }
+
     // MCP parity: `opv_state` section `changed`; the target options of `opv target add` (its MCP tool,
     // `opv_declare_target`, was removed in 0.12.0: a target is proposed with `opv_propose`).
 
@@ -2256,6 +2262,7 @@ scenarios! {
         read_back_missing => ReadBackMissing,
         in_no_account_on_the_machine => InOtherAccount,
         signed_out_access => NotSignedIn,
+        grants_not_verified => GrantsNotVerified,
         changed_not_declared => NotDeclared,
         changed_signed_out => NotSignedIn,
         inventory_not_declared => NotDeclared,

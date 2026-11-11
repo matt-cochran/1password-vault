@@ -921,6 +921,15 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
         (
+            GrantsNotVerified {
+                env: EnvName::new("env-prod"),
+                target: Some(TargetName::new("web-xyz")),
+                check: "vault_set",
+                reason: "extra_vault",
+            },
+            vec!["env-prod", "web-xyz", "vault_set", "extra_vault"],
+        ),
+        (
             GateFailed {
                 env: EnvName::new("env-prod"),
                 keys: vec![(
@@ -1130,10 +1139,11 @@ fn ordinal(c: &Cause) -> usize {
         // sealed target (#271)
         SealedRefused { .. } => 89,
         FederatedRefused { .. } => 91,
+        GrantsNotVerified { .. } => 92,
     }
 }
 
-const VARIANTS: usize = 92;
+const VARIANTS: usize = 93;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -5707,4 +5717,19 @@ fn a_federated_identity_mismatch_names_the_configured_client() {
         client_id: "client-xyz".into(),
     };
     assert!(crate::error::report(&c.into()).contains("client-id client-xyz"));
+}
+
+/// #304: a CI reader whose grants are not verified names the owner's re-issue command.
+#[test]
+fn unverified_grants_next_the_owners_rotate_command() {
+    let c = Cause::GrantsNotVerified {
+        env: EnvName::new("prod"),
+        target: None,
+        check: "receipt",
+        reason: "receipt_missing",
+    };
+    assert_eq!(
+        next_in(&c, &inv()),
+        "opv access prod --rotate --github '<owner/repo>'"
+    );
 }

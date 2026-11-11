@@ -404,15 +404,23 @@ fn vault_set(
     }))
 }
 
-/// A CI reader is read only: any issued name other than `read_items` is a write permission.
-/// Otherwise each vault's issued names must equal the contract's.
+/// A write permission the contract does not ask for on that vault is `write_permission`: a
+/// CI reader's contract asks for `read_items` only, while a target's CI identity also writes
+/// its own state vault. Otherwise each vault's issued names must equal the contract's.
 fn permissions_issued(receipt: &GrantReceipt, required: &[Grant]) -> Result<(), Reason> {
-    if receipt
-        .vaults
-        .iter()
-        .flat_map(|v| &v.permissions)
-        .any(|name| name != READ_ITEMS)
-    {
+    let wanted: BTreeMap<&str, BTreeSet<&str>> = grant_table(required)
+        .into_iter()
+        .map(|(vault, names)| (vault, names.into_iter().collect()))
+        .collect();
+    let unasked_write = receipt.vaults.iter().any(|v| {
+        v.permissions.iter().any(|name| {
+            name != READ_ITEMS
+                && !wanted
+                    .get(v.id.as_str())
+                    .is_some_and(|names| names.contains(name.as_str()))
+        })
+    });
+    if unasked_write {
         return Err(Reason::WritePermission);
     }
     let mut issued: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -422,10 +430,6 @@ fn permissions_issued(receipt: &GrantReceipt, required: &[Grant]) -> Result<(), 
             .or_default()
             .extend(vault.permissions.iter().map(String::as_str));
     }
-    let wanted: BTreeMap<&str, BTreeSet<&str>> = grant_table(required)
-        .into_iter()
-        .map(|(vault, names)| (vault, names.into_iter().collect()))
-        .collect();
     if issued == wanted {
         Ok(())
     } else {

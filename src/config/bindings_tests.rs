@@ -285,3 +285,26 @@ fn the_apply_record_is_written_beside_a_dot_opv_account_pointer() {
     };
     assert!(write_record(&dir.path().join(APPLIED), &record).is_ok());
 }
+
+/// #304: a grant receipt table is a record beside the ids, not an unknown key.
+#[test]
+fn reader_accepts_a_grant_receipt_table() {
+    let text = "environments.prod.boundaries.web.vault_id = \"vweb\"\n\
+                [environments.prod.ci_reader.receipt]\n\
+                schema = \"opv.grant-receipt/1\"\n\
+                vaults = [{ id = \"vweb\", permissions = [\"read_items\"] }]\n";
+    assert!(Bindings::parse(text).is_ok());
+}
+
+/// #304: a target's CI identity receipt is read back as its own table.
+#[test]
+fn a_target_receipt_is_read_as_its_table() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("secrets.bindings.toml"),
+        "[environments.prod.targets.web.ci_identity.receipt]\nschema = \"s\"\n",
+    )
+    .unwrap();
+    let text = super::read_receipt(&dir.path().join("secrets.toml"), "prod", Some("web"));
+    assert_eq!(text.unwrap().as_deref(), Some("schema = \"s\"\n"));
+}

@@ -319,6 +319,9 @@ pub fn meaning(code: &str) -> &'static str {
         "source_only" => {
             "the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own"
         }
+        "grants_not_verified" => {
+            "opv access --verify could not prove the CI identity's token is the one opv issued with exactly the contract's vaults; the owner re-issues it with --rotate"
+        }
         "federated_outside_ci" => {
             "the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one"
         }
@@ -533,6 +536,11 @@ fn variants(c: &Cause) -> Vec<Cause> {
         TitleLookup { .. } => vec![varied(c, |v| {
             if let TitleLookup { matches, .. } = v {
                 *matches = 2;
+            }
+        })],
+        GrantsNotVerified { .. } => vec![varied(c, |v| {
+            if let GrantsNotVerified { reason, .. } = v {
+                *reason = "not_supported";
             }
         })],
         FederatedRefused { .. } => vec![varied(c, |v| {
@@ -1078,6 +1086,12 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 KeyName::new("OPENAI_API_KEY"),
                 "absent",
             )],
+        },
+        GrantsNotVerified {
+            env: EnvName::new("env-prod"),
+            target: None,
+            check: "vault_set",
+            reason: "extra_vault",
         },
         ImportTierRefused {
             env: EnvName::new("env-prod"),

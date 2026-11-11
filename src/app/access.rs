@@ -367,6 +367,41 @@ fn field(path: &[&str]) -> DottedPath {
     )
 }
 
+/// The grants the contract requires now for `target`'s CI identity in `env`, or for `env`'s
+/// CI reader when `target` is `None` (#304, `opv access --verify`). Pure: no call is made.
+pub fn required_grants(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    target: Option<&str>,
+    project: &str,
+) -> Result<Vec<Grant>, Error> {
+    fleet.environment(env)?;
+    let (name, environment) = fleet
+        .environments
+        .get_key_value(env)
+        .expect("checked above");
+    if let Some(t) = target
+        && !environment.targets.contains_key(t)
+    {
+        let known: Vec<&str> = environment.targets.keys().map(String::as_str).collect();
+        return Err(target_not_declared(t, &known));
+    }
+    let needs = plan_needs(fleet, &[(name, environment)], target)?;
+    let wanted = match target {
+        Some(t) => Principal::Deploy {
+            environment: env.to_string(),
+            target: t.to_string(),
+        },
+        None => Principal::CiReader {
+            environment: env.to_string(),
+        },
+    };
+    Ok(required(project, &needs[0].targets, &needs[0].ci)
+        .into_iter()
+        .filter(|g| g.principal == wanted)
+        .collect())
+}
+
 /// Observe each distinct needed vault of one environment once with `op vault user list
 /// <vault> --format json` (FR-59). A vault whose user list cannot be read has no readers
 /// (not visible); its failure is then diagnosed (#153, #157) after one `op vault get` probe

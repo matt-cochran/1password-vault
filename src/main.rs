@@ -302,7 +302,8 @@ Examples:
   opv access                     # every target's needs and who can read each vault
   opv access prod --target web    # one target's deploy identity and its missing grants
   opv access prod --json          # the same as one document
-  opv access prod --rotate --github org/app   # replace the CI reader with a fresh one";
+  opv access prod --rotate --github org/app   # replace the CI reader with a fresh one
+  opv access prod --verify        # in CI: the reader's token matches its issuance receipt";
 
 const READY_QUICK: &str = "\
 Examples:
@@ -1119,6 +1120,11 @@ enum Cmd {
         /// 1Password. Your own terminal only; the token is never shown (#296).
         #[arg(long, requires_all = ["env", "github"])]
         rotate: bool,
+        /// Under the CI identity's own token (in CI, OP_SERVICE_ACCOUNT_TOKEN), check it is
+        /// the account opv issued with exactly the contract's vaults: reads op whoami and op
+        /// vault list and the committed receipt only; exit 6 unless verified (#304).
+        #[arg(long, requires = "env", conflicts_with_all = ["create", "rotate"])]
+        verify: bool,
         /// With --create or --rotate: the GitHub repository (owner/repo) whose secret
         /// receives the token.
         #[arg(long, value_name = "OWNER/REPO", requires = "identity_write")]
@@ -5437,6 +5443,22 @@ fn run_other(
                 )
             }
         }
+        Cmd::Access {
+            env: Some(env),
+            target,
+            project,
+            verify: true,
+            json,
+            ..
+        } => opv::app::access_verify::run(
+            &loaded?,
+            &env,
+            target.as_deref(),
+            project.as_deref(),
+            r,
+            json,
+            out,
+        ),
         Cmd::Access {
             env,
             target,

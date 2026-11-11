@@ -1295,6 +1295,18 @@ pub enum Cause {
         env: EnvName,
         keys: Vec<(ProductName, KeyName, &'static str)>,
     },
+    /// `opv access <env> [--target <t>] --verify` (#304, FR-70): a check of the CI
+    /// identity's grants is not verified, so the token is not proven to be the one opv
+    /// issued with exactly the contract's vaults. `check` is the first such check and
+    /// `reason` its fixed reason (`receipt_missing`, `extra_vault`, …), or `not_supported`
+    /// when the configuration lives in a 1Password manifest, which holds no receipt. Names
+    /// only (SR-1). Public code `grants_not_verified`, exit 6.
+    GrantsNotVerified {
+        env: EnvName,
+        target: Option<TargetName>,
+        check: &'static str,
+        reason: &'static str,
+    },
     /// `opv_import_local` was pointed at an environment whose tier is not `local` (design
     /// row `import-local`): only a `local` environment may take an assistant's import. The
     /// environment and its tier are named; the next step is the person's own
@@ -2523,6 +2535,7 @@ impl Cause {
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
             GateFailed { .. } => "gate_failed",
+            GrantsNotVerified { .. } => "grants_not_verified",
             ImportTierRefused { .. } => "import_tier_refused",
             ProducerFailed { .. } => "producer_failed",
             ProducerChanged { .. } => "producer_changed",
@@ -2664,6 +2677,7 @@ impl Cause {
             | KeysBlocking { .. }
             | ImportTierRefused { .. }
             | HandoffPipeContested { .. }
+            | GrantsNotVerified { .. }
             | FederatedRefused {
                 why: FederatedWhy::OutsideCi,
                 ..

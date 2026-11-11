@@ -2877,6 +2877,29 @@ impl Cause {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            GrantsNotVerified {
+                env,
+                target,
+                check,
+                reason,
+            } => {
+                let who = match target {
+                    Some(t) => format!("the CI identity of target {t} in environment {env}"),
+                    None => format!("the CI reader of environment {env}"),
+                };
+                if *reason == "not_supported" {
+                    format!(
+                        "the grants of {who} cannot be verified: the configuration lives in a \
+                         1Password manifest, which has no secrets.bindings.toml to hold a grant \
+                         receipt"
+                    )
+                } else {
+                    format!(
+                        "the grants of {who} are not verified: {check} is not verified \
+                         ({reason}); permission levels are proven only at issuance"
+                    )
+                }
+            }
             ImportTierRefused { env, tier, .. } => format!(
                 "environment {env} has tier {tier}, not local: opv_import_local writes only into a local environment"
             ),
@@ -4796,6 +4819,35 @@ impl Cause {
                 }
                 None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
             },
+            GrantsNotVerified {
+                env,
+                target,
+                reason,
+                ..
+            } => {
+                if *reason == "not_supported" {
+                    plan(
+                        inspect(
+                            "keep the configuration in secrets.toml (with secrets.bindings.toml \
+                             beside it) to record and verify a grant receipt",
+                        ),
+                        Next::None(NoNext::NothingToRun),
+                    )
+                } else {
+                    let mut args = vec![env.as_str()];
+                    if let Some(t) = target {
+                        args.extend(["--target", t.as_str()]);
+                    }
+                    args.extend(["--rotate", "--github", "<owner/repo>"]);
+                    plan(
+                        inspect(
+                            "the owner re-issues the identity in their own terminal, which \
+                             records a new receipt; commit the updated secrets.bindings.toml",
+                        ),
+                        Next::Handoff(cmd(&["access"], &args)),
+                    )
+                }
+            }
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(
                     inspect(format!(
