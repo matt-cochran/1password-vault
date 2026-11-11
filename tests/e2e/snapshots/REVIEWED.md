@@ -289,3 +289,9 @@ Gates on the fix: fmt, clippy with and without features, nextest 10524/10524, `m
 ## 0.12.0 sign-off
 
 The owner delegated the 0.12.0 snapshot sign-off on 2026-10-18 to a Junior review verified by the manager, as for 0.10.0. Every 0.12.0 box above is ticked on that basis.
+
+## 0.20.0: CI reader grants are not_supported in the access audit (#304, FR-70)
+
+Ten `access__…` matrix cells changed (`access__op_vault_user_list_…__not_found` ×7, `access__op_whoami__{applied_but_reply_lost,malformed_output,timeout}`). Spike #304 (Q3) showed a service account never appears in `op vault user list`, so a CI reader's grant on a vault whose list was read but does not name it is now `not_supported` (text: `not supported (service accounts are never listed)`), counted as unclassified, with one `ci_reader_not_visible` finding per environment (`next: opv access <env> --create --github <owner/repo>`) and no `Owner runs:` command for the CI reader. A CI reader grant on an unreadable vault stays `not_visible`; deploy identities are unchanged. The `scenarios/core_access` snapshot changes the same way, and `issue_157_access_reports_the_vault_outside_the_account_and_checks_the_others` now expects `not_supported` for the two boundaries whose last check is the CI reader's. Each diff was checked to be only this. No value in any diff.
+
+- [ ] Owner sign-off of the #304 access snapshots.

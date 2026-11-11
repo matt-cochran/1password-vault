@@ -339,12 +339,14 @@ fn issue_157_access_reports_the_vault_outside_the_account_and_checks_the_others(
             )
         })
         .collect();
+    // Per vault, the report's last check: the CI reader's on the two boundaries, which no
+    // access list can show (#304, spike Q3), so `not_supported` rather than `missing`.
     let expected: BTreeMap<String, String> = [
-        ("vE2ESHAREDPROD0000000000001", "missing"),
+        ("vE2ESHAREDPROD0000000000001", "not_supported"),
         ("vE2ESTATEFLY00000000000001", "not_in_account"),
         ("vE2ESTATEGH000000000000001", "missing"),
         ("vE2ESTATEK8S00000000000001", "missing"),
-        ("vE2EWEBPROD000000000000001", "missing"),
+        ("vE2EWEBPROD000000000000001", "not_supported"),
     ]
     .into_iter()
     .map(|(v, s)| (v.to_string(), s.to_string()))

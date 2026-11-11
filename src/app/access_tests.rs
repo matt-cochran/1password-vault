@@ -296,11 +296,13 @@ fn a_present_grant_is_reported_present() {
 
 // --- owner commands -----------------------------------------------------------------
 
+/// The two deploy identities; the CI reader, which no access list can show (#304, spike
+/// Q3), gets none.
 #[test]
 fn each_principal_with_a_missing_grant_gets_exactly_one_owner_command() {
     assert_eq!(
         commands(&run_json(&members_only(), Some("prod"), None)).len(),
-        3
+        2
     );
 }
 
@@ -931,4 +933,69 @@ fn the_text_output_says_none_listed_for_a_vault_without_writers() {
 fn a_member_who_only_reads_is_never_named() {
     let text = run_stage_text("production", &writers_op(json!([viewer()])));
     assert!(!text.contains("Alice"), "{text}");
+}
+
+// --- #304, FR-70: a CI reader is a service account, never listed ------------------
+
+#[test]
+fn an_unlisted_ci_reader_grant_is_not_supported() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    let states: Vec<&str> = doc["environments"][0]["report"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["grant"]["principal"]["kind"] == "ci_reader")
+        .map(|c| c["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["not_supported"; 3]);
+}
+
+#[test]
+fn an_unlisted_ci_reader_gets_no_owner_command() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    assert!(
+        !commands(&doc).iter().any(|c| c.contains("shop-prod-ci")),
+        "{doc}"
+    );
+}
+
+#[test]
+fn an_unlisted_ci_reader_is_reported_once_as_ci_reader_not_visible() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    let codes: Vec<&str> = doc["environments"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .filter(|c| c.contains("ci_reader"))
+        .collect();
+    assert_eq!(codes, ["ci_reader_not_visible"]);
+}
+
+#[test]
+fn an_unlisted_ci_reader_is_never_reported_missing_in_text() {
+    let text = run_text(&members_only(), Some("prod"), None);
+    let reader = text.split("ci reader prod:").nth(1).unwrap();
+    assert!(
+        !reader.lines().take(4).any(|l| l.ends_with("missing")),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_unlisted_ci_reader_grant_counts_as_unclassified() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    assert_eq!(doc["environments"][0]["report"]["unclassified"], 3);
+}
+
+#[test]
+fn a_listed_read_only_ci_reader_raises_no_ci_reader_not_visible() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert!(
+        doc["environments"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["code"] != "ci_reader_not_visible")
+    );
 }

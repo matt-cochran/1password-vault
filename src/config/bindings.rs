@@ -17,6 +17,7 @@ use toml::de::{DeTable, DeValue};
 use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
 
 use crate::cause::{Cause, ConfigSource, FieldRule, GivenBy, PatternId};
+use crate::domain::grant_receipt::{GrantReceipt, Reason as ReceiptReason};
 use crate::error::Error;
 
 use super::{Doc, is_id, toml_invalid};
@@ -33,15 +34,43 @@ pub const APPLIED: &str = "secrets.applied.json";
 /// The ids in `secrets.bindings.toml`, keyed by the dotted path of the field they fill in
 /// `secrets.toml`. A `BTreeMap`, so the writer's order is the canonical sorted order and a
 /// reader never depends on file order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Beside the ids, a CI identity's grant receipt (#304, FR-70) is kept as the table it was
+/// written as, keyed by its dotted path (`environments.<env>.ci_reader.receipt`), so a
+/// malformed receipt never stops the file from loading: [`receipt`](Self::receipt) says
+/// whether it is valid.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Bindings {
     ids: BTreeMap<String, String>,
+    receipts: BTreeMap<String, toml::Value>,
 }
 
 impl Bindings {
-    /// True when no id is recorded.
+    /// True when no id and no receipt is recorded.
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
+        self.ids.is_empty() && self.receipts.is_empty()
+    }
+
+    /// The grant receipt at `path` (a dotted key ending in `receipt`), when one is
+    /// recorded: the receipt, or [`Reason::ReceiptInvalid`](crate::domain::grant_receipt::Reason)
+    /// when the table there is not a valid `opv.grant-receipt/1`.
+    pub fn receipt(&self, path: &str) -> Option<Result<GrantReceipt, ReceiptReason>> {
+        self.receipts.get(path).map(|value| {
+            let table = value.as_table().ok_or(ReceiptReason::ReceiptInvalid)?;
+            let receipt: GrantReceipt = table
+                .clone()
+                .try_into::<GrantReceipt>()
+                .map_err(|_| ReceiptReason::ReceiptInvalid)?;
+            receipt.validate()?;
+            Ok(receipt)
+        })
+    }
+
+    /// Record `receipt` at `path`, replacing any earlier receipt there.
+    pub fn insert_receipt(&mut self, path: impl Into<String>, receipt: &GrantReceipt) {
+        if let Ok(table) = toml::Table::try_from(receipt) {
+            self.receipts.insert(path.into(), toml::Value::Table(table));
+        }
     }
 
     /// The id at `path` (a dotted key), when it is recorded.
@@ -58,10 +87,13 @@ impl Bindings {
     /// (so a later file may correct an earlier one).
     pub fn union(mut self, other: Bindings) -> Bindings {
         self.ids.extend(other.ids);
+        self.receipts.extend(other.receipts);
         self
     }
 
-    /// The canonical text: one sorted line per id, a dotted key and a quoted id.
+    /// The canonical text: one sorted line per id, a dotted key and a quoted id, then one
+    /// `[<path>]` table per grant receipt, sorted by path (a table header comes after every
+    /// dotted line, so no id is read as part of a receipt).
     pub fn render(&self) -> String {
         let mut out = String::new();
         for (path, id) in &self.ids {
@@ -70,6 +102,26 @@ impl Bindings {
             out.push_str(&Value::from(id.as_str()).to_string());
             out.push('\n');
         }
+        // A receipt written as something other than a table stays a dotted line, before any
+        // table header.
+        for (path, value) in &self.receipts {
+            if !value.is_table() {
+                out.push_str(path);
+                out.push_str(" = ");
+                out.push_str(&value.to_string());
+                out.push('\n');
+            }
+        }
+        for (path, value) in &self.receipts {
+            let Some(table) = value.as_table() else {
+                continue;
+            };
+            out.push('\n');
+            out.push('[');
+            out.push_str(path);
+            out.push_str("]\n");
+            out.push_str(&receipt_body(table));
+        }
         out
     }
 
@@ -77,11 +129,53 @@ impl Bindings {
     /// [`Cause::ConfigInvalid`] naming that key: nothing here decides what an id *means*.
     pub fn parse(text: &str) -> Result<Bindings, Error> {
         let doc = Doc::parse(text).map_err(|e| toml_invalid(text, &e))?;
-        let mut ids = BTreeMap::new();
+        // The same text as plain tables, for the receipts kept whole.
+        let plain: toml::Table =
+            toml::from_str(text).map_err(|_| bug("config::bindings::parse"))?;
+        let mut found = Bindings::default();
         let mut prefix = Vec::new();
-        flatten(&doc, doc.root.get_ref(), &mut prefix, &mut ids)?;
-        Ok(Bindings { ids })
+        flatten(&doc, doc.root.get_ref(), &plain, &mut prefix, &mut found)?;
+        Ok(found)
     }
+}
+
+/// A receipt table's body: [`GrantReceipt::to_toml`] when it is a valid receipt (its
+/// documented field order), else each key with its value written inline, as read.
+fn receipt_body(table: &toml::Table) -> String {
+    if let Ok(receipt) = table.clone().try_into::<GrantReceipt>()
+        && receipt.validate().is_ok()
+    {
+        return receipt.to_toml();
+    }
+    let mut body = String::new();
+    for (key, value) in table {
+        body.push_str(&toml_edit::Key::new(key.as_str()).to_string());
+        body.push_str(" = ");
+        body.push_str(&value.to_string());
+        body.push('\n');
+    }
+    body
+}
+
+/// The value at the dotted `path` of `table`, when there is one.
+fn value_at<'a>(table: &'a toml::Table, path: &[&str]) -> Option<&'a toml::Value> {
+    let (last, walk) = path.split_last()?;
+    let mut t = table;
+    for seg in walk {
+        t = t.get(*seg)?.as_table()?;
+    }
+    t.get(*last)
+}
+
+/// The grant receipt tables (#304, FR-70): `environments.<env>.ci_reader.receipt` and
+/// `environments.<env>.targets.<t>.ci_identity.receipt`. Names, ids, dates and a digest; not
+/// ids of the contract, so [`Bindings::parse`] keeps them whole.
+fn is_receipt(path: &[&str]) -> bool {
+    matches!(
+        path,
+        ["environments", _, "ci_reader", "receipt"]
+            | ["environments", _, "targets", _, "ci_identity", "receipt"]
+    )
 }
 
 /// The inline ids in `text`, whatever their value: the fields a move takes out of the
@@ -93,7 +187,10 @@ pub fn inline_ids(text: &str) -> Result<Bindings, Error> {
         .filter(|(path, _)| recognized_path(path))
         .map(|(path, id)| (path.join("."), id))
         .collect();
-    Ok(Bindings { ids })
+    Ok(Bindings {
+        ids,
+        receipts: BTreeMap::new(),
+    })
 }
 
 /// `Err` naming an inline id when `text` still writes one: ids are one-way out of the
@@ -215,7 +312,13 @@ pub fn split(text: &str) -> (String, Bindings) {
     if !take_ids(doc.as_table_mut(), &mut prefix, &mut ids) {
         return (text.to_string(), Bindings::default());
     }
-    (doc.to_string(), Bindings { ids })
+    (
+        doc.to_string(),
+        Bindings {
+            ids,
+            receipts: BTreeMap::new(),
+        },
+    )
 }
 
 /// Write `bindings` as the sibling of the contract at `config_path`, in the canonical sorted
@@ -388,18 +491,29 @@ fn take_ids(
     removed
 }
 
-/// Validate the bindings file: every leaf must be a recognized id field holding an id.
+/// Validate the bindings file: every leaf must be a recognized id field holding an id, or
+/// sit in a grant receipt table, which is kept whole (`plain` is the same text as tables).
 fn flatten(
     doc: &Doc<'_>,
     table: &DeTable<'_>,
+    plain: &toml::Table,
     prefix: &mut Vec<String>,
-    ids: &mut BTreeMap<String, String>,
+    found: &mut Bindings,
 ) -> Result<(), Error> {
     for (name, value) in table.iter() {
         prefix.push(name.get_ref().to_string());
         let refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        // A grant receipt is a record, not an id (#304): kept whole, as written, so a
+        // rewrite of the file never drops it and a malformed one never stops it loading.
+        if is_receipt(&refs) {
+            if let Some(receipt) = value_at(plain, &refs) {
+                found.receipts.insert(prefix.join("."), receipt.clone());
+            }
+            prefix.pop();
+            continue;
+        }
         match value.get_ref() {
-            DeValue::Table(inner) => flatten(doc, inner, prefix, ids)?,
+            DeValue::Table(inner) => flatten(doc, inner, plain, prefix, found)?,
             other => match other.as_str() {
                 Some(_) if !recognized(&refs) => {
                     return Err(doc.invalid(&refs, FieldRule::Unknown { suggestion: None }));
@@ -408,7 +522,7 @@ fn flatten(
                     return Err(doc.invalid(&refs, FieldRule::Pattern { id: PatternId::Id }));
                 }
                 Some(id) => {
-                    ids.insert(prefix.join("."), id.to_string());
+                    found.ids.insert(prefix.join("."), id.to_string());
                 }
                 None => {
                     return Err(doc.invalid(

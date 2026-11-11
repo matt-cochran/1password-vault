@@ -285,3 +285,89 @@ fn the_apply_record_is_written_beside_a_dot_opv_account_pointer() {
     };
     assert!(write_record(&dir.path().join(APPLIED), &record).is_ok());
 }
+
+// --- #304, FR-70: a CI identity's grant receipt beside its expiry -------------------
+
+fn grant_receipt() -> crate::domain::grant_receipt::GrantReceipt {
+    use crate::domain::grant_receipt::{GrantReceipt, IssuedBy, ReceiptVault, SCHEMA};
+    GrantReceipt {
+        schema: SCHEMA.into(),
+        account_id: "ACC".into(),
+        service_account_user_id: "USR".into(),
+        service_account_name: "shop-prod-ci".into(),
+        vaults: vec![ReceiptVault {
+            id: "vweb".into(),
+            permissions: vec!["read_items".into()],
+        }],
+        issued_at: "2026-11-11T10:24:11Z".into(),
+        issued_by: IssuedBy::Create,
+        expires_on: "2027-02-09".into(),
+        contract_grants: format!("sha256:{}", "0".repeat(64)),
+    }
+}
+
+const RECEIPT_PATH: &str = "environments.prod.ci_reader.receipt";
+
+/// The bindings with an expiry and a receipt for the same CI reader, rendered.
+fn rendered_with_receipt() -> String {
+    let mut bindings = Bindings::parse(BINDINGS).unwrap();
+    bindings.insert("environments.prod.ci_reader.expires_on", "2027-02-09");
+    bindings.insert_receipt(RECEIPT_PATH, &grant_receipt());
+    bindings.render()
+}
+
+#[test]
+fn a_rendered_receipt_reads_back_as_the_same_receipt() {
+    let read = Bindings::parse(&rendered_with_receipt()).unwrap();
+    assert_eq!(read.receipt(RECEIPT_PATH), Some(Ok(grant_receipt())));
+}
+
+#[test]
+fn a_rendered_receipt_keeps_the_expiry_beside_it() {
+    let read = Bindings::parse(&rendered_with_receipt()).unwrap();
+    assert_eq!(
+        read.get("environments.prod.ci_reader.expires_on"),
+        Some("2027-02-09")
+    );
+}
+
+#[test]
+fn a_malformed_receipt_still_loads_and_reads_as_invalid() {
+    let text = "[environments.prod.ci_reader.receipt]\nschema = \"something-else\"\n";
+    let read = Bindings::parse(text).unwrap();
+    assert_eq!(
+        read.receipt(RECEIPT_PATH),
+        Some(Err(crate::domain::grant_receipt::Reason::ReceiptInvalid))
+    );
+}
+
+#[test]
+fn a_receipt_that_is_not_a_table_reads_as_invalid() {
+    let text = "environments.prod.ci_reader.receipt = \"x\"\n";
+    assert_eq!(
+        Bindings::parse(text).unwrap().receipt(RECEIPT_PATH),
+        Some(Err(crate::domain::grant_receipt::Reason::ReceiptInvalid))
+    );
+}
+
+#[test]
+fn a_receipt_that_is_not_a_table_survives_a_rewrite() {
+    let text = "environments.prod.ci_reader.receipt = \"x\"\n";
+    assert_eq!(Bindings::parse(text).unwrap().render(), text);
+}
+
+#[test]
+fn rendering_bindings_without_a_receipt_is_unchanged() {
+    assert_eq!(Bindings::parse(BINDINGS).unwrap().render(), BINDINGS);
+}
+
+#[test]
+fn a_contract_loads_with_a_receipt_in_its_bindings_file() {
+    let (_dir, path) = write(CONTRACT_WITHOUT_IDS);
+    std::fs::write(
+        path.with_file_name("secrets.bindings.toml"),
+        rendered_with_receipt(),
+    )
+    .unwrap();
+    assert!(crate::config::load(&path).is_ok());
+}

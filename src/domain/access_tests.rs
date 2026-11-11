@@ -223,7 +223,7 @@ fn access_not_visible_has_no_next_step() {
 #[test]
 fn access_not_visible_never_suggests_a_ci_reader() {
     let found = findings(&[invisible("prod")]);
-    assert!(!codes(&found).contains(&"no_ci_reader"));
+    assert!(!codes(&found).contains(&"ci_reader_not_visible"));
 }
 
 #[test]
@@ -233,9 +233,9 @@ fn access_not_visible_message_names_the_environment() {
 }
 
 #[test]
-fn a_deployed_environment_without_a_ci_reader_yields_no_ci_reader() {
+fn a_deployed_environment_with_no_listed_ci_reader_yields_ci_reader_not_visible() {
     let found = findings(&[visible("prod", true, Vec::new())]);
-    assert_eq!(codes(&found), ["no_ci_reader"]);
+    assert_eq!(codes(&found), ["ci_reader_not_visible"]);
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn a_local_environment_needs_no_ci_reader() {
 }
 
 #[test]
-fn a_read_only_service_account_omits_no_ci_reader() {
+fn a_read_only_service_account_omits_ci_reader_not_visible() {
     let readers = vec![Reader {
         name: "prod-ci".into(),
         read_only: true,
@@ -258,7 +258,7 @@ fn a_read_only_service_account_omits_no_ci_reader() {
 }
 
 #[test]
-fn no_ci_reader_suggests_creating_the_reader_without_showing_its_token() {
+fn ci_reader_not_visible_suggests_creating_the_reader_without_showing_its_token() {
     let found = findings(&[visible("prod", true, Vec::new())]);
     assert_eq!(
         found[0].next.as_deref(),
@@ -267,7 +267,7 @@ fn no_ci_reader_suggests_creating_the_reader_without_showing_its_token() {
 }
 
 #[test]
-fn no_ci_reader_message_names_the_environment() {
+fn ci_reader_not_visible_message_names_the_environment() {
     let found = findings(&[visible("prod", true, Vec::new())]);
     assert!(found[0].message.contains("prod"));
 }
@@ -377,7 +377,10 @@ fn findings_are_ordered_by_code_within_an_environment() {
         read_only: false,
     }];
     let found = findings(&[visible("prod", true, writers)]);
-    assert_eq!(codes(&found), ["no_ci_reader", "ci_reader_can_write"]);
+    assert_eq!(
+        codes(&found),
+        ["ci_reader_not_visible", "ci_reader_can_write"]
+    );
 }
 
 // --- privacy -----------------------------------------------------------------------
@@ -502,6 +505,16 @@ fn access_not_visible_says_who_can_run_the_check() {
         found[0]
             .message
             .contains("ask a manager of the vault to run opv access prod"),
+        "{}",
+        found[0].message
+    );
+}
+
+#[test]
+fn ci_reader_not_visible_says_not_supported() {
+    let found = findings(&[visible("prod", true, Vec::new())]);
+    assert!(
+        found[0].message.contains("not_supported"),
         "{}",
         found[0].message
     );

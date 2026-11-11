@@ -375,18 +375,25 @@ pub fn run_access(
             )],
         ));
     }
+    // #296, #304: the value-free expiry and grant receipt of the service account just
+    // created, beside the contract, once its token has been stored and verified (a
+    // manifest project has no bindings sibling, and it is said).
+    let recorded = super::access_receipt::record(
+        fleet,
+        r,
+        &token,
+        &super::access_receipt::Issue {
+            env,
+            target,
+            service_account: &successor,
+            grants: &id.grants,
+            issued_by: crate::domain::grant_receipt::IssuedBy::Rotate,
+            validity_days: VALIDITY_DAYS,
+        },
+        out,
+    );
     drop(token);
-    // #296: the value-free expiry of the service account just created, beside the contract,
-    // once its token has been stored (a manifest project has no bindings sibling).
-    if let crate::cause::ConfigSource::File { path, .. } = &fleet.read_from.0
-        && path.is_file()
-    {
-        let key = match target {
-            Some(t) => crate::domain::credential::ci_identity_expires_path(env, t),
-            None => crate::domain::credential::ci_reader_expires_path(env),
-        };
-        super::target_credentials::record_minted_expiry(path, &key, Some(VALIDITY_DAYS))?;
-    }
+    recorded?;
     writeln!(
         out,
         "rotated {successor:?}: replaced the GitHub secret {} in {place}; nothing was printed",

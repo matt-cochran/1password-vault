@@ -120,6 +120,23 @@ environments.prod.targets.fly.deploy_credentials_expires_on = "2027-02-08"
 
 `opv ready`, `opv doctor --env` and `opv status <env>` report a credential that expires within 14 days or has expired, with its rotation command ([usage](usage.md#ci-credential-expiry-and-rotation)). A project whose configuration lives in 1Password (a manifest) records no expiry dates.
 
+`opv access --create` and `--rotate` also record the new service account's **grant receipt** beside its expiry (#304): names, ids and a digest only, from `op whoami` run under the new token. It is committed and reviewed like the contract:
+
+```toml
+[environments.prod.ci_reader.receipt]
+schema = "opv.grant-receipt/1"
+account_id = "<ACCOUNT_UUID>"
+service_account_user_id = "<USER_UUID>"
+service_account_name = "shop-prod-ci"
+vaults = [{ id = "<VAULT_ID>", permissions = ["read_items"] }]
+issued_at = "2026-11-11T10:24:11Z"
+issued_by = "access --create"
+expires_on = "2027-02-09"
+contract_grants = "sha256:<hex>"
+```
+
+A target's CI identity records it at `environments.<env>.targets.<t>.ci_identity.receipt`. When `op whoami` under the new token fails, is incomplete or does not report a service account, no receipt is written and the command says why (the token is still stored). A manifest project records none, and says so.
+
 `opv propose structure --rebind <env>` records fresh ids for an environment (a new 1Password account, say); ids not being rebound are kept.
 
 The **apply record** `secrets.applied.json` remembers the plan last applied and the sha256 of the contract and bindings files it wrote:
