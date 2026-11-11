@@ -187,3 +187,31 @@ fn the_plan_id_golden_is_stable() {
     let p = propose_structure(&op, &path, "myapp", ACCOUNT, &[], &generate).unwrap();
     assert_eq!(p.plan_id, "sp-0ded5fd55ccda5bf");
 }
+
+#[test]
+fn structured_generate_proposals_are_read_only_and_deterministic() {
+    for rule in ["age_identity = true", "ssh_ed25519 = true"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.toml");
+        let op = FakeOp::default();
+        let id = op.insert("vdev0000000000000000000001", item("app", "API_KEY"));
+        let text = CLEAN.replace(
+            "rules = { base64_bytes = 32 }",
+            &format!("source = \"generated\"\nfile = \"identity\"\nrules = {{ {rule} }}"),
+        );
+        let text =
+            format!("{text}\n[products.app.local]\nsecrets_dir_env = \"APP_SECRET_FILES\"\n")
+                .replace("ITEM", &id);
+        write_split(&path, &text).unwrap();
+        let requested = vec![("dev".into(), vec!["app/API_KEY".into()])];
+        let a = propose_structure(&op, &path, "myapp", ACCOUNT, &[], &requested).unwrap();
+        let b = propose_structure(&op, &path, "myapp", ACCOUNT, &[], &requested).unwrap();
+        assert_eq!(a.plan_id, b.plan_id);
+        assert!(a.steps.iter().any(|s| matches!(s, Step::Generate { .. })));
+        assert!(op.calls.borrow().iter().all(|c| {
+            !c.args
+                .iter()
+                .any(|a| ["edit", "create", "delete"].contains(&a.as_str()))
+        }));
+    }
+}

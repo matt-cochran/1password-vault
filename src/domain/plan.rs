@@ -427,16 +427,43 @@ pub fn build_with_gate(
             )),
             _ if withheld_by_role => Ok(None),
             Some((kind, value)) if kind == spec.kind => {
-                // A file key delivered as a file (no target or a Native target) is staged
-                // verbatim (M4, §4.5): the transform and the line-shape rules do not apply.
+                let channels = opts
+                    .target
+                    .and_then(|t| env.targets.get(t))
+                    .map(|t| t.config.channels());
+                let api_secret = spec.kind == Kind::Secret
+                    && channels
+                        .as_ref()
+                        .is_some_and(|c| matches!(c.files, FileCapability::ApiSecret));
+                if spec.file.is_some() && api_secret && rules::applies(spec, env_name, env, product)
+                {
+                    if !matches!(
+                        channels.as_ref().map(|c| &c.secret),
+                        Some(Channel::Store { .. })
+                    ) {
+                        return Err(KeyState::RuleFailed(
+                            "file",
+                            Reason::Fixed("file API payload requires a secret-store channel"),
+                        ));
+                    }
+                    // GitHub delivers secrets to action inputs; NUL is incompatible with
+                    // that UTF-8 string boundary even though a filesystem can hold it.
+                    if value.expose().contains('\0') {
+                        return Err(KeyState::RuleFailed(
+                            "file",
+                            Reason::Fixed("NUL is not supported in a UTF-8 API secret"),
+                        ));
+                    }
+                }
+                // A declared file stays verbatim only on an actual native file channel
+                // or the explicit API-secret capability. Other env channels stay strict.
                 let verbatim = spec.file.is_some()
-                    && match opts.target {
-                        None => true,
-                        Some(t) => matches!(
-                            env.targets.get(t).map(|tt| tt.config.channels().files),
-                            Some(FileCapability::Native { .. })
-                        ),
-                    };
+                    && (opts.target.is_none()
+                        || channels.as_ref().is_some_and(|c| {
+                            matches!(c.files, FileCapability::Native { .. })
+                                || (matches!(c.files, FileCapability::ApiSecret)
+                                    && spec.kind == Kind::Secret)
+                        }));
                 rules::check_verbatim(product, key, spec, env_name, env, value, verbatim)
                     .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
             }

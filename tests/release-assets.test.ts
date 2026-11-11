@@ -1,3 +1,4 @@
+import { hash, checks, platforms as qualificationPlatforms, validateQualification, validateNpmMetadata, type Qualification } from '../scripts/qualify-distribution.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { findRetainedCandidate, npmPublishAction, orderNpmTarballs, publishNpmTarballs, validate, waitForIntegrity, type Manifest } from '../scripts/release-assets.ts';
@@ -7,7 +8,15 @@ const actual: Record<string, string> = {};
 for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc.exe', 'aarch64-pc-windows-msvc.exe']) actual[`dist/opv-${target}`] = 'd'.repeat(64);
 actual['dist/opv'] = 'd'.repeat(64); actual['dist/SHA256SUMS'] = 'd'.repeat(64);
 for (let n = 0; n < 7; n++) actual[`npm/package-${n}.tgz`] = 'd'.repeat(64);
-const manifest: Manifest = { schema: 1, repository, workflow: 'release.yml', tree, source_sha: 'b'.repeat(40), run_id: 12, run_attempt: 2, files: actual };
+const input = { version: '0.18.3', tree, source_sha: 'b'.repeat(40), run_id: 12, run_attempt: 2, files: { ...actual } };
+actual['input.json'] = hash(JSON.stringify(input) + '\n');
+const qualifications = Object.fromEntries(Object.keys(qualificationPlatforms).map(platform => {
+  const q: Qualification = { schema: 1, platform, version: input.version, source_sha: input.source_sha, tree, run_id: 12, run_attempt: 2,
+    input_sha256: hash(JSON.stringify(input)), binary_sha256: 'd'.repeat(64), checks: [...checks] };
+  actual[`qualification/${platform}.json`] = hash(JSON.stringify(q) + '\n');
+  return [platform, q];
+}));
+const manifest: Manifest = { schema: 2, version: input.version, input, qualifications, repository, workflow: 'release.yml', tree, source_sha: input.source_sha, run_id: 12, run_attempt: 2, files: actual };
 const run = { id: 12, run_attempt: 2, status: 'completed', conclusion: 'success', event: 'push', head_branch: 'staging', head_sha: manifest.source_sha, path: '.github/workflows/release.yml', head_repository: { full_name: repository } };
 test('an exact successful staging release qualifies', () => validate(manifest, run, repository, tree, actual));
 test('main, fork and failed runs never qualify', () => {
@@ -158,4 +167,44 @@ test('a registry wait timeout names the packages and says re-running the job is 
     timeoutMs: 500,
     intervalMs: 100,
   }), /npm did not list @matthew-cochran\/opv-darwin-arm64@1\.2\.3 within 500ms; the job is safe to re-run/);
+});
+
+
+test('legacy source-only candidates cannot qualify a new distribution', () => {
+  assert.throws(() => validate({ ...manifest, schema: 1 } as unknown as Manifest, run, repository, tree, actual));
+});
+test('all six exact positive native/npm capability receipts are mandatory', () => {
+  const missing = { ...qualifications }; delete missing['win32-arm64'];
+  assert.throws(() => validate({ ...manifest, qualifications: missing }, run, repository, tree, actual));
+  const q = qualifications['linux-x64'];
+  for (const changed of [{ ...q, checks: checks.slice(1) }, { ...q, version: '0.18.2' }, { ...q, run_attempt: 1 },
+    { ...q, binary_sha256: 'e'.repeat(64) }, { ...q, source_sha: 'c'.repeat(40) }, { ...q, platform: 'darwin-x64' },
+    { ...q, input_sha256: 'e'.repeat(64) }]) {
+    assert.throws(() => validateQualification(changed, input, 'linux-x64'));
+  }
+});
+test('qualified receipt bytes and original input checksums cannot be substituted', () => {
+  const changed = { ...qualifications['linux-x64'], checks: checks.slice(1) };
+  assert.throws(() => validate({ ...manifest, qualifications: { ...qualifications, 'linux-x64': changed } }, run, repository, tree, actual));
+  const changedInput = { ...input, files: { ...input.files, 'dist/opv': 'e'.repeat(64) } };
+  assert.throws(() => validate({ ...manifest, input: changedInput }, run, repository, tree, actual));
+});
+
+
+test('retained input metadata bytes are immutable too', () => {
+  assert.throws(() => validate(manifest, run, repository, tree, { ...actual, 'input.json': 'e'.repeat(64) }));
+  assert.throws(() => validate({ ...manifest, files: { ...actual, 'input.json': 'e'.repeat(64) } }, run, repository, tree, { ...actual, 'input.json': 'e'.repeat(64) }));
+});
+
+
+test('fresh npm install cannot mask wrong package versions or optional dependency wiring', () => {
+  const main = { name: '@matthew-cochran/opv', version: '0.18.3', optionalDependencies: Object.fromEntries(Object.keys(qualificationPlatforms).map(p => [`@matthew-cochran/opv-${p}`, '0.18.3'])) };
+  const native = { name: '@matthew-cochran/opv-linux-x64', version: '0.18.3', os: ['linux'], cpu: ['x64'] };
+  validateNpmMetadata(main, native, '0.18.3', 'linux-x64');
+  for (const wrong of [{ ...main, version: '0.18.2' }, { ...main, name: '@another/opv' },
+    { ...main, optionalDependencies: { ...main.optionalDependencies, '@matthew-cochran/opv-linux-x64': '0.18.2' } },
+    { ...main, optionalDependencies: { ...main.optionalDependencies, '@another/package': '0.18.3' } },
+    { ...main, optionalDependencies: {} }]) assert.throws(() => validateNpmMetadata(wrong, native, '0.18.3', 'linux-x64'));
+  for (const wrong of [{ ...native, version: '0.18.2' }, { ...native, name: '@another/opv-linux-x64' },
+    { ...native, os: ['darwin'] }, { ...native, cpu: ['arm64'] }]) assert.throws(() => validateNpmMetadata(main, wrong, '0.18.3', 'linux-x64'));
 });

@@ -43,6 +43,9 @@ pub struct Rules {
     /// (design `sealed-target` §3.1-8, T14).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub age_identity: bool,
+    /// An unencrypted Ed25519 OpenSSH private key, delivered only as a file.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ssh_ed25519: bool,
 }
 
 /// A string or a list of strings in TOML (`x = "a"` or `x = ["a", "b"]`).
@@ -214,9 +217,19 @@ impl KeySpec {
             return false;
         }
         matches!(
-            (r.base64_bytes, r.hex_bytes),
-            (Some(n), None) | (None, Some(n)) if (16..=1024).contains(&n)
-        )
+            (r.age_identity, r.ssh_ed25519, r.base64_bytes, r.hex_bytes),
+            (false, false, Some(n), None) | (false, false, None, Some(n)) if (16..=1024).contains(&n)
+        ) || (r.age_identity
+            && !r.ssh_ed25519
+            && r.base64_bytes.is_none()
+            && r.hex_bytes.is_none()
+            && self.kind == Kind::Secret)
+            || (r.ssh_ed25519
+                && !r.age_identity
+                && r.base64_bytes.is_none()
+                && r.hex_bytes.is_none()
+                && self.kind == Kind::Secret
+                && self.file.is_some())
     }
 }
 

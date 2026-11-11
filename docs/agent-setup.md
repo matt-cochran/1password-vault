@@ -151,6 +151,30 @@ Self-made secrets (an encryption, session or signing key: a key whose rules give
 
 An immutable key that a sync keeps holding on Fly, so its product never gets a delivery revision (`delivery: <product> not recorded: not confirmed by this sync`), can be attested: explain the risk in [attestation.md](attestation.md) first (a wrong attestation is only caught when the app fails, and rotating is the proven alternative). If the user is sure the target holds 1Password's value, propose it with `opv_propose` `kind: attest` (`env`, `target`, `keys`). The person records it with the `opv apply <plan_id> --attest <env>:<target>:<product/KEY>` the proposal prints; you never run it.
 
+### Owner-generated identities
+
+Declare `source = "generated"` and exactly one recipe: `base64_bytes`, `hex_bytes`,
+`age_identity = true` (age X25519 identity), or `ssh_ed25519 = true` (an Ed25519
+OpenSSH private key). Structured identities require `kind = "secret"`; SSH also
+requires `file = "signing-key"`. For local files, declare the product's
+`secrets_dir_env`. Keep each identity in its own declared key.
+
+Use `opv propose generate <env> <product/KEY>...`, then hand the actual plan ID to
+the person: `opv apply <plan_id> --generate <env:product/KEY>` (repeat the flag for
+each selected key). Native apply recomputes the plan and asks for confirmation in
+their own terminal. Shared and production environment tiers support this owner
+flow; provider-issued, personal, `from` and infrastructure-source protections
+still apply. CI, agents, Connect and service accounts cannot perform owner apply.
+Existing nonempty fields are refused, never overwritten by generation.
+
+Private identities go directly to concealed 1Password fields. After verified
+readback, apply prints only the public `age1...` recipient, or the public
+`ssh-ed25519 ...` key and SHA256 fingerprint. Review recipients and allowed
+signers separately: generation grants no trust. File delivery preserves multiline
+bytes and the trailing newline. A GitHub Actions file-backed secret uses its
+configured secret name and the native UTF-8 secret API, not a mounted path or a
+compacted PEM workaround; raw multiline config variables remain unsupported.
+
 ## 5. Plan, then sync
 
 ```sh

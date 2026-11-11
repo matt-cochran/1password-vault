@@ -187,6 +187,7 @@ fn rules_loosened(base: &Rules, head: &Rules) -> bool {
         || (base.email_list && !head.email_list)
         || (base.https_url && !head.https_url)
         || (base.age_identity && !head.age_identity)
+        || (base.ssh_ed25519 && !head.ssh_ed25519)
         || dropped_entries(base.not_prefix.as_ref(), head.not_prefix.as_ref())
         || dropped_strings(&base.refuse_in, &head.refuse_in)
         || widened_strings(base.r#enum.as_ref(), head.r#enum.as_ref())
