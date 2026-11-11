@@ -267,6 +267,9 @@ pub fn meaning(code: &str) -> &'static str {
         "findings" => {
             "keys are missing or failing a rule (values are filled in 1Password by a person)"
         }
+        "reader_grants_unverified" => {
+            "CI reader immutable issuance proof is missing, stale or mismatched"
+        }
         "gate_failed" => {
             "ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them"
         }
@@ -1071,6 +1074,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 candidates: Vec::new(),
             }),
         },
+        ReaderGrantsUnverified { env: EnvName::new("env-prod"), reason: "issuance_missing".into() },
         GateFailed {
             env: EnvName::new("env-prod"),
             keys: vec![(

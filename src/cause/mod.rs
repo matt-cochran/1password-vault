@@ -1291,6 +1291,11 @@ pub enum Cause {
     /// a value state other than `set`, or delivery evidence older than the source item now.
     /// `keys` carries the product, the key and the reason (the state name, or
     /// `not_delivered`); never a value (SR-1). Public code `gate_failed`, exit 8.
+    /// Immutable CI-reader issuance proof could not be established (#304).
+    ReaderGrantsUnverified {
+        env: EnvName,
+        reason: String,
+    },
     GateFailed {
         env: EnvName,
         keys: Vec<(ProductName, KeyName, &'static str)>,
@@ -2522,6 +2527,7 @@ impl Cause {
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
+            ReaderGrantsUnverified { .. } => "reader_grants_unverified",
             GateFailed { .. } => "gate_failed",
             ImportTierRefused { .. } => "import_tier_refused",
             ProducerFailed { .. } => "producer_failed",
@@ -2679,6 +2685,7 @@ impl Cause {
             ValuesNeeded { .. }
             | DeliveryUnverified { .. }
             | TargetDrift { .. }
+            | ReaderGrantsUnverified { .. }
             | GateFailed { .. } => 8,
             SourceChanged { .. } => 10,
             CreateOutcomeUnknown { .. }

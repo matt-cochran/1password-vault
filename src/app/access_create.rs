@@ -203,10 +203,50 @@ pub fn run(
     ui: &mut dyn Interaction,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_with_receipt(fleet, req, r, ui, out, None)
+}
+
+/// Opt-in immutable reader issuance evidence; never authenticates existing identities by name.
+pub fn run_with_receipt(
+    fleet: &crate::domain::Fleet,
+    req: &Request<'_>,
+    r: &dyn CommandRunner,
+    ui: &mut dyn Interaction,
+    out: &mut dyn Write,
+    receipt_path: Option<&std::path::Path>,
+) -> Result<(), Error> {
     let (env, target, project, gh) = (req.env, req.target, req.project, &req.github);
+    let contract = receipt_path
+        .map(|_| super::reader_grants::contract(fleet, env))
+        .transpose()?;
+    if receipt_path.is_some() && target.is_some() {
+        return Err(super::reader_grants::refusal(
+            env,
+            "deploy_identity_not_supported",
+        ));
+    }
+    if let Some(path) = receipt_path {
+        super::reader_grants::preflight_destination(path)?;
+    }
     check(gh)?;
     super::tidy::require_person(r, "opv access --create")?;
     let id = super::access::identity(fleet, env, target, project, r)?;
+    if let Some(c) = &contract {
+        let requested: std::collections::BTreeSet<_> = id
+            .grants
+            .iter()
+            .filter(|g| g.permission == Permission::Read)
+            .map(|g| g.vault_id.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<_> =
+            c.vaults.iter().map(|g| g.vault_id.as_str()).collect();
+        if requested != expected || requested.len() != id.grants.len() {
+            return Err(super::reader_grants::refusal(
+                env,
+                "native_create_request_mismatch",
+            ));
+        }
+    }
     // #157: the vault's own diagnosed cause (another account, or none), with op's reply;
     // a service account created here could not be granted it, so nothing is created.
     if let Some(vault) = id.not_in_account.first() {
@@ -309,6 +349,19 @@ pub fn run(
         }
         .into());
     }
+    // A token-scoped native call binds the closed create request to the actual immutable
+    // account/user IDs. Never parse identity out of a token or match a mutable name.
+    let issued = if let Some(contract) = contract {
+        match super::reader_grants::issued(&contract, &token, r) {
+            Ok(receipt) => Some(receipt),
+            Err(error) => {
+                ui.show("The new identity could not be verified; no receipt or GitHub secret was saved. Remove the new account in 1Password before trying again.")?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let stored = ci_secrets::store(r, &gh.repo, gh.environment.as_deref(), &gh.secret, &token);
     drop(token);
     if let Err(e) = stored {
@@ -320,6 +373,11 @@ pub fn run(
             id.service_account
         ))?;
         return Err(e);
+    }
+    if let (Some(path), Some(receipt)) = (receipt_path, issued) {
+        let digest = super::reader_grants::save(path, &receipt)?;
+        writeln!(out, "reader grant receipt SHA256: {digest}; approve and pin it separately in trusted CI configuration")
+            .map_err(write_err)?;
     }
     // #296: the value-free expiry of the service account just created, beside the contract,
     // once its token has been stored and read back. A manifest project has no bindings

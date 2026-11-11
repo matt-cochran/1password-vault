@@ -1351,3 +1351,5 @@ What changes in use, in short:
 - `opv run` file keys live on a RAM-backed runtime directory that other users cannot write, are written through a directory handle, and the app inherits no descriptor above 2 from opv's delivery step; what opv cannot enforce (same user, root, swap) is listed in [platforms and limits](design/local-delivery.md#platforms-and-limits). [Security](security.md) has the whole model.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.
+
+Reader grant verification: see [CI reader grant evidence](reader-grants.md) for owner issuance, restricted CI verification, the metadata schema and proof limitations.

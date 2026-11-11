@@ -1135,6 +1135,16 @@ enum Cmd {
             requires = "identity_write"
         )]
         secret_name: String,
+        /// Save a new public immutable reader issuance receipt with --create, or read
+        /// an independently approved receipt with --verify-reader (#304).
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["target", "rotate"])]
+        grant_receipt: Option<PathBuf>,
+        /// Verify the current service account against an approved immutable issuance receipt.
+        #[arg(long, requires_all = ["env", "grant_receipt", "grant_receipt_sha256"], conflicts_with_all = ["create", "rotate", "target", "project"])]
+        verify_reader: bool,
+        /// Independently approved receipt digest, pinned outside untrusted job inputs.
+        #[arg(long, requires = "verify_reader")]
+        grant_receipt_sha256: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -5390,8 +5400,29 @@ fn run_other(
         }
         Cmd::Access {
             env: Some(env),
+            verify_reader: true,
+            grant_receipt: Some(path),
+            grant_receipt_sha256: Some(digest),
+            json,
+            ..
+        } => {
+            let token = opv::domain::SecretValue::new(
+                std::env::var("OP_SERVICE_ACCOUNT_TOKEN").unwrap_or_default(),
+            );
+            opv::scrub::register_secret(token.expose());
+            if token.expose().is_empty() {
+                return Err(opv::app::reader_grants::refusal(
+                    &env,
+                    "service_account_token_required",
+                ));
+            }
+            opv::app::reader_grants::verify(&loaded?, &env, &path, &digest, &token, r, json, out)
+        }
+        Cmd::Access {
+            env: Some(env),
             target,
             project,
+            grant_receipt,
             create,
             rotate,
             github: Some(repo),
@@ -5428,15 +5459,23 @@ fn run_other(
                     out,
                 )
             } else {
-                opv::app::access_create::run(
+                opv::app::access_create::run_with_receipt(
                     &loaded?,
                     &req,
                     r,
                     &mut opv::app::setup_runtime::Console,
                     out,
+                    grant_receipt.as_deref(),
                 )
             }
         }
+        Cmd::Access {
+            grant_receipt: Some(_),
+            ..
+        } => Err(opv::app::reader_grants::refusal(
+            "",
+            "receipt_requires_create_or_verify_reader",
+        )),
         Cmd::Access {
             env,
             target,

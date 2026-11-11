@@ -921,6 +921,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
         (
+            ReaderGrantsUnverified {
+                env: EnvName::new("env-prod"),
+                reason: "issuance_missing".into(),
+            },
+            vec!["env-prod", "issuance_missing"],
+        ),
+        (
             GateFailed {
                 env: EnvName::new("env-prod"),
                 keys: vec![(
@@ -1119,6 +1126,7 @@ fn ordinal(c: &Cause) -> usize {
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
         ValueInTextField { .. } => 78,
+        ReaderGrantsUnverified { .. } => 92,
         GateFailed { .. } => 79,
         NeedsUndeclared { .. } => 80,
         ImportTierRefused { .. } => 81,
@@ -1133,7 +1141,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 92;
+const VARIANTS: usize = 93;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
