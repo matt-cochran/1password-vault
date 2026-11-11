@@ -2869,6 +2869,9 @@ impl Cause {
                 plural(rows.len(), "value", "values"),
                 value_rows(rows)
             ),
+            ReaderGrantsUnverified { env, reason } => {
+                format!("CI reader grants for {env} are not verified: {reason}")
+            }
             GateFailed { env, keys } => format!(
                 "environment {env} is not ready to promote: {}: {}",
                 plural(keys.len(), "key", "keys"),
@@ -4796,6 +4799,10 @@ impl Cause {
                 }
                 None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
             },
+            ReaderGrantsUnverified { .. } => plan(
+                inspect("have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create"),
+                Next::None(NoNext::NothingToRun),
+            ),
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(
                     inspect(format!(

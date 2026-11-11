@@ -1135,6 +1135,16 @@ enum Cmd {
             requires = "identity_write"
         )]
         secret_name: String,
+        /// Save a new public immutable reader issuance receipt with --create, or read
+        /// an independently approved receipt with --verify-reader (#304).
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["target", "rotate"])]
+        grant_receipt: Option<PathBuf>,
+        /// Verify the current service account against an approved immutable issuance receipt.
+        #[arg(long, requires_all = ["env", "grant_receipt", "grant_receipt_sha256"], conflicts_with_all = ["create", "rotate", "target", "project"])]
+        verify_reader: bool,
+        /// Independently approved receipt digest, pinned outside untrusted job inputs.
+        #[arg(long, value_name = "SHA256", requires = "verify_reader")]
+        grant_receipt_sha256: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -2380,7 +2390,16 @@ fn shorten(sub: clap::Command, globals: &[clap::Id]) -> clap::Command {
         Some(a) => format!("{a}\n\n{GLOBAL_LINE}"),
         None => GLOBAL_LINE.to_string(),
     };
-    sub.help_template(SUB_TEMPLATE).after_help(after)
+    let mut sub = sub.help_template(SUB_TEMPLATE).after_help(after);
+    if sub.get_name() == "access" {
+        // Keep every issuance/verification flag discoverable on one screen. Clap's
+        // long-help layout puts each flag on three lines; use its generated compact
+        // layout for this expanded command instead of hiding required proof flags.
+        sub = sub.mut_arg("help", |a| a.help("Print help").long_help("Print help"));
+        let compact = sub.render_help().to_string();
+        sub = sub.override_help(compact);
+    }
+    sub
 }
 
 /// A clap usage error (or the help shown for a missing command, exit 2), then the `Next:`
@@ -3155,7 +3174,16 @@ fn run(
         )
         .map(|()| 0);
     }
-    r.use_account(config_store::selected_account_id(&r, &here)?);
+    let verify_reader = matches!(
+        cli.cmd,
+        Cmd::Access {
+            verify_reader: true,
+            ..
+        }
+    );
+    if !verify_reader {
+        r.use_account(config_store::selected_account_id(&r, &here)?);
+    }
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
@@ -3166,6 +3194,37 @@ fn run(
                 site: "main: the signal handlers could not be installed",
             })
         })?;
+    }
+    // A reader proof starts before ordinary account/manifest discovery. Only a local
+    // public contract may be loaded here; no item read or alternative identity is used.
+    if let Cmd::Access {
+        env: Some(env),
+        verify_reader: true,
+        grant_receipt: Some(receipt),
+        grant_receipt_sha256: Some(digest),
+        json,
+        ..
+    } = &cli.cmd
+    {
+        let token = opv::domain::SecretValue::new(
+            std::env::var("OP_SERVICE_ACCOUNT_TOKEN").unwrap_or_default(),
+        );
+        opv::scrub::register_secret(token.expose());
+        if token.expose().is_empty() {
+            return Err(opv::app::reader_grants::refusal(
+                env,
+                "service_account_token_required",
+            ));
+        }
+        let config_path = cli
+            .config
+            .as_deref()
+            .ok_or_else(|| opv::app::reader_grants::refusal(env, "local_contract_required"))?;
+        let fleet = config::load_given(config_path, given_by(config_source))?;
+        return opv::app::reader_grants::verify(
+            &fleet, env, receipt, digest, &token, &r, *json, out,
+        )
+        .map(|()| 0);
     }
     // Proposals that need no configuration (setup) or only the local contract file
     // (structure, generate), and `apply`, run before discovery.
@@ -5392,6 +5451,7 @@ fn run_other(
             env: Some(env),
             target,
             project,
+            grant_receipt,
             create,
             rotate,
             github: Some(repo),
@@ -5428,15 +5488,23 @@ fn run_other(
                     out,
                 )
             } else {
-                opv::app::access_create::run(
+                opv::app::access_create::run_with_receipt(
                     &loaded?,
                     &req,
                     r,
                     &mut opv::app::setup_runtime::Console,
                     out,
+                    grant_receipt.as_deref(),
                 )
             }
         }
+        Cmd::Access {
+            grant_receipt: Some(_),
+            ..
+        } => Err(opv::app::reader_grants::refusal(
+            "",
+            "receipt_requires_create_or_verify_reader",
+        )),
         Cmd::Access {
             env,
             target,

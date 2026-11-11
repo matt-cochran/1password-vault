@@ -1720,3 +1720,12 @@ Since v0.4: local-only environments, `opv check`, scoped `doctor`, managed-key i
 | Writes "last imported at" back to 1Password on every import | FR-11, SR-5 |
 | Finds items by `op item list` + title substring | FR-13 |
 | One `.env` text blob per Fly app | FR-14, §10.1 (one typo breaks every product; coarse history) |
+
+## CI reader immutable issuance proof (#304)
+
+A restricted CI reader may verify an owner-approved immutable native issuance receipt
+against its own native account/user UUID, exact read-only boundary vault set, access
+contract and evidence validity. Requested flags, names and successful item reads are
+not grant proof. Owner issuance is opt-in through the existing confirmed access flow;
+no reader Manage permission or write-denial probes are permitted. The public metadata
+contract and qualification boundary are specified in [reader-grants](../reader-grants.md).

@@ -73,6 +73,7 @@ mod placement_tests;
 #[cfg(test)]
 mod plan_tests;
 pub(crate) mod preflight;
+pub mod reader_grants;
 // The runner lane (#253) consumes this; until it does, its surface is unreachable.
 #[allow(dead_code)]
 pub(crate) mod produce_doc;
