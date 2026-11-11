@@ -6,6 +6,11 @@ Owner-run, about 1.5 h. It settles the facts the #304 design rests on
 and a throwaway service account that expires in one day. No real vault, item or value is
 involved, and nothing here writes a token to disk.
 
+**Run it as one script:** sign in (`eval "$(op signin --account <account>)"`), then
+`scripts/spikes/spike-304.sh <account>`. It does sections 1–3 below, refuses to copy anything
+if a token-shaped string or an identifier survives the scrub, deletes both vaults on exit and
+prints the scrubbed replies for section 4. The sections below are what it runs.
+
 Use op 2.40.0 or later, signed in as yourself to the project account, and the `rec` helper and
 scrub script from [`tests/fixtures/op/success/RECORD.md`](../../tests/fixtures/op/success/RECORD.md)
 (sections 1 and 2).
