@@ -54,6 +54,10 @@ pub struct GitHub {
 /// The default secret name: the variable `op` reads a service-account token from.
 pub const SECRET: &str = "OP_SERVICE_ACCOUNT_TOKEN";
 
+/// The lifetime requested from 1Password (`--expires-in 90d`), recorded value-free beside
+/// the contract when the token is stored (#296).
+const VALIDITY_DAYS: i64 = 90;
+
 fn valid_repo(s: &str) -> bool {
     let mut parts = s.split('/');
     let ok = |p: Option<&str>| {
@@ -317,6 +321,18 @@ pub fn run(
         ))?;
         return Err(e);
     }
+    // #296: the value-free expiry of the service account just created, beside the contract,
+    // once its token has been stored and read back. A manifest project has no bindings
+    // sibling (and a fleet parsed from nothing has no file), so nothing is recorded there.
+    if let crate::cause::ConfigSource::File { path, .. } = &fleet.read_from.0
+        && path.is_file()
+    {
+        let key = match target {
+            Some(t) => crate::domain::credential::ci_identity_expires_path(env, t),
+            None => crate::domain::credential::ci_reader_expires_path(env),
+        };
+        super::target_credentials::record_minted_expiry(path, &key, Some(VALIDITY_DAYS))?;
+    }
     writeln!(
         out,
         "created {:?} and stored its token as {} in {place}; nothing was printed",
@@ -342,3 +358,7 @@ pub fn run(
 #[cfg(test)]
 #[path = "access_create_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "expiry_recording_tests.rs"]
+mod expiry_recording_tests;

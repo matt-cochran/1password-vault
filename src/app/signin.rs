@@ -418,12 +418,30 @@ impl<'a> EnvRunner<'a> {
             None if env.targets.len() == 1 => env.targets.iter().next(),
             None => None,
         };
-        let Some((target_name, t, reference)) =
-            t.and_then(|(n, t)| Some((n, t, t.deploy_credentials.as_ref()?)))
-        else {
+        let Some((target_name, t)) = t else {
             return Ok(());
         };
-        self.sign_in_as_target(env_name, target_name, t, reference)
+        match &t.deploy_credentials {
+            Some(reference) => self.sign_in_as_target(env_name, target_name, t, reference),
+            None => self
+                .sign_in_federated(t)
+                .map_err(|e| e.in_env(env_name).in_target(target_name)),
+        }
+    }
+
+    /// A target without `deploy_credentials` whose provider signs in from an ambient,
+    /// federated identity (#297, `docs/design/azure-oidc.md`): the CI job signed in before
+    /// opv ran, and the provider's login only verifies that identity. No item is read and
+    /// no value is handled. A provider without a federated mode signs nothing in.
+    fn sign_in_federated(&mut self, t: &crate::domain::Target) -> Result<(), Error> {
+        let provider = crate::provider::deploy_provider(t.config.as_ref());
+        let Some(login) = provider.federated_login(t.config.as_ref()) else {
+            return Ok(());
+        };
+        let mut login = login?;
+        login.sign_in(std::collections::BTreeMap::new(), &*self)?;
+        self.login = Some(login);
+        Ok(())
     }
 
     /// Sign in with `reference`, the `deploy_credentials` of target `target_name` of

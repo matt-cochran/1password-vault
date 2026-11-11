@@ -301,7 +301,8 @@ const ACCESS_QUICK: &str = "\
 Examples:
   opv access                     # every target's needs and who can read each vault
   opv access prod --target web    # one target's deploy identity and its missing grants
-  opv access prod --json          # the same as one document";
+  opv access prod --json          # the same as one document
+  opv access prod --rotate --github org/app   # replace the CI reader with a fresh one";
 
 const READY_QUICK: &str = "\
 Examples:
@@ -335,7 +336,10 @@ Examples:
 const TARGET_CREDENTIALS_QUICK: &str = "\
 Examples:
   opv target credentials staging --target web --create   # mint and store the credential
-  opv target credentials staging --target web            # show the recorded state";
+  opv target credentials staging --target web            # show the recorded state
+  opv target credentials staging --target web --rotate   # mint a fresh one in its item
+  opv target credentials prod --target api --create --federated \\
+      --github org/app --github-env prod                 # an Azure CI identity, no secret";
 
 const TARGET_OP_QUICK: &str = "\
 Examples:
@@ -483,7 +487,8 @@ Examples:
 
 const PROPOSE_GENERATE_QUICK: &str = "\
 Examples:
-  opv propose generate dev api/SESSION_KEY # a key with base64_bytes = 32: 32 random bytes";
+  opv propose generate dev api/SESSION_KEY # a key with base64_bytes = 32: 32 random bytes
+  opv propose generate dev api/SSH_KEY     # a key with ssh_ed25519 = true: an OpenSSH Ed25519 key";
 
 const APPLY_QUICK: &str = "\
 Examples:
@@ -1091,7 +1096,10 @@ enum Cmd {
     },
     /// Who can read each environment's vault, and the command for a read-only CI reader
     /// (read-only; people are counted, never named).
-    #[command(before_help = ACCESS_QUICK)]
+    #[command(
+        before_help = ACCESS_QUICK,
+        group(clap::ArgGroup::new("identity_write").args(["create", "rotate"]))
+    )]
     Access {
         /// Only this environment.
         env: Option<String>,
@@ -1104,21 +1112,27 @@ enum Cmd {
         /// Create the identity (the target's deploy identity, or without --target the CI
         /// reader) and store its token as a GitHub secret; your own terminal only. The
         /// token is never shown, typed or written to a file.
-        #[arg(long, requires_all = ["env", "github"])]
+        #[arg(long, requires_all = ["env", "github"], conflicts_with = "rotate")]
         create: bool,
-        /// With --create: the GitHub repository (owner/repo) whose secret receives the token.
-        #[arg(long, value_name = "OWNER/REPO", requires = "create")]
+        /// Replace the identity with a fresh service account (named with today's date) and
+        /// put its token in the existing GitHub secret; then revoke the old account in
+        /// 1Password. Your own terminal only; the token is never shown (#296).
+        #[arg(long, requires_all = ["env", "github"])]
+        rotate: bool,
+        /// With --create or --rotate: the GitHub repository (owner/repo) whose secret
+        /// receives the token.
+        #[arg(long, value_name = "OWNER/REPO", requires = "identity_write")]
         github: Option<String>,
-        /// With --create: the GitHub environment the CI job declares (created if missing);
-        /// without it, a repository secret.
-        #[arg(long, value_name = "NAME", requires = "create")]
+        /// With --create or --rotate: the GitHub environment the CI job declares (created
+        /// if missing); without it, a repository secret.
+        #[arg(long, value_name = "NAME", requires = "identity_write")]
         github_env: Option<String>,
-        /// With --create: the secret's name.
+        /// With --create or --rotate: the secret's name.
         #[arg(
             long,
             value_name = "NAME",
             default_value = "OP_SERVICE_ACCOUNT_TOKEN",
-            requires = "create"
+            requires = "identity_write"
         )]
         secret_name: String,
         /// Print one JSON document instead of lines.
@@ -1644,7 +1658,8 @@ enum ProposeCmd {
         #[command(flatten)]
         out: ProposeOut,
     },
-    /// Generated values for rule-backed keys (base64_bytes / hex_bytes / age_identity / ssh_ed25519).
+    /// Generated values for rule-backed keys (base64_bytes, hex_bytes, age_identity or
+    /// ssh_ed25519).
     #[command(before_help = PROPOSE_GENERATE_QUICK)]
     Generate {
         /// Environment name from the configuration.
@@ -1714,13 +1729,13 @@ enum CiCmd {
     #[command(before_help = CI_WORKFLOW_QUICK)]
     Workflow {
         /// Environment name from the configuration (for example prod).
-        #[arg(required_unless_present_any = ["on_change", "drift", "supply_check"])]
+        #[arg(required_unless_present_any = ["on_change", "drift", "supply_check", "expiry_check"])]
         env: Option<String>,
         /// Target name whose provider setup step and sync command the workflow uses.
         #[arg(
             long,
             value_name = "NAME",
-            required_unless_present_any = ["on_change", "drift", "supply_check"],
+            required_unless_present_any = ["on_change", "drift", "supply_check", "expiry_check"],
             conflicts_with_all = ["on_change", "drift"]
         )]
         target: Option<String>,
@@ -1748,6 +1763,12 @@ enum CiCmd {
             conflicts_with_all = ["on_change", "drift", "target", "github_env", "deploy", "env"]
         )]
         supply_check: Option<PathBuf>,
+        /// Print the daily check that opens one issue when a CI credential nears expiry.
+        #[arg(
+            long,
+            conflicts_with_all = ["on_change", "drift", "env", "target", "github_env", "deploy", "supply", "supply_check"]
+        )]
+        expiry_check: bool,
         /// Minutes between change checks (`--on-change` only); a divisor of 60, at most 59.
         #[arg(
             long,
@@ -1763,13 +1784,11 @@ enum CiCmd {
 const CI_WORKFLOW_QUICK: &str = "\
 Examples:
   opv ci workflow prod --target web                     # print the workflow for one target
-  opv ci workflow prod --target web --github-env prod   # run the job in the prod environment
-  opv ci workflow prod --target web --deploy            # let the job deploy after syncing
   opv ci workflow --on-change                           # the change workflow, every 15 minutes
-  opv ci workflow --on-change --every 30                # ... on a 30-minute cron
   opv ci workflow --drift                               # the nightly drift check
   opv ci workflow prod --target web --supply            # the step that delivers infrastructure values
-  opv ci workflow --supply-check .github/workflows/apply.yml   # check that step's script";
+  opv ci workflow --supply-check .github/workflows/apply.yml   # check that step's script
+  opv ci workflow --expiry-check                        # the daily CI-credential expiry check";
 
 /// `--every <minutes>`: a divisor of 60 (so the cron repeats every hour), at most 59.
 fn every_minutes(s: &str) -> Result<u8, String> {
@@ -1805,8 +1824,23 @@ enum TargetCmd {
         #[arg(long)]
         target: String,
         /// Mint the credential and store it; without it, print the recorded state.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rotate")]
         create: bool,
+        /// Mint a fresh credential into the item the target already records, and record its
+        /// new expiry; then revoke the old one at the provider (#296).
+        #[arg(long)]
+        rotate: bool,
+        /// With --create: no secret at all; a CI identity the GitHub job signs in as through
+        /// OIDC, trusted for exactly --github and --github-env (Azure, #297).
+        #[arg(long, requires_all = ["create", "github", "github_env"])]
+        federated: bool,
+        /// With --federated: the GitHub repository (owner/repo) the identity trusts.
+        #[arg(long, value_name = "OWNER/REPO", requires = "federated")]
+        github: Option<String>,
+        /// With --federated: the GitHub environment the identity trusts (its subject is
+        /// repo:<owner/repo>:environment:<name>).
+        #[arg(long, value_name = "NAME", requires = "federated")]
+        github_env: Option<String>,
     },
     /// Run a fixed operation on a target under its own deploy credentials (Fly: list the
     /// app's Machines, move one to another image). Never prints a value.
@@ -3295,12 +3329,32 @@ fn run(
         env,
         target,
         create,
+        rotate,
+        federated,
+        github,
+        github_env,
     }) = &cli.cmd
     {
         let found = found?;
         let fleet = found.load(&r)?;
-        if !create {
+        if !create && !rotate {
             return target_credentials::show(&fleet, env, target, &r, out).map(|()| 0);
+        }
+        // #297: a federated identity holds no secret and records only ids, so it needs no
+        // item and no file; the provider creates it in the person's own session.
+        if let (true, Some(repo), Some(github_env)) = (federated, github, github_env) {
+            opv::app::setup_runtime::Console::require_terminal("target credentials --federated")?;
+            return target_credentials::run_federated(
+                &fleet,
+                env,
+                target,
+                repo,
+                github_env,
+                &r,
+                &mut opv::app::setup_runtime::Console,
+                out,
+            )
+            .map(|()| 0);
         }
         // Refused before the terminal gate and before anything is minted: `--create`
         // records the new item's reference in a secrets.toml, which a manifest project
@@ -3309,9 +3363,23 @@ fn run(
             config_store::Found::File { store, .. } => store.path.clone(),
             config_store::Found::Manifest(m) => return Err(credentials_need_a_file(&m.title)),
         };
-        opv::app::setup_runtime::Console::require_terminal("target credentials --create")?;
         let project =
             opv::app::personal::project_name(&r, &std::env::current_dir().unwrap_or_default());
+        if *rotate {
+            opv::app::setup_runtime::Console::require_terminal("target credentials --rotate")?;
+            return opv::app::credentials_rotate::run_target(
+                &fleet,
+                &path,
+                env,
+                target,
+                &project,
+                &r,
+                &mut opv::app::setup_runtime::Console,
+                out,
+            )
+            .map(|()| 0);
+        }
+        opv::app::setup_runtime::Console::require_terminal("target credentials --create")?;
         return target_credentials::run(
             &fleet,
             &path,
@@ -5324,13 +5392,18 @@ fn run_other(
             env: Some(env),
             target,
             project,
-            create: true,
+            create,
+            rotate,
             github: Some(repo),
             github_env,
             secret_name,
             ..
-        } => {
-            opv::app::setup_runtime::Console::require_terminal("access --create")?;
+        } if create || rotate => {
+            opv::app::setup_runtime::Console::require_terminal(if rotate {
+                "access --rotate"
+            } else {
+                "access --create"
+            })?;
             let dir = std::env::current_dir().unwrap_or_default();
             let project = match project.as_deref() {
                 Some(name) => config_store::default_project(Some(name), None, &dir)?,
@@ -5346,13 +5419,23 @@ fn run_other(
                     secret: secret_name,
                 },
             };
-            opv::app::access_create::run(
-                &loaded?,
-                &req,
-                r,
-                &mut opv::app::setup_runtime::Console,
-                out,
-            )
+            if rotate {
+                opv::app::credentials_rotate::run_access(
+                    &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::Console,
+                    out,
+                )
+            } else {
+                opv::app::access_create::run(
+                    &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::Console,
+                    out,
+                )
+            }
         }
         Cmd::Access {
             env,
@@ -5396,8 +5479,11 @@ fn run_other(
             every,
             supply,
             supply_check,
+            expiry_check,
         }) => {
-            if let Some(path) = supply_check {
+            if expiry_check {
+                opv::app::ci_workflow::run_expiry_check(&loaded?, out)
+            } else if let Some(path) = supply_check {
                 opv::app::ci_workflow::run_supply_check(&path, out)
             } else if supply {
                 match (env.as_deref(), target.as_deref()) {
@@ -6244,6 +6330,23 @@ mod tests {
         for (name, long, _) in leaf_helps() {
             assert!(long.trim_end().ends_with(GLOBAL_LINE), "{name}: {long}");
         }
+    }
+
+    /// #293: `opv propose generate --help` names every recipe a rule-backed key can carry.
+    #[test]
+    fn propose_generate_help_names_all_four_recipes() {
+        let mut cmd = cli_command();
+        let propose = cmd.find_subcommand_mut("propose").unwrap();
+        let generate = propose.find_subcommand_mut("generate").unwrap();
+        let help = generate.render_long_help().to_string();
+        let named: Vec<&str> = ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| help.contains(recipe))
+            .collect();
+        assert_eq!(
+            named,
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+        );
     }
 
     /// H9: the root help still documents the global options in full.

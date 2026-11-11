@@ -622,6 +622,9 @@ pub fn doctor(t: &AzureTarget, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -
             checks.push(not_checked(format!("container app job {name}"), &why));
             checks.push(not_checked(format!("job {name} identity access"), &why));
         }
+        // The federated identity is explained even when a check above failed; no `az`
+        // call follows a broken sign-in.
+        checks.extend(super::diagnose::federated_checks(t, r, false));
         return checks;
     }
     let app_ok = match app(t, r) {
@@ -682,6 +685,8 @@ pub fn doctor(t: &AzureTarget, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -
             }
         }
     }
+    // The federated identity and, inside a GitHub Actions job, its trust subject.
+    checks.extend(super::diagnose::federated_checks(t, r, true));
     checks
 }
 
@@ -1039,6 +1044,7 @@ mod tests {
             env_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             config: super::super::ConfigRoute::Env,
             companion_jobs: Vec::new(),
+            federated: None,
             vault_uri: Default::default(),
         }
     }

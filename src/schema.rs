@@ -521,7 +521,7 @@ const PRODUCE_SCHEMA: &str = "between opv provision and a [producers.<name>] com
 const PROVISION_SCHEMA: &str = "what opv provision <SET> --env <ENV> --json prints: {schema: \"opv.provision/1\", set, env, mode (absent|partial|inconsistent|complete|replace), result (written|unchanged|declined), concurrent_edit, item {vault_id, item_id, version_before, version_after, verified_at}, members [{key, made_by (producer|generate|template), state}], producers [{name, sha256, exit}], compared_environments, not_compared, next}; with --dry-run: {schema, result: \"dry_run\", plan {set, env, item {boundary, vault_id, item_id, version}, state, replace, members [{key, made_by {maker (producer|generate|template), ...}, state, rule?}], producers [{name, command, sha256, timeout_seconds, inputs, open_url_hosts}], budget {producers_seconds, commit_seconds, left_seconds}, compare}, next}; names, versions and hashes only, never a value, length, digest or prefix";
 
 /// The contract's `[sets]` table (#253 §3.1).
-const SETS_TABLE: &str = "[sets.<name>] environments = [<env>], members = {\"<product>/<KEY>\" = {producer = <name>, output = <output>} | {generate = \"rules\" | {hex_bytes = N} | {base64_bytes = N}}}: values opv provision makes and writes together; every member a declared, stored team key wanted in each listed environment, all in one item there (one boundary), a key in at most one set";
+const SETS_TABLE: &str = "[sets.<name>] environments = [<env>], members = {\"<product>/<KEY>\" = {producer = <name>, output = <output>} | {generate = \"rules\" (the key's rule: base64_bytes, hex_bytes, age_identity or ssh_ed25519) | {hex_bytes = N} | {base64_bytes = N}}}: values opv provision makes and writes together; every member a declared, stored team key wanted in each listed environment, all in one item there (one boundary), a key in at most one set";
 
 /// The contract's `[producers]` table (#253 §3.1).
 const PRODUCERS_TABLE: &str = "[producers.<name>] command = [argv] (no shell; not op or opv), sha256 = <64 hex of the project file command names> (required when it names one), outputs = [name], inputs = {name = \"<product>/<KEY>\"} (in the set's own boundary and environment), open_url_hosts = [host], timeout = \"<duration>\" (at most 15m): a person-run command that speaks opv.produce/1";
@@ -1069,6 +1069,19 @@ mod tests {
                 && doc["contract_tables"]["producers"].is_string(),
             "{}",
             doc["contract_tables"]
+        );
+    }
+
+    /// #293: the `[sets]` table describes `generate = "rules"` as any of the four recipes.
+    #[test]
+    fn sets_table_names_all_four_generate_recipes() {
+        let named: Vec<&str> = ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| SETS_TABLE.contains(recipe))
+            .collect();
+        assert_eq!(
+            named,
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
         );
     }
 }

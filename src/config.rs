@@ -2227,6 +2227,15 @@ fn validate_key(
             },
         ));
     }
+    // Two identity recipes cannot share one key: each names a different key type (#294).
+    if spec.rules.age_identity && spec.rules.ssh_ed25519 {
+        return Err(invalid(
+            &["rules", "age_identity"],
+            FieldRule::ConflictsWith {
+                field: dotted(&path(&["rules", "ssh_ed25519"])),
+            },
+        ));
+    }
     let rules = &spec.rules;
     let structured = usize::from(rules.age_identity) + usize::from(rules.ssh_ed25519);
     if structured > 0
@@ -5427,5 +5436,73 @@ put.conflict = ["ALREADY_EXISTS"]
             cause(&text),
             Cause::ConfigInvalid { at: Some(_), .. }
         ));
+    }
+
+    // ---- generate recipes (Part V, `key-attrs`; #293, #294) ----------------------------
+
+    /// A minimal config with one `source = "generated"` key whose `rules` are `rule`.
+    fn generated(rule: &str) -> String {
+        format!(
+            "[environments.example]\nboundaries.demo = {{}}\n\n\
+             [products.demo]\nboundary = \"demo\"\n\n\
+             [products.demo.keys.EXAMPLE_IDENTITY]\nkind = \"secret\"\nsource = \"generated\"\n\
+             rules = {{ {rule} }}\n"
+        )
+    }
+
+    #[test]
+    fn a_generated_age_identity_key_loads() {
+        assert!(parse(&generated("age_identity = true")).is_ok());
+    }
+
+    #[test]
+    fn a_generated_age_identity_key_with_a_prefix_rule_is_refused() {
+        assert!(
+            parse(&generated(
+                "age_identity = true, prefix = \"AGE-SECRET-KEY-1\""
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_generated_ssh_ed25519_key_loads() {
+        assert!(
+            parse(&format!(
+                "{}file = \"signing-key\"\n",
+                generated("ssh_ed25519 = true")
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn age_identity_and_ssh_ed25519_together_are_refused_as_a_conflict() {
+        assert_eq!(
+            invalid(&generated("age_identity = true, ssh_ed25519 = true")),
+            (
+                "products.demo.keys.EXAMPLE_IDENTITY.rules.age_identity".to_string(),
+                FieldRule::ConflictsWith {
+                    field: dotted(&[
+                        "products",
+                        "demo",
+                        "keys",
+                        "EXAMPLE_IDENTITY",
+                        "rules",
+                        "ssh_ed25519",
+                    ])
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_generated_key_without_a_recipe_names_every_recipe_rule() {
+        assert_eq!(
+            rule_of(&generated("")),
+            FieldRule::Type {
+                expected: "generated only with one supported base64_bytes, hex_bytes, age_identity or ssh_ed25519 recipe",
+            }
+        );
     }
 }

@@ -5,6 +5,7 @@ pub mod access_plan;
 pub mod capability;
 pub mod catalog;
 pub mod convention;
+pub mod credential;
 pub mod delivery;
 pub mod health;
 pub mod history;
@@ -23,9 +24,18 @@ pub mod relaxation;
 pub mod secret;
 pub mod value_state;
 
+pub use credential::{
+    CredentialKind, CredentialRecord, DEFAULT_EXPIRY_WINDOW_DAYS, ExpiryState, FederatedIdentity,
+    expiry_state,
+};
+
 #[cfg(test)]
 #[path = "tier_tests.rs"]
 mod tier_tests;
+
+#[cfg(test)]
+#[path = "credential_tests.rs"]
+mod credential_tests;
 
 pub use model::{
     Boundary, Date, Environment, Fleet, Ignore, ItemRef, KeySpec, Kind, Lifecycle, OneOrMany,

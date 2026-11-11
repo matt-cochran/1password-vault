@@ -26,10 +26,12 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use super::az::{self, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
 use crate::cause::{
-    Cause, DiagnoseContext, FieldRule, InputKind, IoKind, PatternId, Principal, RamDir, RamPurpose,
-    Unusable,
+    Cause, DiagnoseContext, FederatedWhy, FieldRule, InputKind, IoKind, PatternId, Principal,
+    RamDir, RamPurpose, Unusable,
 };
 use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
@@ -226,7 +228,7 @@ fn check_ids(tenant: &str, client: &str, item: Option<String>) -> Result<(), Err
 }
 
 /// `8-4-4-4-12` hex digits.
-fn is_guid(s: &str) -> bool {
+pub(crate) fn is_guid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
         && parts
@@ -236,7 +238,7 @@ fn is_guid(s: &str) -> bool {
 }
 
 /// A DNS name of two or more labels (`contoso.onmicrosoft.com`).
-fn is_domain(s: &str) -> bool {
+pub(crate) fn is_domain(s: &str) -> bool {
     let labels: Vec<&str> = s.split('.').collect();
     s.len() <= 253
         && labels.len() >= 2
@@ -331,6 +333,123 @@ impl DeployLogin for AzureLogin {
         } else {
             Vec::new()
         }
+    }
+}
+
+/// The ambient Azure sign-in a federated CI job made, verified before opv runs any other
+/// `az` call (#297). It reads and holds no secret: the CI job signed in with `azure/login`,
+/// and this login only checks that the identity is the configured one.
+pub struct FederatedLogin {
+    tenant_id: String,
+    client_id: String,
+    subscription_id: String,
+}
+
+impl FederatedLogin {
+    /// The verifier of `tenant_id`/`client_id`/`subscription_id`, all non-secret.
+    pub fn new(tenant_id: String, client_id: String, subscription_id: String) -> Self {
+        Self {
+            tenant_id,
+            client_id,
+            subscription_id,
+        }
+    }
+}
+
+/// Whether opv itself runs inside GitHub Actions (#297): the workflow's `azure/login` step
+/// only exists there. `GITHUB_ACTIONS` is set to `true` by every Actions job and to nothing
+/// else; `CI` alone is not enough.
+fn in_github_actions() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_GITHUB_ACTIONS.with(std::cell::Cell::get) {
+        return forced;
+    }
+    std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests force the Actions check off or on without touching the process environment.
+    static TEST_GITHUB_ACTIONS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the Actions check forced to `inside` (unit tests only; the login tests run
+/// on unix).
+#[cfg(all(test, unix))]
+pub(crate) fn with_github_actions<T>(inside: bool, f: impl FnOnce() -> T) -> T {
+    let prev = TEST_GITHUB_ACTIONS.with(|c| c.replace(Some(inside)));
+    let out = f();
+    TEST_GITHUB_ACTIONS.with(|c| c.set(prev));
+    out
+}
+
+/// The fields of `az account show -o json` that name the ambient federated identity.
+#[derive(Deserialize)]
+struct AccountShow {
+    id: String,
+    #[serde(rename = "tenantId")]
+    tenant_id: String,
+    user: AccountUser,
+}
+
+#[derive(Deserialize)]
+struct AccountUser {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+impl FederatedLogin {
+    /// The refusal for `why`, naming the configured client id; the caller fills in the
+    /// environment and target names (#297).
+    fn refused(&self, why: FederatedWhy) -> Error {
+        Cause::FederatedRefused {
+            why,
+            env: None,
+            target: None,
+            client_id: self.client_id.clone(),
+        }
+        .into()
+    }
+}
+
+impl DeployLogin for FederatedLogin {
+    fn sign_in(
+        &mut self,
+        _values: BTreeMap<String, SecretValue>,
+        r: &dyn crate::runner::CommandRunner,
+    ) -> Result<(), Error> {
+        // Local commands never use federated mode: the identity only exists in a CI job
+        // that signed in with `azure/login` first.
+        if !in_github_actions() {
+            return Err(self.refused(FederatedWhy::OutsideCi));
+        }
+        // The only call this login makes: `az` uses the runner's ambient sign-in (SR-3).
+        let args = ["account", "show", "-o", "json", ONLY_SHOW_ERRORS];
+        let outcome = az::invoke(r, Effect::Read, "account", &args, None, &[])?;
+        let out = match outcome {
+            Outcome::Done(out) => out,
+            // A non-zero `az account show` is the job's own sign-in, which opv did not
+            // replace or read.
+            Outcome::Refused(_) => return Err(self.refused(FederatedWhy::IdentityMismatch)),
+            Outcome::Unknown { .. } => return Err(az::failed(r, DiagnoseContext::default())),
+        };
+        let show: AccountShow = serde_json::from_slice(out.stdout.as_slice())
+            .map_err(|_| self.refused(FederatedWhy::IdentityMismatch))?;
+        let matches = show.id.eq_ignore_ascii_case(&self.subscription_id)
+            && show.tenant_id.eq_ignore_ascii_case(&self.tenant_id)
+            && show.user.name.eq_ignore_ascii_case(&self.client_id)
+            && show.user.kind == "servicePrincipal";
+        if matches {
+            Ok(())
+        } else {
+            Err(self.refused(FederatedWhy::IdentityMismatch))
+        }
+    }
+
+    /// The runner's ambient sign-in is used as it is: nothing is added for `az` (R5).
+    fn env(&self, _program: &str) -> Vec<(&'static str, &str)> {
+        Vec::new()
     }
 }
 
