@@ -23,7 +23,40 @@ jobs:
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
     - name: Install shells for the syntax tests
       if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh fish
+      shell: bash
+      run: |
+        set -euo pipefail
+        . /etc/os-release
+        case "${VERSION_CODENAME:-}" in
+          jammy|noble|resolute) ;;
+          *) echo 'Unsupported Ubuntu suite for shell dependencies' >&2; exit 1 ;;
+        esac
+        ci_apt_arch=$(dpkg --print-architecture)
+        [[ "$ci_apt_arch" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+        test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        ci_apt_dir=$(mktemp -d)
+        trap 'sudo rm -rf -- "$ci_apt_dir"' EXIT
+        chmod 0755 "$ci_apt_dir"
+        mkdir "$ci_apt_dir/lists" "$ci_apt_dir/sourceparts"
+        # Mirror reachability and Ubuntu signatures observed in run 43057961543.
+        # Preserve Ubuntu Signed-By and apt's normal TLS/signature/time checks.
+        # Observed InRelease files omit Valid-Until: a valid signature is not
+        # proof of a signed expiry or mirror freshness. Do not override checks.
+        cat > "$ci_apt_dir/ubuntu.sources" <<EOF
+        Types: deb
+        URIs: https://mirrors.edge.kernel.org/ubuntu/
+        Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-security $VERSION_CODENAME-backports
+        Components: main restricted universe multiverse
+        Architectures: $ci_apt_arch
+        Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        EOF
+        ci_apt_options=(
+          -o "Dir::Etc::sourcelist=$ci_apt_dir/ubuntu.sources"
+          -o "Dir::Etc::sourceparts=$ci_apt_dir/sourceparts"
+          -o "Dir::State::lists=$ci_apt_dir/lists"
+        )
+        sudo apt-get "${ci_apt_options[@]}" update
+        sudo apt-get "${ci_apt_options[@]}" install -y --no-install-recommends zsh fish
     - name: Check formatting
       run: cargo fmt --all --check
     - name: Run clippy
