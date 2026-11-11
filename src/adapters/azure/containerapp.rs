@@ -510,6 +510,7 @@ mod tests {
             env_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             config: ConfigRoute::Env,
             companion_jobs: Vec::new(),
+            federated: None,
             vault_uri: kept(VAULT_URI),
         }
     }

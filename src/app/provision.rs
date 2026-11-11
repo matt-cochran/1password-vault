@@ -722,6 +722,16 @@ fn copy(v: &SecretValue) -> SecretValue {
 const OUTPUTS_NOT_STORED: &str =
     "the producer's outputs were not stored; what it created at its issuer still exists";
 
+/// Steps 9-11 for a confirmed run: the write, the environments compared and not compared,
+/// and the public material to print (the SSH public key and fingerprint, or the age
+/// recipient; R1, #294).
+struct Committed {
+    written: import::Written,
+    compared: Vec<String>,
+    not_compared: Vec<String>,
+    public: Vec<String>,
+}
+
 impl Run<'_> {
     fn make_and_commit(
         &self,
@@ -787,34 +797,45 @@ impl Run<'_> {
             self.generate_validate_commit(plan, made, &intermediates, ran.is_empty())
         });
         match result {
-            Ok((written, compared, not_compared)) => Ok(Receipt {
-                schema: RECEIPT_SCHEMA,
-                set: plan.set.clone(),
-                env: plan.env.clone(),
-                mode: mode(plan),
-                result: "written",
-                concurrent_edit: written.concurrent_edit,
-                item: ReceiptItem {
-                    vault_id: plan.item.vault_id.clone(),
-                    item_id: plan.item.item_id.clone(),
-                    version_before: plan.item.version,
-                    version_after: written.version,
-                    verified_at: written.version,
-                },
-                members: plan
-                    .members
-                    .iter()
-                    .map(|m| ReceiptMember {
-                        key: m.key.clone(),
-                        made_by: m.made_by.word(),
-                        state: "set",
-                    })
-                    .collect(),
-                producers: ran,
-                compared_environments: compared,
-                not_compared,
-                next: format!("opv ready {}", plan.env),
-            }),
+            Ok(committed) => {
+                for line in &committed.public {
+                    console.show(line)?;
+                }
+                let Committed {
+                    written,
+                    compared,
+                    not_compared,
+                    ..
+                } = committed;
+                Ok(Receipt {
+                    schema: RECEIPT_SCHEMA,
+                    set: plan.set.clone(),
+                    env: plan.env.clone(),
+                    mode: mode(plan),
+                    result: "written",
+                    concurrent_edit: written.concurrent_edit,
+                    item: ReceiptItem {
+                        vault_id: plan.item.vault_id.clone(),
+                        item_id: plan.item.item_id.clone(),
+                        version_before: plan.item.version,
+                        version_after: written.version,
+                        verified_at: written.version,
+                    },
+                    members: plan
+                        .members
+                        .iter()
+                        .map(|m| ReceiptMember {
+                            key: m.key.clone(),
+                            made_by: m.made_by.word(),
+                            state: "set",
+                        })
+                        .collect(),
+                    producers: ran,
+                    compared_environments: compared,
+                    not_compared,
+                    next: format!("opv ready {}", plan.env),
+                })
+            }
             Err(e) => {
                 if !ran.is_empty() && !is_unknown_outcome(&e) {
                     console.show(OUTPUTS_NOT_STORED)?;
@@ -832,14 +853,20 @@ impl Run<'_> {
         mut made: BTreeMap<KeyRef, SecretValue>,
         intermediates: &BTreeMap<(String, String), SecretValue>,
         no_producer: bool,
-    ) -> Result<(import::Written, Vec<String>, Vec<String>), Error> {
-        // Step 9: generators.
+    ) -> Result<Committed, Error> {
+        // Step 9: generators. Only public material is kept to print (R1, #294).
+        let mut public: Vec<String> = Vec::new();
         for (member, source) in &self.set.members {
             if let MemberSource::Generate(g) = source
                 && self.fill.make.contains(member)
                 && !made.contains_key(member)
             {
-                made.insert(member.clone(), self.generate(member, *g)?);
+                let (v, lines) = self.generate(member, *g)?;
+                made.insert(member.clone(), v);
+                if !lines.is_empty() {
+                    public.push(format!("generated {member}; the value was never shown"));
+                    public.extend(lines);
+                }
             }
         }
         // Step 9 (§5.3): templates, each after the templates it references.
@@ -905,7 +932,12 @@ impl Run<'_> {
             Some(&expected),
             self.r,
         )?;
-        Ok((written, compared, not_compared))
+        Ok(Committed {
+            written,
+            compared,
+            not_compared,
+            public,
+        })
     }
 
     /// One producer attempt (§5.2): the request on stdin, each stdout line through the
@@ -1060,7 +1092,9 @@ impl Run<'_> {
             .collect()
     }
 
-    fn generate(&self, member: &KeyRef, g: Generator) -> Result<SecretValue, Error> {
+    /// The value `g` makes for `member`, and the public material to print (the SSH public
+    /// key and its fingerprint, or the age recipient); never the private value.
+    fn generate(&self, member: &KeyRef, g: Generator) -> Result<(SecretValue, Vec<String>), Error> {
         let recipe = match g {
             Generator::Rules => {
                 let spec = &self.fleet.products[&member.product].keys[&member.key];
@@ -1069,9 +1103,27 @@ impl Run<'_> {
             Generator::HexBytes(n) => Recipe::Hex(usize::from(n)),
             Generator::Base64Bytes(n) => Recipe::Base64(usize::from(n)),
         };
-        let v = generate::make(recipe)?;
+        let (v, public) = match recipe {
+            Recipe::SshEd25519 => {
+                // `generate::make` keeps only the private half; call the keypair generator
+                // directly so the public key and fingerprint can be printed (R1, #294).
+                let (v, public) = generate::generate_ssh::make_ed25519()?;
+                (v, vec![public.openssh, public.fingerprint])
+            }
+            Recipe::AgeIdentity => {
+                let v = generate::make(recipe)?;
+                let recipient = crate::bundle::crypto::parse_identity(v.expose())
+                    .map_err(|_| Cause::Bug {
+                        site: "provision age identity",
+                    })?
+                    .recipient()
+                    .to_string();
+                (v, vec![recipient])
+            }
+            _ => (generate::make(recipe)?, Vec::new()),
+        };
         crate::scrub::register_secret(v.expose());
-        Ok(v)
+        Ok((v, public))
     }
 
     /// §5.4: every made value against its key's rules; a placeholder and a secret shorter

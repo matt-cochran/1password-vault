@@ -29,6 +29,7 @@ pub mod contract;
 #[cfg(test)]
 #[path = "core_acceptance_tests.rs"]
 mod core_acceptance_tests;
+pub mod credentials_rotate;
 pub mod deliver_only;
 pub mod delivery;
 pub mod delivery_preview;
@@ -72,6 +73,7 @@ mod placement_tests;
 #[cfg(test)]
 mod plan_tests;
 pub(crate) mod preflight;
+pub mod reader_grants;
 // The runner lane (#253) consumes this; until it does, its surface is unreachable.
 #[allow(dead_code)]
 pub(crate) mod produce_doc;

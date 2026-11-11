@@ -101,6 +101,28 @@ impl World {
 impl CommandRunner for World {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
         self.record(call);
+        if call.program == "op"
+            && call.args.starts_with(&["vault", "list"])
+            && call
+                .env
+                .iter()
+                .any(|(name, _)| *name == "OP_SERVICE_ACCOUNT_TOKEN")
+        {
+            return Ok(Outcome::Done(Output::success(
+                r#"[{"id":"cccccccccccccccccccccccccc"}]"#,
+            )));
+        }
+        if call.program == "op"
+            && call.args.first() == Some(&"whoami")
+            && call
+                .env
+                .iter()
+                .any(|(name, _)| *name == "OP_SERVICE_ACCOUNT_TOKEN")
+        {
+            return Ok(Outcome::Done(Output::success(
+                r#"{"user_type":"SERVICE_ACCOUNT","account_uuid":"AFAKEOP0000000000000000001","user_uuid":"bbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            )));
+        }
         if call.program == "gh" {
             // `gh api repos/<r>/environments`: the repository's environments.
             let envs = if self.gh_env_exists {
@@ -518,4 +540,92 @@ fn a_repository_that_is_not_owner_slash_name_is_refused() {
     let mut g = gh(None);
     g.repo = "acme".into();
     assert_eq!(code_of(&check(&g).unwrap_err()), Some("usage"));
+}
+
+#[test]
+fn an_opt_in_receipt_records_the_native_identity_for_the_actual_closed_create_request() {
+    let mut fleet = fleet();
+    let environment = fleet.environments.get_mut("staging").unwrap();
+    environment.account = Some("AFAKEOP0000000000000000001".into());
+    environment
+        .boundaries
+        .get_mut("web")
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .vault_id = "cccccccccccccccccccccccccc".into();
+    let w = World::new();
+    w.op.vaults
+        .borrow_mut()
+        .push(("cccccccccccccccccccccccccc".into(), "fixture".into()));
+    w.op.vault_users
+        .borrow_mut()
+        .insert("cccccccccccccccccccccccccc".into(), json!([]));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reader.json");
+    let req = Request {
+        env: "staging",
+        target: None,
+        project: "shop",
+        github: gh(Some("staging-deploy")),
+    };
+    run_with_receipt(
+        &fleet,
+        &req,
+        &w,
+        &mut Answer(true, RefCell::new(Vec::new())),
+        &mut Vec::new(),
+        Some(&path),
+    )
+    .unwrap();
+    let receipt: super::super::reader_grants::Receipt =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let calls = w.calls.borrow();
+    let create = calls
+        .iter()
+        .find(|(p, a, _)| p == "op" && a.starts_with(&["service-account".into(), "create".into()]))
+        .unwrap();
+    assert!(
+        receipt.service_account_id == "bbbbbbbbbbbbbbbbbbbbbbbbbb"
+            && create
+                .1
+                .windows(2)
+                .any(|a| a == ["--vault", "cccccccccccccccccccccccccc:read_items"])
+            && !create
+                .1
+                .iter()
+                .any(|a| a.contains("write_items") || a == "--can-create-vaults")
+    );
+}
+
+#[test]
+fn a_deploy_identity_cannot_create_a_read_only_grant_receipt() {
+    let mut fleet = fleet();
+    let environment = fleet.environments.get_mut("staging").unwrap();
+    environment.account = Some("AFAKEOP0000000000000000001".into());
+    environment
+        .boundaries
+        .get_mut("web")
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .vault_id = "cccccccccccccccccccccccccc".into();
+    let w = World::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reader.json");
+    let req = Request {
+        env: "staging",
+        target: Some("fleet"),
+        project: "shop",
+        github: gh(None),
+    };
+    let result = run_with_receipt(
+        &fleet,
+        &req,
+        &w,
+        &mut Answer(true, RefCell::new(Vec::new())),
+        &mut Vec::new(),
+        Some(&path),
+    );
+    assert!(result.is_err() && !w.ran("op", &["service-account", "create"]));
 }

@@ -110,6 +110,16 @@ opv propose structure          # plan the vaults and items, and collect any inli
 opv apply                      # write secrets.bindings.toml and secrets.applied.json
 ```
 
+The same file also records when a CI credential expires: `opv access <env> [--target <t>] --create` (and `--rotate`) and `opv target credentials <env> --target <t> --create` (and `--rotate`) write a date, never a value (#296):
+
+```toml
+environments.prod.ci_reader.expires_on = "2027-02-08"
+environments.prod.targets.fly.ci_identity.expires_on = "2027-02-08"
+environments.prod.targets.fly.deploy_credentials_expires_on = "2027-02-08"
+```
+
+`opv ready`, `opv doctor --env` and `opv status <env>` report a credential that expires within 14 days or has expired, with its rotation command ([usage](usage.md#ci-credential-expiry-and-rotation)). A project whose configuration lives in 1Password (a manifest) records no expiry dates.
+
 `opv propose structure --rebind <env>` records fresh ids for an environment (a new 1Password account, say); ids not being rebound are kept.
 
 The **apply record** `secrets.applied.json` remembers the plan last applied and the sha256 of the contract and bindings files it wrote:
@@ -383,7 +393,7 @@ deploy_credentials = "op://infra-prod/fly-deploy" # the deploy identity's item, 
 ```
 
 - `account`: every `op` call for this environment uses this 1Password account (passed as `--account`), and `opv login prod` signs in to it. Set it only when your environments live in different accounts; otherwise the project's account (above) applies. Use the account ID (`op account list` shows it): op takes no email, and a sign-in address may be shared by several accounts. A bad value is a configuration error pointing at its line and column. Under a service-account token in CI the token decides the account.
-- `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this target's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on a Kubernetes target is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials.
+- `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this target's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on a Kubernetes target is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials. An Azure target can instead sign in through GitHub OIDC with [`azure.federated`](#federated-deploys-from-github-actions-azurefederated), and then has no `deploy_credentials`.
 
 Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App (and on each [companion job](#companion-jobs), with read access to role assignments at the vault). Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
 
@@ -401,7 +411,7 @@ Azure deploy credentials, by OS (the Azure CLI stores the service principal's se
 |---|---|---|
 | Linux, WSL | `$XDG_RUNTIME_DIR/opv-az.<pid>-<random>`, mode 0700; `$XDG_RUNTIME_DIR` must be on tmpfs (RAM) and owned by you | yes; without a RAM `$XDG_RUNTIME_DIR` opv refuses before reading anything |
 | Windows | `%LOCALAPPDATA%\Temp\opv-az-<pid>-<random>`, ACL for you only; az encrypts the stored secret with DPAPI (`service_principal_entries.bin`) | yes; a plaintext `service_principal_entries.json` makes opv remove the directory and refuse |
-| macOS | none | no: sign in with `az login` and remove `deploy_credentials`, or use OIDC in CI |
+| macOS | none | no: sign in with `az login` and remove `deploy_credentials`, or use [`azure.federated`](#federated-deploys-from-github-actions-azurefederated) in CI |
 
 On native Windows, values reach `az` (the service-principal secret, Key Vault values, the Container App update) through a named pipe `\\.\pipe\opv-<random>` that only your user can open, instead of `/dev/stdin`; Linux, WSL and macOS use stdin. Fly deploy credentials work on every OS.
 
@@ -514,6 +524,31 @@ Names and limits are checked when the file loads, before any call:
 - Every identifier is checked like `fly.app` (no leading `-`, no shell metacharacters).
 
 opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged secrets. Just before a prune deletes one, opv adds `opv-pruned=<env>`; Key Vault keeps deleted secrets for its retention period, and when that key comes back opv recovers the entry and writes the new version. A deleted secret without both tags is never recovered by opv: sync stops with the `az keyvault secret recover` command. opv never purges. `opv explain <KEY>` shows the Key Vault name and the variable it feeds.
+
+#### Federated deploys from GitHub Actions: `azure.federated`
+
+A target can deploy with no Azure secret at all: the CI job signs in through GitHub OIDC and opv uses that sign-in (#297, design [azure-oidc](design/azure-oidc.md)).
+
+```toml
+[environments.prod.targets.api.azure.federated]
+tenant_id       = "00000000-0000-0000-0000-000000000000"
+client_id       = "11111111-1111-1111-1111-111111111111"
+subscription_id = "22222222-2222-2222-2222-222222222222"
+```
+
+| Field | Meaning |
+|---|---|
+| `tenant_id` | The Entra ID tenant, a GUID or a domain. |
+| `client_id` | The app registration the CI job signs in as, a GUID. |
+| `subscription_id` | The subscription that sign-in must select, a GUID. |
+
+All three are ids, not secrets. A target with `azure.federated` may not also have `deploy_credentials` (a configuration error naming both).
+
+- `opv ci workflow <env> --target <t>` adds `id-token: write`, an `azure/login@v2` step with the three ids, and `az logout` under `if: always()` at the end.
+- opv never reads the GitHub token. Before any other `az` call it checks that `az account show` is this tenant, client and subscription. Another identity is refused (`federated_identity_mismatch`, exit 7).
+- The identity exists only in a GitHub Actions job: `status`, `plan`, `sync` and `doctor --env` against this target anywhere else are refused (`federated_outside_ci`, exit 6). Both errors name `opv ci workflow <env> --target <t>`.
+- The app's federated credential trusts the subject `repo:<owner>/<repo>:environment:<env>`, so the GitHub environment's protection rules decide who can deploy. In CI, `opv doctor --env` checks that the app trusts the job's subject and warns on a self-hosted runner.
+- `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <env>` is the setup command ([below](#mint-a-targets-deploy-credential-opv-target-credentials)).
 
 #### Companion jobs
 
@@ -873,12 +908,15 @@ opv apply
 
 ### Mint a target's deploy credential: `opv target credentials`
 
-A target that deploys through `deploy_credentials` needs an item with just its least-privilege identity. `opv target credentials <env> --target <name> --create` mints that credential at the provider and stores it straight in a new 1Password item in the target's state vault, then records `deploy_credentials` for you. The token is never shown, copied or pasted: it stays in memory and reaches `op item create` on stdin only. The credential is named `opv-<project>-<env>-<target>`, asked to be valid for 90 days, and stored under the title `<project> · <target> · <env> deploy credentials`. One confirmation names all of that and the state vault; declining creates nothing. It refuses, before calling the provider, a target that already records `deploy_credentials` — rotation is a separate reviewed step — and a provider that cannot mint one here. A person's own interactive terminal and 1Password session are required. It writes the reference through the same configuration editor as `opv propose target` (comments kept, the whole file validated, a concurrent change refused). Without `--create` it prints whether `deploy_credentials` is recorded and whether the provider can mint one.
+A target that deploys through `deploy_credentials` needs an item with just its least-privilege identity. `opv target credentials <env> --target <name> --create` mints that credential at the provider and stores it straight in a new 1Password item in the target's state vault, then records `deploy_credentials` for you. The token is never shown, copied or pasted: it stays in memory and reaches `op item create` on stdin only. The credential is named `opv-<project>-<env>-<target>`, asked to be valid for 90 days, and stored under the title `<project> · <target> · <env> deploy credentials`. One confirmation names all of that and the state vault; declining creates nothing. It refuses, before calling the provider, a target that already records `deploy_credentials` and a provider that cannot mint one here. `--rotate` mints a fresh credential into the item the target already records; revoke the old one at the provider afterwards. Both record the new expiry date in `secrets.bindings.toml` (#296). A person's own interactive terminal and 1Password session are required. It writes the reference through the same configuration editor as `opv propose target` (comments kept, the whole file validated, a concurrent change refused). Without `--create` it prints whether `deploy_credentials` is recorded and whether the provider can mint one.
 
 ```sh
 opv target credentials prod --target shared --create
 opv target credentials prod --target shared
+opv target credentials prod --target shared --rotate
 ```
+
+For an Azure target with [`azure.federated`](#federated-deploys-from-github-actions-azurefederated), `--create --federated --github <owner/repo> --github-env <env>` sets up the CI identity instead, in your own terminal: no secret and no 1Password item. The identity gets only the target's deploy roles and trusts exactly `repo:<owner>/<repo>:environment:<env>`; opv prints its tenant, client and subscription ids for the target's `azure.federated` table.
 
 <a id="start-from-an-existing-env-opv-init---from"></a>
 
@@ -950,8 +988,8 @@ Those bytes are stored from a file, not typed: `opv set <[p/]KEY> --env <e> --fr
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
-| `age_identity = true` | one valid age X25519 private identity; owner generation reports only its public recipient |
-| `ssh_ed25519 = true` | one unencrypted Ed25519 OpenSSH private key, `kind = "secret"` and file delivery required; owner generation reports only public key and SHA256 fingerprint |
+| `age_identity = true` | one valid age X25519 private identity (`AGE-SECRET-KEY-1…`); `opv propose generate` or a provision set's `generate = "rules"` makes one and reports only its `age1…` recipient (#293) |
+| `ssh_ed25519 = true` | one unencrypted Ed25519 OpenSSH private key, `kind = "secret"` and file delivery (`file = "<path>"`) required; staged byte-exact (no transform, line-shape or `ensure_prefix` rule applies); generation reports only the public key and its SHA256 fingerprint; not combined with `age_identity` (#294, design [ssh-signing-key](design/ssh-signing-key.md)) |
 | `hex_bytes = N` | valid hex that decodes to N bytes |
 | `email_list = true` | comma-separated list of email addresses |
 | `https_url = true` | an `https://` URL |
@@ -999,6 +1037,8 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | `email_list` | `not a comma-separated list of email addresses` |
 | `https_url` | `not an https:// URL`, `URL contains whitespace` |
 | `ensure_prefix` | `nothing after the prefix` |
+| `age_identity` | `not an age X25519 identity` |
+| `ssh_ed25519` | `not an OpenSSH private key`, `encrypted key`, `not an Ed25519 key` |
 | `transform` (`pem_private_key`) | `no BEGIN/END markers`, `BEGIN/END labels differ`, `not a private key`, `encrypted key`, `more than one PEM block`, `body is not base64`, `not a key structure` |
 | `transform` (other name) | `unknown transform` |
 | Fly import rules | `not a valid Fly secret name`, `contains a line break`, `a # follows an odd number of double quotes`, `too long for one Fly import line`, `not valid UTF-8`, `name occurs twice in one import` |

@@ -305,14 +305,25 @@ pub fn write_record(path: &Path, record: &ApplyRecord) -> Result<(), Error> {
     std::fs::write(path, text).map_err(|e| unreadable(path, &e))
 }
 
-/// The four id families of the contract (D-G): a boundary's vault/item, a target's state
-/// vault, and a target's per-product delivery item. Anything else is not a binding.
+/// The id families of the contract (D-G) plus the value-free credential expiry records
+/// (#296): a boundary's vault/item, a target's state vault, a target's per-product delivery
+/// item, the environment's CI reader expiry, and a target's deploy-credential and CI
+/// service-account expiry. Anything else is not a binding.
 fn recognized(path: &[&str]) -> bool {
     matches!(
         path,
         ["environments", _, "boundaries", _, "vault_id" | "item_id"]
             | ["environments", _, "targets", _, "state_vault_id"]
             | ["environments", _, "targets", _, "delivery_items", _]
+            | ["environments", _, "ci_reader", "expires_on"]
+            | [
+                "environments",
+                _,
+                "targets",
+                _,
+                "deploy_credentials_expires_on"
+            ]
+            | ["environments", _, "targets", _, "ci_identity", "expires_on"]
     )
 }
 

@@ -111,6 +111,46 @@ fn world() -> (FakeOp, Fleet) {
     world_with("")
 }
 
+/// One `app` item in `prod` holding two empty identity fields: the set `identities` makes
+/// an Ed25519 OpenSSH keypair and an age X25519 identity (#294).
+fn identity_world() -> (FakeOp, Fleet) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        VAULT,
+        serde_json::json!({
+            "title": "app · prod values", "category": "SECURE_NOTE",
+            "sections": [{"id": "app", "label": "app"}],
+            "fields": [
+                {"id": "f1", "section": {"id": "app", "label": "app"}, "type": "CONCEALED",
+                 "label": "SSH_KEY", "value": ""},
+                {"id": "f2", "section": {"id": "app", "label": "app"}, "type": "CONCEALED",
+                 "label": "AGE_KEY", "value": ""}
+            ]
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        r#"[environments.prod]
+tier = "shared"
+boundaries.app = {{ vault_id = "{VAULT}", item_id = "{id}" }}
+
+[products.app.keys.SSH_KEY]
+kind = "secret"
+rules = {{ ssh_ed25519 = true }}
+file = "ssh-key"
+
+[products.app.keys.AGE_KEY]
+kind = "secret"
+rules = {{ age_identity = true }}
+
+[sets.identities]
+environments = ["prod"]
+members = {{ "app/SSH_KEY" = {{ generate = "rules" }}, "app/AGE_KEY" = {{ generate = "rules" }} }}
+"#
+    ))
+    .unwrap();
+    (op, fleet)
+}
+
 /// The item ID of `app` in `env`.
 fn item_id(fleet: &Fleet, env: &str) -> String {
     fleet.environments[env].boundaries["app"]
@@ -1210,6 +1250,121 @@ fn a_generated_set_holds_its_value_after_the_write() {
     );
     let v = field(&op, &item_id(&fleet, "prod"), "SIGNING_KEY").unwrap_or_default();
     assert!(v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));
+}
+
+// ---- #294: identity sets print only public material ---------------------------------
+
+#[test]
+fn an_ssh_ed25519_set_prints_the_public_key() {
+    let (op, fleet) = identity_world();
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("identities", "prod"),
+        &mut console,
+    );
+    assert!(console.shown.iter().any(|l| l.starts_with("ssh-ed25519 ")));
+}
+
+#[test]
+fn an_ssh_ed25519_set_prints_the_sha256_fingerprint() {
+    let (op, fleet) = identity_world();
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("identities", "prod"),
+        &mut console,
+    );
+    assert!(console.shown.iter().any(|l| l.starts_with("SHA256:")));
+}
+
+#[test]
+fn an_ssh_ed25519_set_never_prints_the_private_key() {
+    let (op, fleet) = identity_world();
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("identities", "prod"),
+        &mut console,
+    );
+    let private = field(&op, &item_id(&fleet, "prod"), "SSH_KEY").unwrap_or_default();
+    assert!(!console.shown.join("\n").contains(&private));
+}
+
+#[test]
+fn an_age_identity_set_prints_the_recipient() {
+    let (op, fleet) = identity_world();
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("identities", "prod"),
+        &mut console,
+    );
+    assert!(console.shown.iter().any(|l| l.starts_with("age1")));
+}
+
+#[test]
+fn an_age_identity_set_never_prints_the_identity() {
+    let (op, fleet) = identity_world();
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("identities", "prod"),
+        &mut console,
+    );
+    let private = field(&op, &item_id(&fleet, "prod"), "AGE_KEY").unwrap_or_default();
+    assert!(!console.shown.join("\n").contains(&private));
+}
+
+#[test]
+fn an_ssh_ed25519_member_already_holding_a_value_is_not_overwritten() {
+    let (op, fleet) = identity_world();
+    let id = item_id(&fleet, "prod");
+    let ssh = super::generate::generate_ssh::make_ed25519()
+        .unwrap()
+        .0
+        .expose()
+        .to_string();
+    let age = super::generate::make(Recipe::AgeIdentity)
+        .unwrap()
+        .expose()
+        .to_string();
+    put(&op, &id, "SSH_KEY", &ssh);
+    put(&op, &id, "AGE_KEY", &age);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("identities", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(field(&op, &id, "SSH_KEY").as_deref(), Some(ssh.as_str()));
+}
+
+#[test]
+fn a_ci_session_generates_no_ssh_key() {
+    let (op, fleet) = identity_world();
+    let _ = run(
+        &op,
+        &fleet,
+        &person().var_val("CI", "true"),
+        request("identities", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(
+        field(&op, &item_id(&fleet, "prod"), "SSH_KEY").as_deref(),
+        Some("")
+    );
 }
 
 // ---- §4.2 step 5: an item the edit cannot keep -------------------------------------

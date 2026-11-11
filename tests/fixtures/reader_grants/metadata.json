@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "receipt_sha256": "35c0b4bdb06095a022515aaf9032966acd31a21f143c0a2359cc1227aef3a784",
+  "contract_sha256": "30e0ec4e9d5c1f6df61c6c6c06e30d14b3dcf012d029e4c73afabed1f696b80d",
+  "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "environment": "staging-worker",
+  "role": "ci_reader",
+  "vault_ids": [
+    "cccccccccccccccccccccccccc"
+  ],
+  "service_account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "checked_at": 1800000060
+}

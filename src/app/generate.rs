@@ -27,6 +27,9 @@ use crate::domain::{KeySpec, SecretValue, key_label};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
+#[path = "generate_ssh.rs"]
+pub(crate) mod generate_ssh;
+
 /// How a key's value is generated: its encoding and byte count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recipe {
@@ -35,7 +38,7 @@ pub enum Recipe {
     /// A fresh age X25519 identity (`AGE-SECRET-KEY-1…`), whose public `age1…`
     /// recipient is printed for the sealed target's `recipients` (§7.1).
     AgeIdentity,
-    /// An Ed25519 OpenSSH private key; only its public key/fingerprint is shown.
+    /// A fresh Ed25519 OpenSSH keypair (#294), encoded the way `ssh-keygen` writes one.
     SshEd25519,
 }
 
@@ -46,9 +49,7 @@ impl Recipe {
             Recipe::Base64(n) => format!("base64, {n} random bytes"),
             Recipe::Hex(n) => format!("hex, {n} random bytes"),
             Recipe::AgeIdentity => "an age X25519 identity".to_string(),
-            Recipe::SshEd25519 => {
-                "an Ed25519 OpenSSH signing identity (private file delivery)".to_string()
-            }
+            Recipe::SshEd25519 => "an Ed25519 OpenSSH key".to_string(),
         }
     }
 }
@@ -77,34 +78,40 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     if super::deliver_only::is_infrastructure(spec) {
         return refuse(GenerateRefusal::Infrastructure);
     }
-    if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
-        return refuse(GenerateRefusal::ProviderIssued);
-    }
     if spec.personal {
         return refuse(GenerateRefusal::Personal);
     }
     if let Some(from) = &spec.from {
         return refuse(GenerateRefusal::Shared { from: from.clone() });
     }
-    // Structured generation obeys the same provider/personal/shared guards as
-    // random bytes. Only one explicit recipe can be selected at a time.
+    if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
+        return refuse(GenerateRefusal::ProviderIssued);
+    }
+    // An identity carries its meaning in the flag, not a byte count: exactly one format, a
+    // secret, and an SSH key delivered as a file (0.18.3).
     if r.age_identity || r.ssh_ed25519 {
         if !spec.has_generate_recipe() {
             return refuse(GenerateRefusal::NoByteCount);
         }
-        if r.age_identity {
-            return Ok(Recipe::AgeIdentity);
-        }
-        if r.ssh_ed25519 {
-            return Ok(Recipe::SshEd25519);
-        }
+        return Ok(if r.age_identity {
+            Recipe::AgeIdentity
+        } else {
+            Recipe::SshEd25519
+        });
+    }
+    // The positive shape is decided by the same domain predicate the config validator uses
+    // ([`KeySpec::has_generate_recipe`]), so the two can never disagree. Everything that is
+    // left is a key with exactly one in-range byte count.
+    if !spec.has_generate_recipe() {
+        return if r.base64_bytes.is_some() || r.hex_bytes.is_some() {
+            refuse(GenerateRefusal::ByteCountOutOfRange)
+        } else {
+            refuse(GenerateRefusal::NoByteCount)
+        };
     }
     match (r.base64_bytes, r.hex_bytes) {
-        (Some(n), None) if (16..=1024).contains(&n) => Ok(Recipe::Base64(n)),
-        (None, Some(n)) if (16..=1024).contains(&n) => Ok(Recipe::Hex(n)),
-        (Some(_) | None, Some(_) | None) if r.base64_bytes.is_some() || r.hex_bytes.is_some() => {
-            refuse(GenerateRefusal::ByteCountOutOfRange)
-        }
+        (Some(n), None) => Ok(Recipe::Base64(n)),
+        (None, Some(n)) => Ok(Recipe::Hex(n)),
         _ => refuse(GenerateRefusal::NoByteCount),
     }
 }
@@ -125,7 +132,7 @@ pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
     let n = match recipe {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
         Recipe::AgeIdentity => return Ok(make_identity().0),
-        Recipe::SshEd25519 => return Ok(make_ssh_identity()?.0),
+        Recipe::SshEd25519 => return Ok(generate_ssh::make_ed25519()?.0),
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
     getrandom::fill(&mut bytes).map_err(|_| -> Error { random_source_failed() })?;
@@ -148,29 +155,6 @@ fn make_identity() -> (SecretValue, String) {
         SecretValue::new(identity.to_string().expose_secret().to_owned()),
         recipient,
     )
-}
-
-/// No external key generator or value-bearing argv. The existing audited SSH
-/// codec owns serialization; temporary seed/private strings zeroize on drop.
-fn make_ssh_identity() -> Result<(SecretValue, String), Error> {
-    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
-    getrandom::fill(&mut *seed).map_err(|_| -> Error { random_source_failed() })?;
-    let pair = ssh_key::private::Ed25519Keypair::from_seed(&seed);
-    let private = ssh_key::PrivateKey::from(pair);
-    // Ed25519 is infallibly serializable in the enabled OpenSSH format. Errors
-    // are reduced to fixed local-I/O diagnostics, never key/codec debug data.
-    let encoded = private
-        .to_openssh(ssh_key::LineEnding::LF)
-        .map_err(|_| -> Error { random_source_failed() })?;
-    let public = private
-        .public_key()
-        .to_openssh()
-        .map_err(|_| -> Error { random_source_failed() })?;
-    let fingerprint = private.public_key().fingerprint(ssh_key::HashAlg::Sha256);
-    Ok((
-        SecretValue::new(encoded.to_string()),
-        format!("{public}\n{fingerprint}"),
-    ))
 }
 
 /// Generate each `product/KEY` in `env_name` and write it into 1Password.
@@ -210,22 +194,24 @@ pub fn run_on(
         }
     }
     let mut writes: Vec<(String, String, SecretValue)> = Vec::with_capacity(chosen.len());
-    let mut recipients: Vec<Option<String>> = Vec::with_capacity(chosen.len());
+    let mut public_lines: Vec<Vec<String>> = Vec::with_capacity(chosen.len());
     for (p, k, rcp) in &chosen {
         match rcp {
             Recipe::AgeIdentity => {
                 let (value, recipient) = make_identity();
                 writes.push((p.clone(), k.clone(), value));
-                recipients.push(Some(recipient));
+                public_lines.push(vec![recipient]);
             }
             Recipe::SshEd25519 => {
-                let (value, public) = make_ssh_identity()?;
+                let (value, ssh_public) = generate_ssh::make_ed25519()?;
+                // The private key is a secret before it can reach a write or an error path.
+                crate::scrub::register_secret(value.expose());
                 writes.push((p.clone(), k.clone(), value));
-                recipients.push(Some(public));
+                public_lines.push(vec![ssh_public.openssh, ssh_public.fingerprint]);
             }
             _ => {
                 writes.push((p.clone(), k.clone(), make(*rcp)?));
-                recipients.push(None);
+                public_lines.push(Vec::new());
             }
         }
     }
@@ -239,7 +225,7 @@ pub fn run_on(
             .collect(),
     };
     super::import::write_values(fleet, env, &writes, &by, r)?;
-    for ((p, k, rcp), recipient) in chosen.iter().zip(&recipients) {
+    for ((p, k, rcp), lines) in chosen.iter().zip(&public_lines) {
         writeln!(
             out,
             "generated {} in 1Password ({}); the value was never shown",
@@ -247,10 +233,10 @@ pub fn run_on(
             rcp.describe()
         )
         .map_err(write_err)?;
-        // The identity is a secret; only its public recipient is shown, so the person can
-        // put it in the sealed target's `recipients` (§7.1).
-        if let Some(recipient) = recipient {
-            writeln!(out, "{recipient}").map_err(write_err)?;
+        // Only public material is shown: an age recipient, or an SSH public key and its
+        // fingerprint, so the person can put it in the consumer's trust configuration.
+        for line in lines {
+            writeln!(out, "{line}").map_err(write_err)?;
         }
     }
     let next = crate::cause::Cmd {
@@ -315,3 +301,11 @@ pub fn plan(
 #[cfg(test)]
 #[path = "generate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "generate_age_tests.rs"]
+mod age_tests;
+
+#[cfg(test)]
+#[path = "generate_ssh_tests.rs"]
+mod ssh_tests;

@@ -1,0 +1,23 @@
+{
+  "receipt_schema": 1,
+  "revision": 1,
+  "proof": "native_immutable_issuance",
+  "service_account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "contract": {
+    "environment": "staging-worker",
+    "role": "ci_reader",
+    "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "vaults": [
+      {
+        "vault_id": "cccccccccccccccccccccccccc",
+        "permissions": [
+          "read_items"
+        ]
+      }
+    ],
+    "can_create_vaults": false
+  },
+  "contract_sha256": "30e0ec4e9d5c1f6df61c6c6c06e30d14b3dcf012d029e4c73afabed1f696b80d",
+  "issued_at": 1800000000,
+  "not_after": 1807776000
+}

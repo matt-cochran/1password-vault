@@ -929,6 +929,21 @@ fn build_findings(
             continue;
         };
         let (product, label) = (Some(h.product.clone()), key_label(&h.product, &h.key));
+        // #296: an expiring or expired credential's next step is its one rotation command,
+        // never `opv open` (a value is not what fixes it).
+        let prerequisite = match h.code {
+            CREDENTIAL_EXPIRING | CREDENTIAL_EXPIRED => {
+                let (kind, target) = h.other.clone().unwrap_or_default();
+                let target = (!target.is_empty()).then_some(target.as_str());
+                let kind = if kind == "deploy" {
+                    crate::domain::credential::CredentialKind::Deploy
+                } else {
+                    crate::domain::credential::CredentialKind::ServiceAccount
+                };
+                credential_next(kind, env, target)
+            }
+            _ => format!("opv open {label} --env {env}"),
+        };
         let finding = Finding {
             code: h.code.into(),
             scope: Scope {
@@ -944,7 +959,7 @@ fn build_findings(
             blocking: false,
             actor: "owner".into(),
             effect: "writes_1password".into(),
-            prerequisite: format!("opv open {label} --env {env}"),
+            prerequisite,
             verify: "opv ready --json".into(),
             message: Some(h.message.clone()),
             act: None,
@@ -1414,6 +1429,10 @@ fn write_grid(out: &mut dyn Write, header: &[String], body: &[Vec<String>]) -> R
 #[path = "ready_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "expiry_reporting_tests.rs"]
+mod expiry_reporting_tests;
+
 /// One `op vault user list` for `vault_id` (FR-56): `None` when this person can see the
 /// vault, else the `grants_missing` reason naming it. The vault ID is never a value.
 ///
@@ -1637,6 +1656,9 @@ pub fn run_at(
     if gate {
         health.extend(expires_soon(fleet, &envs, generated_at));
     }
+    // #296: every recorded CI or deploy credential, expiring or expired, is reported on
+    // every run (not only `--gate`), value-free, with one rotation command as its Next.
+    health.extend(credential_health(fleet, &envs, &expiry_today(generated_at)));
     let personal = fleet
         .products
         .iter()
@@ -2156,6 +2178,154 @@ fn expires_soon(
         }
     }
     out
+}
+
+/// The code `ready`, `doctor` and `status` report an expiring credential under (#296).
+pub(crate) const CREDENTIAL_EXPIRING: &str = "credential_expiring";
+/// The code an expired credential is reported under (#296).
+pub(crate) const CREDENTIAL_EXPIRED: &str = "credential_expired";
+/// The finding key of an environment's own CI reader (the credential with no target).
+pub(crate) const CI_READER: &str = "ci_reader";
+
+/// The bindings beside the contract `fleet` was read from (R1). A manifest project has no
+/// `secrets.bindings.toml`, so it records no credential and reports nothing (no error).
+pub(crate) fn fleet_bindings(fleet: &crate::domain::Fleet) -> crate::config::bindings::Bindings {
+    match &fleet.read_from.0 {
+        crate::cause::ConfigSource::File { path, .. } => {
+            crate::config::bindings::read_sibling(path).unwrap_or_default()
+        }
+        crate::cause::ConfigSource::Manifest { .. } => crate::config::bindings::Bindings::default(),
+    }
+}
+
+/// Every credential recorded for `env` and its named targets, read from the fleet's
+/// bindings beside the contract (#296). Value-free: names and dates only.
+pub(crate) fn credential_records(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+) -> Vec<crate::domain::credential::CredentialRecord> {
+    let targets: Vec<String> = fleet
+        .environments
+        .get(env)
+        .map(|e| e.targets.keys().cloned().collect())
+        .unwrap_or_default();
+    crate::domain::credential::records(&fleet_bindings(fleet), env, &targets)
+}
+
+/// The state of `record`'s expiry as of `today`, within the default window
+/// ([`crate::domain::credential::DEFAULT_EXPIRY_WINDOW_DAYS`], 14 days).
+pub(crate) fn credential_state(
+    record: &crate::domain::credential::CredentialRecord,
+    today: &str,
+) -> crate::domain::credential::ExpiryState {
+    crate::domain::credential::expiry_state(
+        record.expires_on.as_deref(),
+        today,
+        crate::domain::credential::DEFAULT_EXPIRY_WINDOW_DAYS,
+    )
+}
+
+/// The one rotation command a credential's finding names as its Next (#296):
+/// `opv access <env> [--target <t>] --rotate --github <owner/repo>` for a service account
+/// (the reader, or a target's deploy identity), `opv target credentials <env> --target <t>
+/// --rotate` for a deploy credential.
+pub(crate) fn credential_next(
+    kind: crate::domain::credential::CredentialKind,
+    env: &str,
+    target: Option<&str>,
+) -> String {
+    use crate::domain::credential::CredentialKind;
+    match kind {
+        CredentialKind::Deploy => format!(
+            "opv target credentials {env} --target {} --rotate",
+            target.unwrap_or_default()
+        ),
+        CredentialKind::ServiceAccount | CredentialKind::Federated => match target {
+            Some(t) => format!("opv access {env} --target {t} --rotate --github <owner/repo>"),
+            None => format!("opv access {env} --rotate --github <owner/repo>"),
+        },
+    }
+}
+
+/// The kind word a credential finding carries in `HealthFinding::other` (its first half),
+/// so [`build_findings`] can rebuild the one rotation command from the finding alone.
+fn credential_kind_word(kind: crate::domain::credential::CredentialKind) -> &'static str {
+    use crate::domain::credential::CredentialKind;
+    match kind {
+        CredentialKind::Deploy => "deploy",
+        CredentialKind::ServiceAccount | CredentialKind::Federated => "service_account",
+    }
+}
+
+/// `ready`'s advisory findings for each expiring or expired credential recorded for `envs`
+/// (#296), one per credential, in environment then record order. `Ok` and `Unknown` produce
+/// none. Value-free: the product/key name the credential, the message its state.
+pub(crate) fn credential_health(
+    fleet: &crate::domain::Fleet,
+    envs: &[EnvInput],
+    today: &str,
+) -> Vec<crate::domain::health::HealthFinding> {
+    use crate::domain::credential::ExpiryState;
+    let bindings = fleet_bindings(fleet);
+    let mut out = Vec::new();
+    for env in envs {
+        let targets: Vec<String> = fleet
+            .environments
+            .get(&env.name)
+            .map(|e| e.targets.keys().cloned().collect())
+            .unwrap_or_default();
+        for record in crate::domain::credential::records(&bindings, &env.name, &targets) {
+            let state = crate::domain::credential::expiry_state(
+                record.expires_on.as_deref(),
+                today,
+                crate::domain::credential::DEFAULT_EXPIRY_WINDOW_DAYS,
+            );
+            let code = match state {
+                ExpiryState::Expired => CREDENTIAL_EXPIRED,
+                ExpiryState::Expiring { .. } => CREDENTIAL_EXPIRING,
+                _ => continue,
+            };
+            let what = match (&record.target, record.kind) {
+                (Some(t), crate::domain::credential::CredentialKind::Deploy) => {
+                    format!("the deploy credential for {t} in {}", env.name)
+                }
+                (Some(t), _) => format!("the CI identity for {t} in {}", env.name),
+                (None, _) => format!("the CI reader for {}", env.name),
+            };
+            let message = match state {
+                ExpiryState::Expired => format!("{what} expired; rotate it"),
+                ExpiryState::Expiring { days_left } => {
+                    format!("{what} expires in {days_left} days; rotate it")
+                }
+                _ => continue,
+            };
+            out.push(crate::domain::health::HealthFinding {
+                code,
+                environments: vec![env.name.clone()],
+                product: env.name.clone(),
+                key: record
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| CI_READER.to_string()),
+                other: Some((
+                    credential_kind_word(record.kind).to_string(),
+                    record.target.clone().unwrap_or_default(),
+                )),
+                message,
+            });
+        }
+    }
+    out
+}
+
+/// The `YYYY-MM-DD` credentials are measured from: `generated_at`'s date when it carries
+/// one, else the system clock (a plain receipt has no timestamp).
+fn expiry_today(generated_at: &str) -> String {
+    if generated_at.len() >= 10 {
+        generated_at[..10].to_string()
+    } else {
+        crate::app::retire::today()
+    }
 }
 
 /// The date 30 days after the date in `stamp` (`YYYY-MM-DD...`); `None` when it is not an

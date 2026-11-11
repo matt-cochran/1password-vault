@@ -109,6 +109,16 @@ pub const REASON_URL_WHITESPACE: &str = "URL contains whitespace";
 pub const REASON_NOTHING_AFTER_PREFIX: &str = "nothing after the prefix";
 /// `transform` with a name this version does not know.
 pub const REASON_UNKNOWN_TRANSFORM: &str = "unknown transform";
+/// `age_identity`: the value is not a valid age X25519 identity.
+pub const REASON_NOT_AGE_IDENTITY: &str = "not an age X25519 identity";
+/// `ssh_ed25519`: the value is not an OpenSSH private key.
+pub const REASON_NOT_OPENSSH_KEY: &str = "not an OpenSSH private key";
+/// `ssh_ed25519`: the OpenSSH private key is encrypted.
+pub const REASON_SSH_KEY_ENCRYPTED: &str = "encrypted key";
+/// `ssh_ed25519`: the private key is not delivered as a file.
+pub const REASON_SSH_KEY_NOT_FILE: &str = "not delivered as a file";
+/// `ssh_ed25519`: the OpenSSH private key is not Ed25519.
+pub const REASON_NOT_ED25519_KEY: &str = "not an Ed25519 key";
 
 /// `pem_private_key` (rule `transform`): no `-----BEGIN ...-----` / `-----END ...-----`.
 pub const PEM_NO_MARKERS: &str = "no BEGIN/END markers";
@@ -256,6 +266,10 @@ fn pem_private_key(v: &str) -> Result<Zeroizing<String>, &'static str> {
 ///   refused here and empty.
 /// - `Ok(Some(v))`: the value to stage (after any transform).
 /// - `Err`: the first failing rule, naming key, rule and [`Reason`] only.
+///
+/// Identity rules (`age_identity`, `ssh_ed25519`) validate the stored value and report only a
+/// fixed [`Reason`]. An `ssh_ed25519` value is multi-line and is staged byte-exact, skipping
+/// the line-shape rules, the transform and `ensure_prefix`.
 pub fn check(
     product: &str,
     key: &str,
@@ -303,10 +317,41 @@ pub fn check_verbatim(
     if v.is_empty() {
         return Err(fail("nonempty", REASON_EMPTY));
     }
+    // Identity rules check the stored value itself, before any line-shape or transform rule:
+    // an `age_identity` is a single secret key and an `ssh_ed25519` is a multi-line OpenSSH
+    // private key. Only fixed reasons are reported; nothing read from the value is echoed.
+    // One identity line; `#` comment lines (as `age-keygen` writes them) are allowed (0.18.3).
+    if r.age_identity {
+        let mut lines = v
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'));
+        let one = lines.next().filter(|_| lines.next().is_none());
+        if !one.is_some_and(|l| l.parse::<age::x25519::Identity>().is_ok()) {
+            return Err(fail("age_identity", REASON_NOT_AGE_IDENTITY));
+        }
+    }
+    if r.ssh_ed25519 {
+        let key = ssh_key::PrivateKey::from_openssh(v)
+            .map_err(|_| fail("ssh_ed25519", REASON_NOT_OPENSSH_KEY))?;
+        if key.is_encrypted() {
+            return Err(fail("ssh_ed25519", REASON_SSH_KEY_ENCRYPTED));
+        }
+        if key.algorithm() != ssh_key::Algorithm::Ed25519 {
+            return Err(fail("ssh_ed25519", REASON_NOT_ED25519_KEY));
+        }
+        // A private key reaches its consumer only as a file (0.18.3), never an env value.
+        if !verbatim {
+            return Err(fail("ssh_ed25519", REASON_SSH_KEY_NOT_FILE));
+        }
+    }
+    // An ssh_ed25519 value is multi-line and is staged byte-exact, like a verbatim file key:
+    // it skips the transform, line-shape and `ensure_prefix` normalisation below.
+    let byte_exact = verbatim || r.ssh_ed25519;
     // A PEM private key is multi-line in 1Password (a concealed field holds it as pasted or
     // as the downloaded `.pem`). Normalise it to one line *before* the always-on rules so the
     // single-line Fly import format can carry it; every later rule sees the normalised value.
-    let pem: Option<Zeroizing<String>> = if verbatim {
+    let pem: Option<Zeroizing<String>> = if byte_exact {
         None
     } else {
         match r.transform.as_deref() {
@@ -317,7 +362,7 @@ pub fn check_verbatim(
         }
     };
     let v: &str = pem.as_deref().map_or(v, String::as_str);
-    if !verbatim {
+    if !byte_exact {
         if v.contains(['\n', '\r', '\0']) {
             return Err(fail("single_line", REASON_MULTILINE));
         }
@@ -354,28 +399,7 @@ pub fn check_verbatim(
             return Err(fail_with("prefix_by_mode", why));
         }
     }
-    if r.age_identity {
-        let identities: Vec<_> = v
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .collect();
-        if identities.len() != 1 || identities[0].parse::<age::x25519::Identity>().is_err() {
-            return Err(fail("age_identity", "not one valid age X25519 identity"));
-        }
-    }
-    if r.ssh_ed25519 {
-        let valid = ssh_key::PrivateKey::from_openssh(v).is_ok_and(|private| {
-            !private.is_encrypted() && private.algorithm() == ssh_key::Algorithm::Ed25519
-        });
-        if !verbatim || !valid {
-            return Err(fail(
-                "ssh_ed25519",
-                "not an unencrypted Ed25519 OpenSSH private key delivered as a file",
-            ));
-        }
-    }
-    if verbatim {
+    if byte_exact {
         return Ok(Some(SecretValue::new(v.to_string())));
     }
     if let Some(pat) = &r.regex {
@@ -1274,3 +1298,7 @@ mod tests {
         assert!(n >= 15, "expected nearly every case to fail, got {n}");
     }
 }
+
+#[cfg(test)]
+#[path = "rules_identity_tests.rs"]
+mod identity_tests;

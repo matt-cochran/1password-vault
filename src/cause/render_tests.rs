@@ -876,6 +876,15 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["me@one.example", "ACC-ONE", "ACC-TWO"],
         ),
         (
+            FederatedRefused {
+                why: FederatedWhy::IdentityMismatch,
+                env: Some(EnvName::new("prod")),
+                target: Some(TargetName::new("web-xyz")),
+                client_id: "client-xyz".into(),
+            },
+            vec!["web-xyz", "client-xyz"],
+        ),
+        (
             SourceOnly {
                 product: ProductName::new("shared-xyz"),
                 env: Some(EnvName::new("prod")),
@@ -911,6 +920,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["env-dev", "prod-api/MY_TOKEN", "title-xyz"],
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
+        (
+            ReaderGrantsUnverified {
+                env: EnvName::new("env-prod"),
+                reason: "issuance_missing".into(),
+            },
+            vec!["env-prod", "issuance_missing"],
+        ),
         (
             GateFailed {
                 env: EnvName::new("env-prod"),
@@ -1110,6 +1126,7 @@ fn ordinal(c: &Cause) -> usize {
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
         ValueInTextField { .. } => 78,
+        ReaderGrantsUnverified { .. } => 92,
         GateFailed { .. } => 79,
         NeedsUndeclared { .. } => 80,
         ImportTierRefused { .. } => 81,
@@ -1120,10 +1137,11 @@ fn ordinal(c: &Cause) -> usize {
         Unsupported { .. } => 88,
         // sealed target (#271)
         SealedRefused { .. } => 89,
+        FederatedRefused { .. } => 91,
     }
 }
 
-const VARIANTS: usize = 91;
+const VARIANTS: usize = 93;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -5673,4 +5691,28 @@ fn a_config_outside_the_repository_says_to_name_a_file_inside_it() {
             .contains("must name a file inside this repository"),
         "{doc}"
     );
+}
+
+/// #297: a federated identity used outside GitHub Actions names the CI workflow that runs it.
+#[test]
+fn a_federated_target_outside_ci_nexts_its_ci_workflow() {
+    let c = Cause::FederatedRefused {
+        why: FederatedWhy::OutsideCi,
+        env: Some(EnvName::new("prod")),
+        target: Some(TargetName::new("api")),
+        client_id: "client-xyz".into(),
+    };
+    assert_eq!(next_in(&c, &inv()), "opv ci workflow prod --target api");
+}
+
+/// #297: the CI job signed in as another identity names the configured client id in its Do.
+#[test]
+fn a_federated_identity_mismatch_names_the_configured_client() {
+    let c = Cause::FederatedRefused {
+        why: FederatedWhy::IdentityMismatch,
+        env: Some(EnvName::new("prod")),
+        target: Some(TargetName::new("api")),
+        client_id: "client-xyz".into(),
+    };
+    assert!(crate::error::report(&c.into()).contains("client-id client-xyz"));
 }

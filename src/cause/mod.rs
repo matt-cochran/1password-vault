@@ -651,6 +651,18 @@ pub enum NotFoundState {
     LocalContextMissing,
 }
 
+/// Why opv refuses a federated deploy identity (#297).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FederatedWhy {
+    /// Run outside GitHub Actions: the identity only exists in a CI job (local commands
+    /// are refused, no fallback credential is kept for people).
+    OutsideCi,
+    /// The job's ambient sign-in is not the configured tenant, client and subscription, or
+    /// not a service principal (a person's own `az login` included).
+    IdentityMismatch,
+}
+
 /// Why the 1Password or target session is missing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -864,6 +876,16 @@ pub enum Cause {
     },
 
     // §4.3 sessions, accounts, credentials
+    /// A target's federated deploy identity (#297, `docs/design/azure-oidc.md`) that opv
+    /// will not use: it exists only in a GitHub Actions job that signed in first, and the
+    /// job's sign-in must be exactly the configured identity. Ids only, never a secret.
+    FederatedRefused {
+        why: FederatedWhy,
+        env: Option<EnvName>,
+        target: Option<TargetName>,
+        /// The configured client (application) id the job must be signed in as.
+        client_id: String,
+    },
     NotSignedIn {
         system: System,
         account: Option<AccountId>,
@@ -1269,6 +1291,11 @@ pub enum Cause {
     /// a value state other than `set`, or delivery evidence older than the source item now.
     /// `keys` carries the product, the key and the reason (the state name, or
     /// `not_delivered`); never a value (SR-1). Public code `gate_failed`, exit 8.
+    /// Immutable CI-reader issuance proof could not be established (#304).
+    ReaderGrantsUnverified {
+        env: EnvName,
+        reason: String,
+    },
     GateFailed {
         env: EnvName,
         keys: Vec<(ProductName, KeyName, &'static str)>,
@@ -1341,9 +1368,9 @@ pub enum ItemProblem {
 pub enum GenerateRefusal {
     /// A prefix rule says the provider issues it.
     ProviderIssued,
-    /// The rules give no byte length.
+    /// The rules give no generate recipe (no byte count, no identity flag).
     NoByteCount,
-    /// The rules give a byte count outside 16..=1024, or both forms.
+    /// The rules give a byte count outside 16..=1024, or both byte-count forms.
     ByteCountOutOfRange,
     /// A personal key: each person keeps their own value.
     Personal,
@@ -1691,10 +1718,10 @@ impl GenerateRefusal {
         match self {
             GenerateRefusal::ProviderIssued => "its prefix rule says the provider issues it",
             GenerateRefusal::NoByteCount => {
-                "its rules give no byte length (base64_bytes or hex_bytes), so the provider issues it"
+                "its rules give no generation recipe (base64_bytes, hex_bytes, age_identity or ssh_ed25519), so the provider issues it"
             }
             GenerateRefusal::ByteCountOutOfRange => {
-                "its rules must give one of base64_bytes or hex_bytes, between 16 and 1024"
+                "its rules must give one generation recipe: base64_bytes or hex_bytes between 16 and 1024, or age_identity or ssh_ed25519"
             }
             GenerateRefusal::Personal => "it is a personal key, so each person has their own value",
             GenerateRefusal::Shared { .. } => {
@@ -2337,6 +2364,7 @@ impl Cause {
             | TargetRefused { env: e, .. }
             | Unrecognized { env: e, .. }
             | RamDirUnavailable { env: e, .. }
+            | FederatedRefused { env: e, .. }
             | SourceOnly { env: e, .. } => {
                 if e.is_none() {
                     *e = Some(EnvName::new(env));
@@ -2359,6 +2387,9 @@ impl Cause {
             | Cause::Guard {
                 guard: Guard::MountPathInUse { target, .. },
             } if target.as_str().is_empty() => *target = TargetName::new(name),
+            Cause::FederatedRefused { target, .. } if target.is_none() => {
+                *target = Some(TargetName::new(name))
+            }
             _ => {}
         }
         self
@@ -2496,6 +2527,7 @@ impl Cause {
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
+            ReaderGrantsUnverified { .. } => "reader_grants_unverified",
             GateFailed { .. } => "gate_failed",
             ImportTierRefused { .. } => "import_tier_refused",
             ProducerFailed { .. } => "producer_failed",
@@ -2522,6 +2554,11 @@ impl Cause {
             InputUnreadable { .. } => "input_unreadable",
             ItemUnusable { .. } => "item_unusable",
             SecretNotStored { .. } => "secret_not_stored",
+            FederatedRefused {
+                why: FederatedWhy::OutsideCi,
+                ..
+            } => "federated_outside_ci",
+            FederatedRefused { .. } => "federated_identity_mismatch",
             SourceOnly { .. } => "source_only",
             TitleLookup { matches: 0, .. } => "title_not_found",
             TitleLookup { .. } => "title_ambiguous",
@@ -2633,16 +2670,22 @@ impl Cause {
             | KeysBlocking { .. }
             | ImportTierRefused { .. }
             | HandoffPipeContested { .. }
+            | FederatedRefused {
+                why: FederatedWhy::OutsideCi,
+                ..
+            }
             | Unsupported { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
             | AccountAmbiguous { .. }
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
+            | FederatedRefused { .. }
             | CredentialRejected { .. } => 7,
             ValuesNeeded { .. }
             | DeliveryUnverified { .. }
             | TargetDrift { .. }
+            | ReaderGrantsUnverified { .. }
             | GateFailed { .. } => 8,
             SourceChanged { .. } => 10,
             CreateOutcomeUnknown { .. }
@@ -2710,6 +2753,10 @@ impl Cause {
             | UnexpectedOutput { .. }
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
+            | FederatedRefused {
+                why: FederatedWhy::OutsideCi,
+                ..
+            }
             | SourceOnly { .. }
             | SourceChanged { .. }
             | Unsupported { .. }
@@ -2757,6 +2804,36 @@ impl RetryClass {
             RetryClass::Never => "never",
             RetryClass::CheckFirst => "check_first",
         }
+    }
+}
+
+#[cfg(test)]
+mod surface_text_tests {
+    use super::GenerateRefusal;
+
+    fn named_recipes(words: &str) -> Vec<&'static str> {
+        ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| words.contains(recipe))
+            .collect()
+    }
+
+    /// #293: the refusal for a key with no recipe names every recipe a key can carry.
+    #[test]
+    fn no_byte_count_words_name_all_four_recipes() {
+        assert_eq!(
+            named_recipes(GenerateRefusal::NoByteCount.words()),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
+    }
+
+    /// #293: the refusal for an out-of-range byte count names every recipe a key can carry.
+    #[test]
+    fn byte_count_out_of_range_words_name_all_four_recipes() {
+        assert_eq!(
+            named_recipes(GenerateRefusal::ByteCountOutOfRange.words()),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
     }
 }
 

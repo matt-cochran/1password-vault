@@ -18,6 +18,7 @@ mod companions;
 pub mod config;
 pub mod containerapp;
 pub mod diagnose;
+pub mod federated;
 pub mod handoff;
 pub mod job;
 pub mod keyvault;

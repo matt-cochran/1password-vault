@@ -1864,9 +1864,15 @@ fn generate_refused(
     let pk = format!("{product}/{key}");
     let open = Next::Check(cmd(&["open"], &[pk.as_str(), "--env", env.as_str()]));
     match reason {
-        GenerateRefusal::ProviderIssued | GenerateRefusal::NoByteCount => plan(
+        GenerateRefusal::ProviderIssued => plan(
             fill(format!(
                 "get {pk} for environment {env} from the provider that issues it, and type it in 1Password"
+            )),
+            open,
+        ),
+        GenerateRefusal::NoByteCount => plan(
+            fill(format!(
+                "give {pk} a generation recipe (base64_bytes, hex_bytes, age_identity or ssh_ed25519) and regenerate it, or get it from the provider that issues it and type it in 1Password"
             )),
             open,
         ),
@@ -1883,7 +1889,7 @@ fn generate_refused(
         ),
         GenerateRefusal::ByteCountOutOfRange => plan(
             inspect(format!(
-                "give {pk} one of base64_bytes or hex_bytes, between 16 and 1024"
+                "give {pk} one generation recipe: base64_bytes or hex_bytes between 16 and 1024, or age_identity or ssh_ed25519"
             )),
             Next::Run(cmd(&["config", "edit"], &[])),
         ),
@@ -2863,6 +2869,9 @@ impl Cause {
                 plural(rows.len(), "value", "values"),
                 value_rows(rows)
             ),
+            ReaderGrantsUnverified { env, reason } => {
+                format!("CI reader grants for {env} are not verified: {reason}")
+            }
             GateFailed { env, keys } => format!(
                 "environment {env} is not ready to promote: {}: {}",
                 plural(keys.len(), "key", "keys"),
@@ -3091,6 +3100,26 @@ impl Cause {
                 "product {product} is source-only (source_only = true): it holds shared values \
                  for other products' keys and is never run on its own"
             ),
+            FederatedRefused {
+                why,
+                target,
+                client_id,
+                ..
+            } => {
+                let t = target
+                    .as_ref()
+                    .map_or_else(|| "the target".to_string(), |t| format!("target {t}"));
+                match why {
+                    FederatedWhy::OutsideCi => format!(
+                        "{t} signs in with a federated identity that exists only in a GitHub \
+                         Actions job, so opv does not use it here"
+                    ),
+                    FederatedWhy::IdentityMismatch => format!(
+                        "this job's sign-in is not the federated identity of {t} (client \
+                         {client_id}, a service principal)"
+                    ),
+                }
+            }
             TitleLookup {
                 kind,
                 title,
@@ -4770,6 +4799,10 @@ impl Cause {
                 }
                 None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
             },
+            ReaderGrantsUnverified { .. } => plan(
+                inspect("have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create"),
+                Next::None(NoNext::NothingToRun),
+            ),
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(
                     inspect(format!(
@@ -5352,6 +5385,35 @@ impl Cause {
                     next,
                 )
             }
+            FederatedRefused {
+                why,
+                env,
+                target,
+                client_id,
+            } => {
+                let (env, target) = (
+                    env.as_ref().map(|e| e.as_str().to_string()),
+                    target.as_ref().map(|t| t.as_str().to_string()),
+                );
+                // The identity only exists in CI, and the printed workflow signs the job in
+                // with exactly the configured ids: both refusals end at that workflow.
+                let next = match (env, target) {
+                    (Some(env), Some(target)) => {
+                        Next::Run(cmd(&["ci", "workflow"], &[&env, "--target", &target]))
+                    }
+                    _ => Next::Check(cmd(&["ci", "workflow", "--help"], &[])),
+                };
+                match why {
+                    FederatedWhy::OutsideCi => plan(None, next),
+                    FederatedWhy::IdentityMismatch => plan(
+                        inspect(format!(
+                            "sign the job in with azure/login using client-id {client_id} and \
+                             the configured tenant and subscription before opv runs"
+                        )),
+                        next,
+                    ),
+                }
+            }
             TitleLookup {
                 kind,
                 title,
@@ -5830,6 +5892,57 @@ pub fn document(
             next_value(&p.next, inv)
         },
     })
+}
+
+#[cfg(test)]
+mod surface_text_tests {
+    use super::*;
+
+    fn generate_refused(reason: GenerateRefusal) -> Cause {
+        Cause::Guard {
+            guard: Guard::GenerateRefused {
+                product: ProductName::new("web"),
+                key: KeyName::new("TOKEN"),
+                env: EnvName::new("prod"),
+                reason,
+            },
+        }
+    }
+
+    fn named_recipes(words: &str) -> Vec<&'static str> {
+        ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"]
+            .into_iter()
+            .filter(|recipe| words.contains(recipe))
+            .collect()
+    }
+
+    fn do_text(reason: GenerateRefusal) -> String {
+        let inv = Invocation::from_cli(&[
+            "opv".to_string(),
+            "apply".into(),
+            "--generate".into(),
+            "prod:web/TOKEN".into(),
+        ]);
+        generate_refused(reason).do_text(&inv).unwrap_or_default()
+    }
+
+    /// #293: the do for a key with no recipe names every recipe a key can carry.
+    #[test]
+    fn no_byte_count_plan_names_all_four_recipes() {
+        assert_eq!(
+            named_recipes(&do_text(GenerateRefusal::NoByteCount)),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
+    }
+
+    /// #293: the do for an out-of-range byte count names every recipe a key can carry.
+    #[test]
+    fn byte_count_out_of_range_plan_names_all_four_recipes() {
+        assert_eq!(
+            named_recipes(&do_text(GenerateRefusal::ByteCountOutOfRange)),
+            ["base64_bytes", "hex_bytes", "age_identity", "ssh_ed25519"],
+        );
+    }
 }
 
 #[cfg(test)]
