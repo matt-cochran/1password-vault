@@ -10,6 +10,9 @@ const USER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
 const VAULT: &str = "cccccccccccccccccccccccccc";
 
 fn run(native_type: &str, trusted: bool) -> Output {
+    run_fixture(native_type, trusted, true).0
+}
+fn run_fixture(native_type: &str, trusted: bool, local_config: bool) -> (Output, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("secrets.toml");
     opv::config::bindings::write_split(
@@ -55,6 +58,7 @@ environments = ["test"]
     std::fs::write(&path, &bytes).unwrap();
     let bin = dir.path().join("op");
     std::fs::write(&bin, format!(r#"#!/bin/sh
+printf '%s\n' "$1 $2" >> native-calls.txt
 case "$1" in
 --version) printf '2.40.0\n'; exit 0;;
 esac
@@ -75,7 +79,20 @@ esac
     } else {
         "0".repeat(64)
     };
-    Command::new(env!("CARGO_BIN_EXE_opv"))
+    let mut args = vec![
+        "access",
+        "test",
+        "--verify-reader",
+        "--grant-receipt",
+        path.to_str().unwrap(),
+        "--grant-receipt-sha256",
+        &approved,
+        "--json",
+    ];
+    if local_config {
+        args.splice(0..0, ["--config", cfg.to_str().unwrap()]);
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_opv"))
         .current_dir(dir.path())
         .env_clear()
         .env("PATH", dir.path())
@@ -86,20 +103,15 @@ esac
         .env("OP_CONNECT_HOST", "https://connect.invalid")
         .env("OP_CONNECT_TOKEN", "FAKE_CONNECT_CANARY")
         .env("OP_ACCOUNT", "owner-name")
-        .args([
-            "--config",
-            cfg.to_str().unwrap(),
-            "access",
-            "test",
-            "--verify-reader",
-            "--grant-receipt",
-            path.to_str().unwrap(),
-            "--grant-receipt-sha256",
-            &approved,
-            "--json",
-        ])
+        .args(args)
         .output()
-        .unwrap()
+        .unwrap();
+    let calls = std::fs::read_to_string(dir.path().join("native-calls.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    (output, calls)
 }
 
 #[test]
@@ -140,6 +152,29 @@ fn human_identity_cannot_impersonate_the_issued_service_account_in_cli() {
             && doc["error"]["code"] == "reader_grants_unverified"
             && doc["reader_grants"]["finding"] == "native_identity_unverified",
         "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn missing_local_config_refuses_before_discovery_or_any_native_call() {
+    let (out, calls) = run_fixture("SERVICE_ACCOUNT", true, false);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        out.status.code() == Some(8)
+            && doc["error"]["code"] == "reader_grants_unverified"
+            && calls.is_empty(),
+        "{} {calls:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn cli_never_runs_account_or_manifest_discovery_before_native_identity_verification() {
+    let (out, calls) = run_fixture("SERVICE_ACCOUNT", true, true);
+    assert!(
+        out.status.success() && calls == ["whoami --format", "vault list"],
+        "{} {calls:?}",
         String::from_utf8_lossy(&out.stdout)
     );
 }

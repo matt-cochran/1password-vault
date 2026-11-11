@@ -69,7 +69,9 @@ but local receipt writing failed, CI stays blocked until the owner resolves issu
 
 ## Routine restricted CI verification
 
-Trusted CI supplies only its own `OP_SERVICE_ACCOUNT_TOKEN` through its existing secret
+Verification requires a local `--config PATH` (or `OPV_CONFIG`) file; missing local
+configuration is a typed refusal before any account or manifest discovery. There is
+no fallback to a remote manifest or a person's selected account. Trusted CI supplies only its own `OP_SERVICE_ACCOUNT_TOKEN` through its existing secret
 delivery. The agent never obtains it. Use a protected local configuration and receipt:
 
 ```sh

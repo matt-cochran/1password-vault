@@ -3174,7 +3174,16 @@ fn run(
         )
         .map(|()| 0);
     }
-    r.use_account(config_store::selected_account_id(&r, &here)?);
+    let verify_reader = matches!(
+        cli.cmd,
+        Cmd::Access {
+            verify_reader: true,
+            ..
+        }
+    );
+    if !verify_reader {
+        r.use_account(config_store::selected_account_id(&r, &here)?);
+    }
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
@@ -3185,6 +3194,37 @@ fn run(
                 site: "main: the signal handlers could not be installed",
             })
         })?;
+    }
+    // A reader proof starts before ordinary account/manifest discovery. Only a local
+    // public contract may be loaded here; no item read or alternative identity is used.
+    if let Cmd::Access {
+        env: Some(env),
+        verify_reader: true,
+        grant_receipt: Some(receipt),
+        grant_receipt_sha256: Some(digest),
+        json,
+        ..
+    } = &cli.cmd
+    {
+        let token = opv::domain::SecretValue::new(
+            std::env::var("OP_SERVICE_ACCOUNT_TOKEN").unwrap_or_default(),
+        );
+        opv::scrub::register_secret(token.expose());
+        if token.expose().is_empty() {
+            return Err(opv::app::reader_grants::refusal(
+                env,
+                "service_account_token_required",
+            ));
+        }
+        let config_path = cli
+            .config
+            .as_deref()
+            .ok_or_else(|| opv::app::reader_grants::refusal(env, "local_contract_required"))?;
+        let fleet = config::load_given(config_path, given_by(config_source))?;
+        return opv::app::reader_grants::verify(
+            &fleet, env, receipt, digest, &token, &r, *json, out,
+        )
+        .map(|()| 0);
     }
     // Proposals that need no configuration (setup) or only the local contract file
     // (structure, generate), and `apply`, run before discovery.
@@ -5406,26 +5446,6 @@ fn run_other(
                 confirm,
             };
             target_op(&loaded?, &req, json, r, out)
-        }
-        Cmd::Access {
-            env: Some(env),
-            verify_reader: true,
-            grant_receipt: Some(path),
-            grant_receipt_sha256: Some(digest),
-            json,
-            ..
-        } => {
-            let token = opv::domain::SecretValue::new(
-                std::env::var("OP_SERVICE_ACCOUNT_TOKEN").unwrap_or_default(),
-            );
-            opv::scrub::register_secret(token.expose());
-            if token.expose().is_empty() {
-                return Err(opv::app::reader_grants::refusal(
-                    &env,
-                    "service_account_token_required",
-                ));
-            }
-            opv::app::reader_grants::verify(&loaded?, &env, &path, &digest, &token, r, json, out)
         }
         Cmd::Access {
             env: Some(env),
