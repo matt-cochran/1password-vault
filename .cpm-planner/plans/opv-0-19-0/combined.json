@@ -602,10 +602,6 @@
         {
           "id": "azure-federated-login",
           "consumes": "federated target config and provider wiring"
-        },
-        {
-          "id": "azure-oidc-live-spike",
-          "consumes": "recorded az ad/role/federated-credential outputs"
         }
       ],
       "estimate": {
@@ -615,7 +611,7 @@
       },
       "earning_rule": "fifty_fifty",
       "metadata": {
-        "artifact": "opv target credentials --create --federated --github <repo> --github-env <env>: app registration + SP with the target's least-privilege roles, federated credential subject repo:<owner>/<repo>:environment:<env>; replayed against the live-spike fixtures",
+        "artifact": "opv target credentials --create --federated --github <repo> --github-env <env>: app registration + SP with the target's least-privilege roles, federated credential subject repo:<owner>/<repo>:environment:<env>; tested against replies in the Azure CLI's documented shapes, replayed against the live-spike fixtures before #297 closes",
         "owner": "agent",
         "track": "development",
         "issues": [
@@ -974,6 +970,10 @@
         {
           "id": "fresh-install-smoke",
           "consumes": "published-artifact smoke evidence"
+        },
+        {
+          "id": "azure-oidc-live-spike",
+          "consumes": "recorded az outputs confirming the federated setup and sign-in live (#297)"
         }
       ],
       "metadata": {

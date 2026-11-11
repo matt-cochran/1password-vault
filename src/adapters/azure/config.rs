@@ -295,6 +295,19 @@ impl Provider for AzureProvider {
         Ok(Box::new(super::login::start()?))
     }
 
+    /// Create or reuse the target's federated CI deploy identity (#297): an app
+    /// registration and service principal with only the target's deploy grants, trusting
+    /// exactly `subject`. No secret is created.
+    fn mint_federated(
+        &self,
+        target: &dyn TargetConfig,
+        subject: &str,
+        r: &dyn crate::runner::CommandRunner,
+    ) -> Option<Result<FederatedIdentity, crate::error::Error>> {
+        let a = target.as_any().downcast_ref::<AzureTarget>()?;
+        Some(super::federated::mint(a, subject, r))
+    }
+
     fn federated_login(
         &self,
         target: &dyn TargetConfig,
