@@ -5,14 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-11
+
+0.20.0 makes the npm release refuse anything that was not qualified, tests the installed binary harder before release, and pins Rust 1.99.1.
+
+### Changed
+
+- **The manual npm publish refuses an unqualified release (#295).** `scripts/npm/publish-manual.sh` must run from a clean checkout of the tag; it verifies the release's qualified candidate (the retained artifact, or the GitHub release's assets with an attested `manifest.json`) and publishes through the same verified path as CI. A missing or extra file fails. The GitHub release now carries the value-free qualification evidence.
+- **Release qualification tests the installed binary more (#295):** it delivers a disposable Ed25519 key through the installed `opv` and checks its bytes, mode and that it never reaches output, and it installs through `install.sh` on Linux and macOS.
+- **Rust 1.99.1 is pinned** (`rust-toolchain.toml`, every CI and release build; CI fails on any other `rustc`). Every direct dependency is on its latest major version.
+
+### Added
+
+- **`docs/install.md` has an update command** (`npm i -g @matthew-cochran/opv@latest`).
+- **Recorded 1Password service-account behaviour (#304):** `docs/design/spike-304-findings.md` and the scrubbed replies in `tests/fixtures/op/success/s30`–`s35` show what a service account's own token and an owner can see of its grants, the evidence behind `--verify-reader`.
+
 ## [0.19.0] - 2026-11-10
 
-0.19.0 records when CI credentials expire and rotates them in one step, lets an Azure target deploy from GitHub Actions with no stored secret, and prints the public half of every identity a provision set generates.
+0.19.0 records when CI credentials expire and rotates them in one step, lets CI verify its 1Password reader against an owner-approved issuance receipt, lets an Azure target deploy from GitHub Actions with no stored secret, and prints the public half of every identity a provision set generates.
 
 ### Added
 
 - **CI credential expiry (#296).** `opv access --create` and `opv target credentials --create` record a value-free `expires_on` date in `secrets.bindings.toml` (a manifest project records none). `opv ready` (`credential_expiring`, `credential_expired`), `opv doctor --env` and `opv status <env>` report a credential within 14 days of expiry or past it, with its one rotation command.
 - **Rotation (#296).** `opv access <env> [--target <t>] --rotate --github <owner/repo>` makes a successor service account (`<old>-YYYYMMDD`), replaces the existing GitHub secret on stdin and verifies the new token; you then revoke the old account in 1Password. `opv target credentials <env> --target <t> --rotate` mints a fresh deploy credential into the item the target records.
+- **CI reader grant evidence (#304).** `opv access <env> --create … --grant-receipt NEW_FILE` binds the closed `read_items`-only creation request to the new token's service-account and account ids and exact vault list in an issuance receipt. In CI, `opv --config PATH access <env> --verify-reader --grant-receipt FILE --grant-receipt-sha256 APPROVED_DIGEST --json` checks the approved receipt bytes, the token's current service identity and its exact readable vault set; retrospective grant inspection is reported `not_supported`. See [reader grants](docs/reader-grants.md).
 - **`opv ci workflow --expiry-check` (#296)** prints a daily workflow that opens or updates one issue when a CI credential is expiring or expired. It only reports.
 - **Azure federated deploys from GitHub Actions (#297).** An Azure target with `azure.federated` (tenant, client and subscription ids) and no `deploy_credentials` signs in through GitHub OIDC: the generated workflow adds `id-token: write`, `azure/login@v2` and `az logout` under `if: always()`, and opv only checks that `az account show` is that identity. Outside GitHub Actions it is refused (`federated_outside_ci`, exit 6); another identity is `federated_identity_mismatch` (exit 7). `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <env>` creates or reuses the app registration, its service principal, the target's least-privilege grants and one federated credential trusting exactly `repo:<owner/repo>:environment:<env>`, and prints the ids. `opv doctor --env` explains the mode, checks the trust subject in CI and warns on a self-hosted runner.
 

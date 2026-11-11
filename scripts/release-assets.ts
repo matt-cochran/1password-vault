@@ -1,7 +1,7 @@
 import { hash, platforms, validateQualification, type Qualification } from './qualify-distribution.ts';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -165,19 +165,53 @@ async function lookupNpmIntegrity(pkg: NpmTarball): Promise<string | undefined> 
     throw new Error('npm lookup failed; refusing a blind publication');
   }
 }
-// stderr is captured (and echoed) so a duplicate-publish refusal is visible to the caller.
-async function publishNpmPackageForReal(pkg: NpmTarball): Promise<void> {
-  try {
-    execFileSync('npm', ['publish', pkg.path, '--provenance', '--access', 'public'], { stdio: ['ignore', 'inherit', 'pipe'] });
-  } catch (error) {
-    process.stderr.write(String((error as { stderr?: unknown }).stderr ?? ''));
-    throw error;
+// Provenance needs the GitHub Actions OIDC token, so only a CI publish asks for it; a
+// maintainer's local npm login (scripts/npm/publish-manual.sh) publishes the same bytes without.
+export function npmPublishArgs(path: string, ci: boolean): string[] {
+  return ['publish', path, ...(ci ? ['--provenance'] : []), '--access', 'public'];
+}
+// In CI stderr is captured (and echoed) so a duplicate-publish refusal is visible to the
+// caller. Locally npm's own sign-in and 2FA prompts need the terminal, so stdio is inherited;
+// a failed publish then fails the run, and re-running skips what npm already lists.
+function publishNpmPackageForReal(ci: boolean): (pkg: NpmTarball) => Promise<void> {
+  return async (pkg) => {
+    if (!ci) {
+      execFileSync('npm', npmPublishArgs(pkg.path, false), { stdio: 'inherit' });
+      return;
+    }
+    try {
+      execFileSync('npm', npmPublishArgs(pkg.path, true), { stdio: ['ignore', 'inherit', 'pipe'] });
+    } catch (error) {
+      process.stderr.write(String((error as { stderr?: unknown }).stderr ?? ''));
+      throw error;
+    }
+  };
+}
+// A GitHub release holds flat asset names; the retained candidate holds paths. The release
+// carries every candidate file plus manifest.json, so the candidate (and its verification)
+// outlives the 90-day Actions artifact.
+export function releaseAssetName(path: string): string {
+  if (path === 'manifest.json' || path === 'input.json') return path;
+  const [dir, name, ...rest] = path.split('/');
+  if (rest.length === 0 && name) {
+    if (dir === 'dist' && /^(?:opv(?:-[A-Za-z0-9_.-]+)?|SHA256SUMS)$/.test(name)) return name;
+    if (dir === 'npm' && /^matthew-cochran-opv[A-Za-z0-9_.-]*\.tgz$/.test(name)) return name;
+    if (dir === 'qualification' && /^[a-z0-9]+-[a-z0-9]+\.json$/.test(name)) return `qualification-${name}`;
   }
+  throw new Error('Unexpected release candidate path');
+}
+export function candidatePath(asset: string): string {
+  if (asset === 'manifest.json' || asset === 'input.json') return asset;
+  if (/^(?:opv(?:-[A-Za-z0-9_.-]+)?|SHA256SUMS)$/.test(asset)) return `dist/${asset}`;
+  if (/^matthew-cochran-opv[A-Za-z0-9_.-]*\.tgz$/.test(asset)) return `npm/${asset}`;
+  const qualification = /^qualification-([a-z0-9]+-[a-z0-9]+\.json)$/.exec(asset);
+  if (qualification) return `qualification/${qualification[1]}`;
+  throw new Error('Unexpected release asset');
 }
 function npmPublishDeps(): NpmPublishDeps {
   return {
     integrity: lookupNpmIntegrity,
-    publish: publishNpmPackageForReal,
+    publish: publishNpmPackageForReal(process.env.GITHUB_ACTIONS === 'true'),
     now: () => Date.now(),
     sleep: (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
     log: (message: string) => console.log(message),
@@ -205,7 +239,7 @@ function materializeCandidate(root: string, repository: string, tree: string, ca
 }
 export async function main(): Promise<void> {
   const [mode, directory] = process.argv.slice(2);
-  if (!directory) throw new Error('Usage: release-assets.ts record|check|resolve|verify|publish DIRECTORY');
+  if (!directory) throw new Error('Usage: release-assets.ts prepare|record|check|resolve|verify|publish|release-files|assemble DIRECTORY');
   const root = resolve(directory);
   const repository = process.env.GITHUB_REPOSITORY!;
   const tree = command(['git', 'rev-parse', 'HEAD^{tree}']);
@@ -237,6 +271,26 @@ export async function main(): Promise<void> {
     if (api(`repos/${repository}/git/commits/${manifest.source_sha}`).tree.sha !== tree) throw new Error('Staging commit tree mismatch');
     output('run-id', String(run.id));
     output('artifact', `opv-release-${tree}-${run.run_attempt}`);
+    return;
+  }
+  if (mode === 'release-files' || mode === 'assemble') {
+    // release-files CANDIDATE OUT: flatten a verified candidate into release assets.
+    // assemble CANDIDATE RELEASE: lay downloaded release assets out as a candidate to verify.
+    const other = process.argv[4];
+    if (!other) throw new Error(`Usage: release-assets.ts ${mode} CANDIDATE DIRECTORY`);
+    const target = resolve(other);
+    if (mode === 'release-files') {
+      const manifest: Manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
+      mkdirSync(target, { recursive: false });
+      for (const path of ['manifest.json', ...Object.keys(manifest.files)]) copyFileSync(join(root, path), join(target, releaseAssetName(path)));
+      return;
+    }
+    if (existsSync(root)) throw new Error('Use a fresh release candidate directory');
+    for (const asset of readdirSync(target).sort()) {
+      const path = candidatePath(asset);
+      mkdirSync(join(root, path, '..'), { recursive: true });
+      copyFileSync(join(target, asset), join(root, path));
+    }
     return;
   }
   if (mode === 'publish') {
