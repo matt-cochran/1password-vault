@@ -13,6 +13,7 @@ name: Release
     - Cargo.lock
     - scripts/release-assets.ts
     - scripts/qualify-distribution.ts
+    - install.sh
     - packaging/npm/**
   workflow_dispatch:
     inputs:
@@ -89,6 +90,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
       with:
+        toolchain: 1.99.1
         targets: ${{ matrix.target }}
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       with:
@@ -288,15 +290,23 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: node scripts/release-assets.ts verify candidate
+    # manifest.json binds every retained file's digest, so its attestation anchors the
+    # value-free evidence the release carries (scripts/npm/publish-manual.sh checks it).
     - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
       with:
-        subject-path: candidate/dist/opv*
+        subject-path: |
+          candidate/dist/opv*
+          candidate/manifest.json
+    - name: Flatten the verified candidate into release assets
+      run: node scripts/release-assets.ts release-files candidate "$RUNNER_TEMP/release-files"
     - name: Create GitHub release
       shell: bash
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GH_REPO: ${{ github.repository }}
-      run: gh release create "$GITHUB_REF_NAME" candidate/dist/* --verify-tag --title "$GITHUB_REF_NAME"
+      # Binaries, checksums and the value-free evidence (manifest.json, input.json,
+      # qualification-<platform>.json, the npm tarballs) outlive the 90-day Actions artifact.
+      run: gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/release-files/* --verify-tag --title "$GITHUB_REF_NAME"
   npm:
     name: Publish npm packages
     needs: resolve
