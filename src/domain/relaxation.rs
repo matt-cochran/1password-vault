@@ -247,8 +247,8 @@ mod surface_text_tests {
     fn removing_an_ssh_ed25519_rule_is_a_rule_removed_relaxation() {
         assert_eq!(
             diff(
-                "kind = \"secret\"\nrules = { ssh_ed25519 = true }\n",
-                "kind = \"secret\"\n",
+                "kind = \"secret\"\nfile = \"ssh-key\"\nrules = { ssh_ed25519 = true }\n",
+                "kind = \"secret\"\nfile = \"ssh-key\"\n",
             ),
             vec![Relaxation::new(
                 "app",

@@ -6,6 +6,9 @@ use crate::adapters::fake_op::FakeOp;
 const FLEET: &str = r#"[environments.dev]
 boundaries.api = { vault_id = "vdev0000000000000000000001", item_id = "ITEM" }
 
+[products.api.local]
+secrets_dir_env = "API_SECRET_FILES"
+
 [products.api.keys.SESSION_KEY]
 kind = "secret"
 environments = ["dev"]
@@ -27,8 +30,15 @@ environments = ["dev"]
 
 [products.api.keys.OPV_SEALED_IDENTITY]
 kind = "secret"
+source = "generated"
 environments = ["dev"]
 rules = { age_identity = true }
+
+[products.api.keys.SIGNING_IDENTITY]
+kind = "secret"
+source = "generated"
+file = "signing-key"
+rules = { ssh_ed25519 = true }
 "#;
 
 /// A fake whose dev item already holds `api/WEBHOOK_HEX` = `already-set`.
@@ -110,6 +120,7 @@ fn an_ssh_ed25519_key_gets_the_ssh_ed25519_recipe() {
     let s = session_key_with(|s| {
         s.rules.base64_bytes = None;
         s.rules.ssh_ed25519 = true;
+        s.file = Some("signing-key".into());
     });
     assert_eq!(
         recipe("api", "SESSION_KEY", "dev", &s).unwrap(),
@@ -472,4 +483,209 @@ fn a_set_member_refusal_runs_no_op_command() {
         &mut Vec::new(),
     );
     assert!(op.calls.borrow().is_empty());
+}
+
+#[test]
+fn declared_generated_structured_identities_load_and_share_the_recipe_guards() {
+    let (fleet, _, _) = world();
+    for (key, expected) in [
+        ("OPV_SEALED_IDENTITY", Recipe::AgeIdentity),
+        ("SIGNING_IDENTITY", Recipe::SshEd25519),
+    ] {
+        let base = spec(&fleet, key);
+        assert!(base.has_generate_recipe());
+        assert_eq!(recipe("api", key, "dev", &base).unwrap(), expected);
+        for mutate in [
+            (|s: &mut KeySpec| s.personal = true) as fn(&mut KeySpec),
+            |s: &mut KeySpec| s.from = Some("api/SESSION_KEY".into()),
+            |s: &mut KeySpec| s.rules.prefix = Some("provider_".into()),
+        ] {
+            let mut refused = base.clone();
+            mutate(&mut refused);
+            assert!(!refused.has_generate_recipe());
+            assert!(recipe("api", key, "dev", &refused).is_err());
+        }
+    }
+}
+
+#[test]
+fn an_ed25519_generated_file_key_signs_and_verifies_without_granting_trust() {
+    let value = make(Recipe::SshEd25519).unwrap();
+    let private = ssh_key::PrivateKey::from_openssh(value.expose()).unwrap();
+    assert_eq!(private.algorithm(), ssh_key::Algorithm::Ed25519);
+    assert!(!private.is_encrypted());
+    let signature = private
+        .sign(
+            "opv-disposable-test",
+            ssh_key::HashAlg::Sha256,
+            b"fictional test message",
+        )
+        .unwrap();
+    private
+        .public_key()
+        .verify("opv-disposable-test", b"fictional test message", &signature)
+        .unwrap();
+    assert!(
+        private
+            .public_key()
+            .verify("different-namespace", b"fictional test message", &signature)
+            .is_err()
+    );
+    let other = make(Recipe::SshEd25519).unwrap();
+    assert!(
+        value.expose() != other.expose(),
+        "independent identities must differ"
+    );
+}
+
+#[test]
+fn ed25519_generation_stores_multiline_bytes_and_reports_only_public_metadata() {
+    let (fleet, op, id) = world();
+    let mut output = Vec::new();
+    run(
+        &fleet,
+        "dev",
+        &["api/SIGNING_IDENTITY".into()],
+        &op,
+        &mut output,
+    )
+    .unwrap();
+    let stored = field(&op, &id, "SIGNING_IDENTITY").unwrap();
+    let private = ssh_key::PrivateKey::from_openssh(&stored).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(stored.ends_with('\n'));
+    assert!(text.contains(&private.public_key().to_openssh().unwrap()));
+    assert!(
+        text.contains(
+            &private
+                .public_key()
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string()
+        )
+    );
+    assert!(!text.contains("BEGIN OPENSSH PRIVATE KEY"));
+    assert!(!text.contains(&stored));
+    assert!(
+        op.calls
+            .borrow()
+            .iter()
+            .all(|call| call.args.iter().all(|arg| !arg.contains(&stored)))
+    );
+    let before = op.count(&["op", "item", "edit"]);
+    assert!(
+        run(
+            &fleet,
+            "dev",
+            &["api/SIGNING_IDENTITY".into()],
+            &op,
+            &mut Vec::new()
+        )
+        .is_err()
+    );
+    assert_eq!(op.count(&["op", "item", "edit"]), before);
+    assert!(
+        field(&op, &id, "SIGNING_IDENTITY").as_deref() == Some(stored.as_str()),
+        "existing identity must be preserved"
+    );
+}
+
+#[test]
+fn structured_rules_validate_actual_bytes_including_private_file_delivery() {
+    let (fleet, _, _) = world();
+    for (name, recipe) in [
+        ("OPV_SEALED_IDENTITY", Recipe::AgeIdentity),
+        ("SIGNING_IDENTITY", Recipe::SshEd25519),
+    ] {
+        let spec = spec(&fleet, name);
+        let valid = make(recipe).unwrap();
+        let check = |value: &SecretValue| {
+            crate::domain::rules::check_verbatim(
+                "api",
+                name,
+                &spec,
+                "dev",
+                fleet.environment("dev").unwrap(),
+                value,
+                spec.file.is_some(),
+            )
+        };
+        assert!(check(&valid).is_ok());
+        let invalid = SecretValue::new("fictional-invalid-private-material".into());
+        let failure = check(&invalid).unwrap_err();
+        assert!(!format!("{failure:?}").contains(invalid.expose()));
+        if recipe == Recipe::SshEd25519 {
+            assert!(
+                crate::domain::rules::check(
+                    "api",
+                    name,
+                    &spec,
+                    "dev",
+                    fleet.environment("dev").unwrap(),
+                    &valid
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn conflicting_generation_formats_and_nonsecret_or_nonfile_ssh_are_refused_at_load() {
+    for rules in [
+        "age_identity = true, ssh_ed25519 = true",
+        "age_identity = true, base64_bytes = 32",
+        "ssh_ed25519 = true, hex_bytes = 32",
+    ] {
+        let text = FLEET.replace(
+            "rules = { ssh_ed25519 = true }",
+            &format!("rules = {{ {rules} }}"),
+        );
+        assert!(crate::config::parse(&text).is_err());
+    }
+    assert!(crate::config::parse(&FLEET.replace("file = \"signing-key\"\n", "")).is_err());
+    assert!(
+        crate::config::parse(&FLEET.replace(
+            "[products.api.keys.SIGNING_IDENTITY]\nkind = \"secret\"",
+            "[products.api.keys.SIGNING_IDENTITY]\nkind = \"config\""
+        ))
+        .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_generated_ed25519_key_is_delivered_byte_exact_in_a_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let value = make(Recipe::SshEd25519).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let open = crate::app::local_delivery::OpenDir::open_private(dir.path()).unwrap();
+    crate::app::local_delivery::write_file(&open, "signing-key", value.expose().as_bytes())
+        .unwrap();
+    let path = dir.path().join("signing-key");
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        bytes == value.expose().as_bytes(),
+        "file delivery must preserve all private bytes"
+    );
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    let private = ssh_key::PrivateKey::from_openssh(bytes).unwrap();
+    assert_eq!(private.algorithm(), ssh_key::Algorithm::Ed25519);
+}
+
+#[test]
+fn structured_generation_is_supported_for_team_shared_and_production_tiers() {
+    for tier in ["shared", "production"] {
+        let text = FLEET.replace(
+            "[environments.dev]",
+            &format!("[environments.dev]\ntier = \"{tier}\""),
+        );
+        let fleet = crate::config::parse(&text).unwrap();
+        for key in ["OPV_SEALED_IDENTITY", "SIGNING_IDENTITY"] {
+            assert!(recipe("api", key, "dev", &spec(&fleet, key)).is_ok());
+        }
+    }
 }

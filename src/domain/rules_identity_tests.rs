@@ -13,8 +13,11 @@ fn fleet() -> Fleet {
     parse(&crate::config::merged_text("tests/fixtures/secrets.toml")).unwrap()
 }
 
+/// The value checked as a key with `rules`; an `ssh_ed25519` key is a file key delivered as a
+/// file, the only way 0.18.3 delivers a private SSH key.
 fn with(rules: Rules, v: &str) -> Result<Option<String>, RuleFailure> {
     let f = fleet();
+    let as_file = rules.ssh_ed25519;
     let spec = KeySpec {
         kind: Kind::Secret,
         environments: Some(vec!["prod".into(), "staging".into()]),
@@ -25,19 +28,20 @@ fn with(rules: Rules, v: &str) -> Result<Option<String>, RuleFailure> {
         from: None,
         personal: false,
         allow_same_value: false,
-        file: None,
+        file: as_file.then(|| "ssh-key".into()),
         roles: None,
         value_source: None,
         expires: None,
         lifecycle: Default::default(),
     };
-    check(
+    crate::domain::rules::check_verbatim(
         "allumata",
         "K",
         &spec,
         "prod",
         &f.environments["prod"],
         &SecretValue::new(v.into()),
+        as_file,
     )
     .map(|o| o.map(|s| s.expose().to_string()))
 }

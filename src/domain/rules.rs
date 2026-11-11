@@ -115,6 +115,8 @@ pub const REASON_NOT_AGE_IDENTITY: &str = "not an age X25519 identity";
 pub const REASON_NOT_OPENSSH_KEY: &str = "not an OpenSSH private key";
 /// `ssh_ed25519`: the OpenSSH private key is encrypted.
 pub const REASON_SSH_KEY_ENCRYPTED: &str = "encrypted key";
+/// `ssh_ed25519`: the private key is not delivered as a file.
+pub const REASON_SSH_KEY_NOT_FILE: &str = "not delivered as a file";
 /// `ssh_ed25519`: the OpenSSH private key is not Ed25519.
 pub const REASON_NOT_ED25519_KEY: &str = "not an Ed25519 key";
 
@@ -318,8 +320,16 @@ pub fn check_verbatim(
     // Identity rules check the stored value itself, before any line-shape or transform rule:
     // an `age_identity` is a single secret key and an `ssh_ed25519` is a multi-line OpenSSH
     // private key. Only fixed reasons are reported; nothing read from the value is echoed.
-    if r.age_identity && v.parse::<age::x25519::Identity>().is_err() {
-        return Err(fail("age_identity", REASON_NOT_AGE_IDENTITY));
+    // One identity line; `#` comment lines (as `age-keygen` writes them) are allowed (0.18.3).
+    if r.age_identity {
+        let mut lines = v
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'));
+        let one = lines.next().filter(|_| lines.next().is_none());
+        if !one.is_some_and(|l| l.parse::<age::x25519::Identity>().is_ok()) {
+            return Err(fail("age_identity", REASON_NOT_AGE_IDENTITY));
+        }
     }
     if r.ssh_ed25519 {
         let key = ssh_key::PrivateKey::from_openssh(v)
@@ -329,6 +339,10 @@ pub fn check_verbatim(
         }
         if key.algorithm() != ssh_key::Algorithm::Ed25519 {
             return Err(fail("ssh_ed25519", REASON_NOT_ED25519_KEY));
+        }
+        // A private key reaches its consumer only as a file (0.18.3), never an env value.
+        if !verbatim {
+            return Err(fail("ssh_ed25519", REASON_SSH_KEY_NOT_FILE));
         }
     }
     // An ssh_ed25519 value is multi-line and is staged byte-exact, like a verbatim file key:

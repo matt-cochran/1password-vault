@@ -136,6 +136,7 @@ boundaries.app = {{ vault_id = "{VAULT}", item_id = "{id}" }}
 [products.app.keys.SSH_KEY]
 kind = "secret"
 rules = {{ ssh_ed25519 = true }}
+file = "ssh-key"
 
 [products.app.keys.AGE_KEY]
 kind = "secret"

@@ -312,6 +312,7 @@ fn generate_rules_on_an_ssh_ed25519_key_records_the_rules_generator() {
 [products.app.keys.SSH_KEY]
 kind = "secret"
 rules = { ssh_ed25519 = true }
+file = "ssh-key"
 
 [sets.identities]
 environments = ["prod"]

@@ -84,16 +84,20 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     if let Some(from) = &spec.from {
         return refuse(GenerateRefusal::Shared { from: from.clone() });
     }
-    // An identity carries its meaning in the flag, not a byte count or a prefix, so it is
-    // chosen before any shape rule that would otherwise refuse it (§7.1).
-    if r.age_identity {
-        return Ok(Recipe::AgeIdentity);
-    }
-    if r.ssh_ed25519 {
-        return Ok(Recipe::SshEd25519);
-    }
     if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
         return refuse(GenerateRefusal::ProviderIssued);
+    }
+    // An identity carries its meaning in the flag, not a byte count: exactly one format, a
+    // secret, and an SSH key delivered as a file (0.18.3).
+    if r.age_identity || r.ssh_ed25519 {
+        if !spec.has_generate_recipe() {
+            return refuse(GenerateRefusal::NoByteCount);
+        }
+        return Ok(if r.age_identity {
+            Recipe::AgeIdentity
+        } else {
+            Recipe::SshEd25519
+        });
     }
     // The positive shape is decided by the same domain predicate the config validator uses
     // ([`KeySpec::has_generate_recipe`]), so the two can never disagree. Everything that is

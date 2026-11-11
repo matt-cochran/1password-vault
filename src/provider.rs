@@ -473,6 +473,9 @@ pub enum FileCapability {
     /// opv writes the bytes to a filesystem the app reads; `dir` names it (a Kubernetes
     /// `secrets_dir`, which may hold `{product}`).
     Native { dir: String },
+    /// A UTF-8 file source goes byte-for-byte into the secret API by key name.
+    /// No filesystem path or environment-variable delivery is implied.
+    ApiSecret,
     /// The app writes the files from the environment (Fly and its shim).
     ViaApp { note: &'static str },
     /// Not delivered as a file; the key goes on the secret channel by name.
@@ -953,7 +956,7 @@ environments = ["prod"]
                             label: "GitHub secret"
                         },
                         config: Channel::Variables,
-                        files: FileCapability::None,
+                        files: FileCapability::ApiSecret,
                     },
                 ),
                 (

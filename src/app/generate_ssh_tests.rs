@@ -22,6 +22,7 @@ boundaries.api = { vault_id = "vdev0000000000000000000001", item_id = "IPROD" }
 kind = "secret"
 environments = ["dev", "prod"]
 rules = { ssh_ed25519 = true }
+file = "signing-key"
 "#;
 
 /// An empty boundary item carrying the product's section.
@@ -165,6 +166,7 @@ boundaries.api = { vault_id = "vdev0000000000000000000001", item_id = "idev" }
 kind = "secret"
 environments = ["dev"]
 rules = { ssh_ed25519 = true }
+file = "signing-key"
 "#;
 
 /// Check `value` against the fleet's `ssh_ed25519` rule.

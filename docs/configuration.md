@@ -216,7 +216,7 @@ lifecycle = "active"            # active | retiring | retired
 kind = "secret"
 environments = ["prod"]
 source = "generated"
-rules = { base64_bytes = 32 }   # generated needs a byte-count or identity rule
+rules = { base64_bytes = 32 }   # generated needs exactly one supported generation recipe
 
 [products.worker.keys.DATABASE_URL]
 kind = "secret"
@@ -224,7 +224,7 @@ from = "api/DATABASE_URL"
 source = "derived"              # the only source allowed with from
 ```
 
-- `source` is who or what produces the value: `person` (someone fetches it), `generated` (opv makes it from the key's byte-count or identity rule) or `derived` (another key's value, named by `from`). `derived` requires `from`; `from` requires `derived`; `generated` requires a `base64_bytes`, `hex_bytes`, `age_identity` or `ssh_ed25519` rule. Any other combination is refused at load, naming the key.
+- `source` is who or what produces the value: `person` (someone fetches it), `generated` (opv makes it from the key's explicit generation rule) or `derived` (another key's value, named by `from`). `derived` requires `from`; `from` requires `derived`; `generated` requires exactly one supported recipe: `base64_bytes`, `hex_bytes`, `age_identity = true` or `ssh_ed25519 = true`. Structured identities require `kind = "secret"`; SSH identities also require `file` delivery. Any other combination is refused at load, naming the key.
 - `expires` is a calendar date written as a quoted string (`expires = "2026-06-30"`). An unquoted date or an impossible day is refused at load. Within 30 days of the date `opv ready` reports an advisory `expires_soon` finding; it never blocks a gate.
 - `lifecycle` is `active` (the default), `retiring` or `retired`. `opv propose retire` marks a key `retiring`. CI then runs `opv sync <env> --prune --retire` in tier order (every non-production environment before production) to remove it from the targets; a person finishes with `opv apply rp-<id>` (the id `opv ready` names), which archives the key's 1Password fields into an `archived · <date> · retired <product>/<KEY>` section and marks it `retired`. The key stays declared as `lifecycle = "retired"`: removal is a state, never a deletion. The steps and their refusals: [retiring a key](usage.md#retiring-a-key).
 
@@ -630,13 +630,14 @@ products           = ["api"]               # optional: only these products' keys
 
 What happens on each command:
 
-- **Secrets** (concealed fields) are set with `gh secret set NAME`, the value on stdin. GitHub never shows a secret's value again, so `status` shows an existing one as `unknown` and every `sync` writes it again; an `immutable` key that is already there is held.
+- **Secrets** (concealed fields) use `gh secret set NAME` with the value on stdin, or encrypted API JSON when required to preserve terminal line breaks. GitHub never shows a secret's value again, so `status` shows an existing one as `unknown` and every `sync` writes it again; an `immutable` key that is already there is held.
+- **UTF-8 file-backed secrets** (`kind = "secret"`, `file = "app-key"`) preserve every byte, including trailing LF/CRLF. The file path names the owner's import source; the GitHub destination remains the configured secret name (`{KEY}` by default), never a file mount or environment-variable path. `sync` seals values that `gh secret set` would trim with GitHub's scoped public key, then sends only encrypted JSON to the native API. No base64 transform or export wrapper is required. Raw multiline config/variable payloads and NUL bytes are refused before writing. Existing file-backed config keys retain their ordinary strict single-line/explicit-transform variable behavior. Existing provider protection and approval rules still apply.
 - **Config** (text fields) is set with `gh variable set NAME`, the value on stdin. Variables can be read back, so `status` and `plan` show `new`, `same` or `changed`, and `sync` writes only what differs. A config key kept in a concealed field is refused here (`concealed-config`): a variable is readable by everyone who can read the repository.
 - Writes are live at once: there is nothing to deploy, and `sync --deploy` says so.
 - `--prune` deletes only names opv manages (secrets and variables alike); other secrets in the repository are listed as unmanaged and never touched.
 - Limits, shown by `status` and `plan` before any write: a secret over 47 952 bytes, an empty variable, or a variable over 48 000 bytes.
 
-Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories with **Secrets: write** and **Variables: write** (and **Environments: read** when you use `environment`). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
+Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories: **Secrets: write** and **Variables: write** for repository-level values, or **Environments: write** for GitHub-environment values (including the environment secret/variable reads). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
 
 ### HTTPS
 
@@ -987,13 +988,13 @@ Those bytes are stored from a file, not typed: `opv set <[p/]KEY> --env <e> --fr
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
+| `age_identity = true` | one valid age X25519 private identity (`AGE-SECRET-KEY-1…`); `opv propose generate` or a provision set's `generate = "rules"` makes one and reports only its `age1…` recipient (#293) |
+| `ssh_ed25519 = true` | one unencrypted Ed25519 OpenSSH private key, `kind = "secret"` and file delivery (`file = "<path>"`) required; staged byte-exact (no transform, line-shape or `ensure_prefix` rule applies); generation reports only the public key and its SHA256 fingerprint; not combined with `age_identity` (#294, design [ssh-signing-key](design/ssh-signing-key.md)) |
 | `hex_bytes = N` | valid hex that decodes to N bytes |
 | `email_list = true` | comma-separated list of email addresses |
 | `https_url = true` | an `https://` URL |
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
-| `age_identity = true` | an age X25519 identity (`AGE-SECRET-KEY-1…`). `opv propose generate` (or a provision set's `generate = "rules"`) makes one and prints only its `age1…` recipient (#293) |
-| `ssh_ed25519 = true` | an unencrypted OpenSSH Ed25519 private key, multi-line as `ssh-keygen` writes it. It is staged byte-exact: no transform, line-shape or `ensure_prefix` rule applies. Deliver it with `file = "<path>"`. Generation prints only the `ssh-ed25519 …` public key and its `SHA256:` fingerprint. It cannot be combined with `age_identity` (#294, design [ssh-signing-key](design/ssh-signing-key.md)) |
 | `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, not encrypted, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 The `pattern` rule was removed in 0.7.0; a key that still sets it fails at load. Write `regex = "<regex-escaped prefix>(?:<pattern>)"` instead ([removed forms](#removed-forms)).

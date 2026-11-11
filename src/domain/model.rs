@@ -43,8 +43,8 @@ pub struct Rules {
     /// (design `sealed-target` §3.1-8, T14).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub age_identity: bool,
-    /// The key holds a fresh Ed25519 OpenSSH keypair (`ssh-ed25519 …`), made by opv with
-    /// `ssh-keygen`'s encoding (#294). Mutually exclusive with `age_identity`.
+    /// An unencrypted Ed25519 OpenSSH private key (#294), delivered only as a file. Mutually
+    /// exclusive with `age_identity`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ssh_ed25519: bool,
 }
@@ -214,13 +214,17 @@ impl KeySpec {
         if self.personal || self.from.is_some() {
             return false;
         }
-        // An identity carries its meaning in the flag, so a prefix rule describing its text
-        // (`AGE-SECRET-KEY-1`) does not make it provider-issued (§7.1).
-        if r.age_identity || r.ssh_ed25519 {
-            return true;
-        }
         if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
             return false;
+        }
+        // An identity is exactly one generation format, a secret, and an SSH identity is
+        // delivered only as a file (0.18.3).
+        if r.age_identity || r.ssh_ed25519 {
+            return r.age_identity != r.ssh_ed25519
+                && r.base64_bytes.is_none()
+                && r.hex_bytes.is_none()
+                && self.kind == Kind::Secret
+                && (!r.ssh_ed25519 || self.file.is_some());
         }
         matches!(
             (r.base64_bytes, r.hex_bytes),
