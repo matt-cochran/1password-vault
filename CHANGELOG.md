@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-11
+
+0.20.0 makes the npm release refuse anything that was not qualified, tests the installed binary harder before release, and pins Rust 1.99.1.
+
+### Changed
+
+- **The manual npm publish refuses an unqualified release (#295).** `scripts/npm/publish-manual.sh` must run from a clean checkout of the tag; it verifies the release's qualified candidate (the retained artifact, or the GitHub release's assets with an attested `manifest.json`) and publishes through the same verified path as CI. A missing or extra file fails. The GitHub release now carries the value-free qualification evidence.
+- **Release qualification tests the installed binary more (#295):** it delivers a disposable Ed25519 key through the installed `opv` and checks its bytes, mode and that it never reaches output, and it installs through `install.sh` on Linux and macOS.
+- **Rust 1.99.1 is pinned** (`rust-toolchain.toml`, every CI and release build; CI fails on any other `rustc`). Every direct dependency is on its latest major version.
+
+### Added
+
+- **`docs/install.md` has an update command** (`npm i -g @matthew-cochran/opv@latest`).
+- **Recorded 1Password service-account behaviour (#304):** `docs/design/spike-304-findings.md` and the scrubbed replies in `tests/fixtures/op/success/s30`–`s35` show what a service account's own token and an owner can see of its grants, the evidence behind `--verify-reader`.
+
 ## [0.19.0] - 2026-11-10
 
 0.19.0 records when CI credentials expire and rotates them in one step, lets an Azure target deploy from GitHub Actions with no stored secret, and prints the public half of every identity a provision set generates.

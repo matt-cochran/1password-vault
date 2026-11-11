@@ -60,24 +60,18 @@ unset T
 | Q2 | (F18) Does `vault list` under the token show exactly the granted vaults? | s31 | **Yes.** Only vault A (granted `read_items` at creation); vault B is absent. It shows no permission level. |
 | Q3 | Does the owner's `vault user list` show the service account and its permissions? | s32 | **No.** The granted vault lists only the owner (`type: "MEMBER"`). Service accounts do not appear in `op vault user list` at all. Permission names on this tier are `allow_viewing`, `allow_editing`, `allow_managing`, not `read_items`. |
 | Q4 | Is the service account absent from a vault it was not granted? | s33 | Yes, trivially: it is absent from both (see Q3). |
-| Q5 | (F17) Can a service account's grants change after creation? | s34, s35 | **Inconclusive.** `vault user grant … --permissions read_items` failed: "the vault permission read_items is not valid for your account tier". The test used the wrong permission name for this tier, so it does not show whether a grant after creation is possible. s35 is unchanged (vault A only). |
+| Q5 | (F17) Can a service account's grants change after creation? | s34, s35; 1Password docs | **No, per 1Password.** The recorded `vault user grant … --permissions read_items` failed only because `read_items` is not a valid name on this tier, so the recording itself does not decide it; 1Password's [service-account management documentation](https://developer.1password.com/docs/service-accounts/manage-service-accounts/) states that vaults and vault permissions cannot be added or edited after creation (cited by `docs/reader-grants.md`). |
 
 ## 5. What this can and cannot prove
 
 - **The token's own view proves identity and vault set.** `whoami` (Q1) binds a run to one
   service-account user in one account, and `vault list` (Q2) shows exactly the vaults it can
   open, so an extra vault is detectable from CI without any owner session.
-- **Nothing shows a service account's permission level after the fact.** Neither the token's
-  view (Q2) nor the owner's `vault user list` (Q3) shows it. The only record of a service
-  account's permissions is what was asked for at `op service-account create`. So permission
-  levels can only be *verified at issuance*, by opv issuing the account itself and recording
-  what it asked for (TRIZ route "bypass"). In CI they are reported as `verified_at_issuance`,
-  never as live-verified.
-- **Existing behaviour affected:** `opv access` looks for CI readers in `op vault user list`
-  (`no_ci_reader`, `ci_reader_can_write`). Q3 shows service accounts never appear there, so on
-  this tier those findings cannot see a service account at all. The #304 work must make that
-  explicit (`not_supported` for service accounts) rather than report "no reader".
-- **Still open (Q5).** Whether grants can change after creation decides how long an issuance
-  receipt stays trustworthy. Until it is settled, the design treats a receipt as valid only
-  together with the CI-side vault-set check (Q2) on every run, which catches an added vault
-  whatever the answer.
+- **Nothing shows a service account's permission level after the fact** (Q2, Q3). Permission
+  levels are only knowable from the creation request; with grants immutable after creation
+  (Q5), that request is an upper bound on the identity's authority.
+- **Shipped as:** `opv access <env> --create … --grant-receipt` and
+  `opv access <env> --verify-reader` (PR #310, [reader grants](../reader-grants.md)), which
+  rest on exactly these facts.
+- **Follow-up:** `opv access`'s audit reads `op vault user list`, where service accounts never
+  appear (Q3), so it cannot see a CI reader or deploy identity there (#314).
