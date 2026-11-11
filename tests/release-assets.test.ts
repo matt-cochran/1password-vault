@@ -1,7 +1,7 @@
-import { hash, checks, platforms as qualificationPlatforms, validateQualification, validateNpmMetadata, type Qualification } from '../scripts/qualify-distribution.ts';
+import { hash, checks, checksFor, disposableEd25519Key, revealsKey, platforms as qualificationPlatforms, validateQualification, validateNpmMetadata, type Qualification } from '../scripts/qualify-distribution.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findRetainedCandidate, npmPublishAction, orderNpmTarballs, publishNpmTarballs, validate, waitForIntegrity, type Manifest } from '../scripts/release-assets.ts';
+import { candidatePath, findRetainedCandidate, npmPublishAction, npmPublishArgs, orderNpmTarballs, publishNpmTarballs, releaseAssetName, validate, waitForIntegrity, type Manifest } from '../scripts/release-assets.ts';
 const repository = 'matt-cochran/1password-vault';
 const tree = 'a'.repeat(40);
 const actual: Record<string, string> = {};
@@ -12,7 +12,7 @@ const input = { version: '0.18.3', tree, source_sha: 'b'.repeat(40), run_id: 12,
 actual['input.json'] = hash(JSON.stringify(input) + '\n');
 const qualifications = Object.fromEntries(Object.keys(qualificationPlatforms).map(platform => {
   const q: Qualification = { schema: 1, platform, version: input.version, source_sha: input.source_sha, tree, run_id: 12, run_attempt: 2,
-    input_sha256: hash(JSON.stringify(input)), binary_sha256: 'd'.repeat(64), checks: [...checks] };
+    input_sha256: hash(JSON.stringify(input)), binary_sha256: 'd'.repeat(64), checks: checksFor(platform) };
   actual[`qualification/${platform}.json`] = hash(JSON.stringify(q) + '\n');
   return [platform, q];
 }));
@@ -177,14 +177,14 @@ test('all six exact positive native/npm capability receipts are mandatory', () =
   const missing = { ...qualifications }; delete missing['win32-arm64'];
   assert.throws(() => validate({ ...manifest, qualifications: missing }, run, repository, tree, actual));
   const q = qualifications['linux-x64'];
-  for (const changed of [{ ...q, checks: checks.slice(1) }, { ...q, version: '0.18.2' }, { ...q, run_attempt: 1 },
+  for (const changed of [{ ...q, checks: checksFor('linux-x64').slice(1) }, { ...q, version: '0.18.2' }, { ...q, run_attempt: 1 },
     { ...q, binary_sha256: 'e'.repeat(64) }, { ...q, source_sha: 'c'.repeat(40) }, { ...q, platform: 'darwin-x64' },
     { ...q, input_sha256: 'e'.repeat(64) }]) {
     assert.throws(() => validateQualification(changed, input, 'linux-x64'));
   }
 });
 test('qualified receipt bytes and original input checksums cannot be substituted', () => {
-  const changed = { ...qualifications['linux-x64'], checks: checks.slice(1) };
+  const changed = { ...qualifications['linux-x64'], checks: checksFor('linux-x64').slice(1) };
   assert.throws(() => validate({ ...manifest, qualifications: { ...qualifications, 'linux-x64': changed } }, run, repository, tree, actual));
   const changedInput = { ...input, files: { ...input.files, 'dist/opv': 'e'.repeat(64) } };
   assert.throws(() => validate({ ...manifest, input: changedInput }, run, repository, tree, actual));
@@ -207,4 +207,42 @@ test('fresh npm install cannot mask wrong package versions or optional dependenc
     { ...main, optionalDependencies: {} }]) assert.throws(() => validateNpmMetadata(wrong, native, '0.18.3', 'linux-x64'));
   for (const wrong of [{ ...native, version: '0.18.2' }, { ...native, name: '@another/opv-linux-x64' },
     { ...native, os: ['darwin'] }, { ...native, cpu: ['arm64'] }]) assert.throws(() => validateNpmMetadata(main, wrong, '0.18.3', 'linux-x64'));
+});
+
+test('a CI npm publish asks npm for provenance', () => {
+  assert.ok(npmPublishArgs('pkg.tgz', true).includes('--provenance'));
+});
+test('a local npm publish does not ask npm for provenance', () => {
+  assert.ok(!npmPublishArgs('pkg.tgz', false).includes('--provenance'));
+});
+test('every retained candidate file round-trips through its release asset name', () => {
+  const paths = ['manifest.json', ...Object.keys(actual), 'npm/matthew-cochran-opv-linux-x64-0.18.3.tgz', 'npm/matthew-cochran-opv-0.18.3.tgz']
+    .filter(path => !path.startsWith('npm/package-'));
+  assert.deepEqual(paths.map(path => candidatePath(releaseAssetName(path))), paths);
+});
+test('a release asset that is not part of a candidate is refused', () => {
+  assert.throws(() => candidatePath('notes.txt'));
+});
+test('a linux qualification must include Ed25519 file delivery', () => {
+  assert.ok(checksFor('linux-arm64').includes('native-ed25519-file-delivery'));
+});
+test('a non-linux qualification must include the refused Ed25519 file delivery', () => {
+  assert.ok(checksFor('darwin-arm64').includes('native-ed25519-file-delivery-refused'));
+});
+test('a linux receipt without the file delivery check does not qualify', () => {
+  assert.throws(() => validateQualification({ ...qualifications['linux-x64'], checks: [...checks] }, input, 'linux-x64'));
+});
+test('the disposable qualification key is an unencrypted OpenSSH Ed25519 private key', () => {
+  const body = Buffer.from(disposableEd25519Key().split('\n').filter(line => line && !line.startsWith('-----')).join(''), 'base64');
+  assert.ok(body.subarray(0, 60).toString('latin1').startsWith('openssh-key-v1\0\0\0\0\x04none\0\0\0\x04none'));
+});
+test('output holding one base64 line of the key reveals it', () => {
+  const key = disposableEd25519Key();
+  assert.ok(revealsKey(`noise ${key.split('\n')[2]} noise`, key));
+});
+test('a macOS qualification must include the install script', () => {
+  assert.ok(checksFor('darwin-x64').includes('install-script'));
+});
+test('a Windows qualification has no install script check', () => {
+  assert.ok(!checksFor('win32-x64').includes('install-script'));
 });
