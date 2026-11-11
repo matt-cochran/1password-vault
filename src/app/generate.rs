@@ -35,6 +35,8 @@ pub enum Recipe {
     /// A fresh age X25519 identity (`AGE-SECRET-KEY-1…`), whose public `age1…`
     /// recipient is printed for the sealed target's `recipients` (§7.1).
     AgeIdentity,
+    /// An Ed25519 OpenSSH private key; only its public key/fingerprint is shown.
+    SshEd25519,
 }
 
 impl Recipe {
@@ -44,6 +46,9 @@ impl Recipe {
             Recipe::Base64(n) => format!("base64, {n} random bytes"),
             Recipe::Hex(n) => format!("hex, {n} random bytes"),
             Recipe::AgeIdentity => "an age X25519 identity".to_string(),
+            Recipe::SshEd25519 => {
+                "an Ed25519 OpenSSH signing identity (private file delivery)".to_string()
+            }
         }
     }
 }
@@ -72,11 +77,6 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     if super::deliver_only::is_infrastructure(spec) {
         return refuse(GenerateRefusal::Infrastructure);
     }
-    // An age identity carries its meaning in the flag, not a byte count, so it is chosen
-    // before any shape rule that would otherwise refuse it (§7.1).
-    if r.age_identity {
-        return Ok(Recipe::AgeIdentity);
-    }
     if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
         return refuse(GenerateRefusal::ProviderIssued);
     }
@@ -85,6 +85,19 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     }
     if let Some(from) = &spec.from {
         return refuse(GenerateRefusal::Shared { from: from.clone() });
+    }
+    // Structured generation obeys the same provider/personal/shared guards as
+    // random bytes. Only one explicit recipe can be selected at a time.
+    if r.age_identity || r.ssh_ed25519 {
+        if !spec.has_generate_recipe() {
+            return refuse(GenerateRefusal::NoByteCount);
+        }
+        if r.age_identity {
+            return Ok(Recipe::AgeIdentity);
+        }
+        if r.ssh_ed25519 {
+            return Ok(Recipe::SshEd25519);
+        }
     }
     match (r.base64_bytes, r.hex_bytes) {
         (Some(n), None) if (16..=1024).contains(&n) => Ok(Recipe::Base64(n)),
@@ -112,13 +125,16 @@ pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
     let n = match recipe {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
         Recipe::AgeIdentity => return Ok(make_identity().0),
+        Recipe::SshEd25519 => return Ok(make_ssh_identity()?.0),
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
     getrandom::fill(&mut bytes).map_err(|_| -> Error { random_source_failed() })?;
     let text = match recipe {
         Recipe::Base64(_) => base64::engine::general_purpose::STANDARD.encode(&*bytes),
         Recipe::Hex(_) => hex::encode(&*bytes),
-        Recipe::AgeIdentity => unreachable!("handled by the early return above"),
+        Recipe::AgeIdentity | Recipe::SshEd25519 => {
+            unreachable!("handled by the early return above")
+        }
     };
     Ok(SecretValue::new(text))
 }
@@ -132,6 +148,29 @@ fn make_identity() -> (SecretValue, String) {
         SecretValue::new(identity.to_string().expose_secret().to_owned()),
         recipient,
     )
+}
+
+/// No external key generator or value-bearing argv. The existing audited SSH
+/// codec owns serialization; temporary seed/private strings zeroize on drop.
+fn make_ssh_identity() -> Result<(SecretValue, String), Error> {
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *seed).map_err(|_| -> Error { random_source_failed() })?;
+    let pair = ssh_key::private::Ed25519Keypair::from_seed(&seed);
+    let private = ssh_key::PrivateKey::from(pair);
+    // Ed25519 is infallibly serializable in the enabled OpenSSH format. Errors
+    // are reduced to fixed local-I/O diagnostics, never key/codec debug data.
+    let encoded = private
+        .to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|_| -> Error { random_source_failed() })?;
+    let public = private
+        .public_key()
+        .to_openssh()
+        .map_err(|_| -> Error { random_source_failed() })?;
+    let fingerprint = private.public_key().fingerprint(ssh_key::HashAlg::Sha256);
+    Ok((
+        SecretValue::new(encoded.to_string()),
+        format!("{public}\n{fingerprint}"),
+    ))
 }
 
 /// Generate each `product/KEY` in `env_name` and write it into 1Password.
@@ -178,6 +217,11 @@ pub fn run_on(
                 let (value, recipient) = make_identity();
                 writes.push((p.clone(), k.clone(), value));
                 recipients.push(Some(recipient));
+            }
+            Recipe::SshEd25519 => {
+                let (value, public) = make_ssh_identity()?;
+                writes.push((p.clone(), k.clone(), value));
+                recipients.push(Some(public));
             }
             _ => {
                 writes.push((p.clone(), k.clone(), make(*rcp)?));

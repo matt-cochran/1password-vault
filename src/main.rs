@@ -1644,7 +1644,7 @@ enum ProposeCmd {
         #[command(flatten)]
         out: ProposeOut,
     },
-    /// Generated values for rule-backed keys (base64_bytes / hex_bytes).
+    /// Generated values for rule-backed keys (base64_bytes / hex_bytes / age_identity / ssh_ed25519).
     #[command(before_help = PROPOSE_GENERATE_QUICK)]
     Generate {
         /// Environment name from the configuration.

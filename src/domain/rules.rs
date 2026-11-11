@@ -354,6 +354,27 @@ pub fn check_verbatim(
             return Err(fail_with("prefix_by_mode", why));
         }
     }
+    if r.age_identity {
+        let identities: Vec<_> = v
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        if identities.len() != 1 || identities[0].parse::<age::x25519::Identity>().is_err() {
+            return Err(fail("age_identity", "not one valid age X25519 identity"));
+        }
+    }
+    if r.ssh_ed25519 {
+        let valid = ssh_key::PrivateKey::from_openssh(v).is_ok_and(|private| {
+            !private.is_encrypted() && private.algorithm() == ssh_key::Algorithm::Ed25519
+        });
+        if !verbatim || !valid {
+            return Err(fail(
+                "ssh_ed25519",
+                "not an unencrypted Ed25519 OpenSSH private key delivered as a file",
+            ));
+        }
+    }
     if verbatim {
         return Ok(Some(SecretValue::new(v.to_string())));
     }

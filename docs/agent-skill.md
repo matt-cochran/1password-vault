@@ -36,6 +36,11 @@ declared with `file = "<path>"` is filled from a file instead: the person runs
 `opv set <KEY> --env <env> --from-file <PATH>` in their own terminal, so its line breaks
 and trailing newline survive. You never read that file, never write it and never keep a
 copy of what is in it.
+For a GitHub Actions target, a UTF-8 file-backed **secret** is delivered under its secret
+name with exact line breaks (including terminal CRLF), not as a mounted file or config
+variable. `explain --target <target> --env <env> --json` advertises
+`file_delivery.channel = "secret_api"` and `utf8_verbatim = true` when supported. Do not
+compact or encode a PEM key to bypass an unsupported installed version; upgrade first.
 
 ## The assistant proposes; a person applies; CI delivers
 
@@ -126,10 +131,20 @@ may open or set an environment's values: propose them and let the user review th
 
 ## Self-made secrets
 
-For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
+For a key with `base64_bytes`, `hex_bytes`, `age_identity = true` or
+`ssh_ed25519 = true`, ask the user,
 then propose it with `opv_propose` `kind: generate` (CLI: `opv propose generate <env>
 <product/KEY>`), and have the person run `opv apply <plan_id>`: the value goes straight into
 1Password and is never shown. Never suggest `openssl rand` or pasting generated values.
+
+An Ed25519 signing identity uses `kind = "secret"`, `source = "generated"`,
+`file = "signing-key"` and `rules = { ssh_ed25519 = true }`. Declare
+`[products.<p>.local] secrets_dir_env = "APP_SECRET_FILES"` for local file delivery.
+The generated, unencrypted OpenSSH private key stays in the concealed 1Password field;
+apply prints only the public SSH key and SHA256 fingerprint. Runtime file delivery
+preserves its multiline bytes and final newline. Existing nonempty fields are never
+replaced by generation. Generation does not install or grant trust to the public key;
+review allowed signers separately. Each key selects exactly one generation format.
 
 A held immutable key on Fly that blocks a product's delivery revision can be attested
 (`opv_propose` `kind: attest`, then the person's `opv apply <plan_id> --attest …`): explain
