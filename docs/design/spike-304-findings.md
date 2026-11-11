@@ -52,19 +52,32 @@ unset T
 2. `op vault delete "$VA"` and `op vault delete "$VB"`, then revoke `opv-spike-304` in
    1Password (Developer → Service accounts). opv cannot delete a service account.
 
-## 4. Findings (fill in)
+## 4. Findings (recorded 2026-11-11, op 2.40.0, a Teams-tier account)
 
 | # | Question | Evidence | Answer |
 |---|---|---|---|
-| Q1 | Does `whoami` under a token name a stable user id and account id, and is its type exactly `SERVICE_ACCOUNT`? | s30 | |
-| Q2 | (F18) Does `vault list` under the token show exactly the granted vaults (VA, not VB)? | s31 | |
-| Q3 | Does the owner's `vault user list` show the service account, its type string and permission names (`read_items`, …)? | s32 | |
-| Q4 | Is the service account absent from a vault it was not granted? | s33 | |
-| Q5 | (F17) Can a service account's grants change after creation? Exit code and message. | s34, s35 | |
+| Q1 | Does `whoami` under a token name a stable user id and account id, and is its type exactly `SERVICE_ACCOUNT`? | s30 | **Yes.** `user_uuid`, `account_uuid`, `user_type: "SERVICE_ACCOUNT"` (also `ServiceAccountType: "SERVICE_ACCOUNT"`). The type string in `src/domain/access.rs` is confirmed for `whoami`. |
+| Q2 | (F18) Does `vault list` under the token show exactly the granted vaults? | s31 | **Yes.** Only vault A (granted `read_items` at creation); vault B is absent. It shows no permission level. |
+| Q3 | Does the owner's `vault user list` show the service account and its permissions? | s32 | **No.** The granted vault lists only the owner (`type: "MEMBER"`). Service accounts do not appear in `op vault user list` at all. Permission names on this tier are `allow_viewing`, `allow_editing`, `allow_managing`, not `read_items`. |
+| Q4 | Is the service account absent from a vault it was not granted? | s33 | Yes, trivially: it is absent from both (see Q3). |
+| Q5 | (F17) Can a service account's grants change after creation? | s34, s35 | **Inconclusive.** `vault user grant … --permissions read_items` failed: "the vault permission read_items is not valid for your account tier". The test used the wrong permission name for this tier, so it does not show whether a grant after creation is possible. s35 is unchanged (vault A only). |
 
 ## 5. What this can and cannot prove
 
-Fill in once the replies are recorded. At minimum: the token's own view (Q1, Q2) shows identity
-and vault visibility but not permission levels; only the owner's view (Q3) shows permission
-names. If Q5 shows grants can change after creation, a receipt is only as fresh as its last
-owner audit, and the design's freshness window has to account for that.
+- **The token's own view proves identity and vault set.** `whoami` (Q1) binds a run to one
+  service-account user in one account, and `vault list` (Q2) shows exactly the vaults it can
+  open, so an extra vault is detectable from CI without any owner session.
+- **Nothing shows a service account's permission level after the fact.** Neither the token's
+  view (Q2) nor the owner's `vault user list` (Q3) shows it. The only record of a service
+  account's permissions is what was asked for at `op service-account create`. So permission
+  levels can only be *verified at issuance*, by opv issuing the account itself and recording
+  what it asked for (TRIZ route "bypass"). In CI they are reported as `verified_at_issuance`,
+  never as live-verified.
+- **Existing behaviour affected:** `opv access` looks for CI readers in `op vault user list`
+  (`no_ci_reader`, `ci_reader_can_write`). Q3 shows service accounts never appear there, so on
+  this tier those findings cannot see a service account at all. The #304 work must make that
+  explicit (`not_supported` for service accounts) rather than report "no reader".
+- **Still open (Q5).** Whether grants can change after creation decides how long an issuance
+  receipt stays trustworthy. Until it is settled, the design treats a receipt as valid only
+  together with the CI-side vault-set check (Q2) on every run, which catches an added vault
+  whatever the answer.

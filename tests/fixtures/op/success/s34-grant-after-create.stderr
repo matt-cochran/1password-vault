@@ -1,0 +1,1 @@
+[ERROR] 2026/11/11 10:24:22 failed to grant permissions to the user "<SERVICE_ACCOUNT_USER>" for vault "<VAULT_B>": the vault permission read_items is not valid for your account tier
