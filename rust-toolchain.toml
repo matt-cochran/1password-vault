@@ -1,0 +1,4 @@
+# The one Rust every build uses: CI, release builds and contributors (rustup reads this file).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

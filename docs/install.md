@@ -69,7 +69,7 @@ Windows: rename the `.exe` to `opv.exe` and put it on your `PATH`.
 cargo install --git https://github.com/matt-cochran/1password-vault --locked
 ```
 
-The minimum supported Rust version is 1.99.
+The minimum supported Rust version is 1.99.1.
 
 ### npm
 

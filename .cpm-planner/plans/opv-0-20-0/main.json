@@ -1,0 +1,494 @@
+{
+  "deliverables": [
+    {
+      "id": "spike-304-sa-visibility",
+      "owned_files": [
+        "docs/design/spike-304-findings.md",
+        "tests/fixtures/op/success/s30-whoami-service-account.json",
+        "tests/fixtures/op/success/s31-vault-list-service-account.json",
+        "tests/fixtures/op/success/s32-vault-user-list-service-account.json"
+      ],
+      "prerequisites": [],
+      "estimate": {
+        "optimistic": 1,
+        "likely": 1.5,
+        "pessimistic": 3
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "docs/design/spike-304-findings.md plus names-only recorded op replies: under a disposable service account, `op whoami --format json` (user id, account id, type string SERVICE_ACCOUNT confirmed or corrected), `op vault list --format json` (exactly the granted vaults or not, F18); in the owner session, `op vault user list <vault> --format json` showing the service account and its permission names; whether a service account's vault grants can change after creation (F17). States exactly what each reply can and cannot prove. No token or value recorded; canary scan clean.",
+        "owner": "owner",
+        "kind": "manual",
+        "track": "304",
+        "issue": 304
+      }
+    },
+    {
+      "id": "grant-receipt-design",
+      "owned_files": [
+        "docs/design/ci-reader-grants.md",
+        {
+          "path": "docs/design/requirements.md",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "spike-304-sa-visibility",
+          "consumes": "what op proves under a service account and an owner session"
+        }
+      ],
+      "estimated_effort_hours": 2,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "docs/design/ci-reader-grants.md and a requirements.md FR entry: the TRIZ-chosen design (.triz/ci-reader-grants.result.json, separation by condition/system level/time): an owner-written names-only grant receipt (reader user id, account id, vault ids, permission names, issued_at, contract identity) in the 1Password manifest, refreshed by issuance, rotation and an owner audit; `opv access <env> --verify` in CI checks whoami identity = receipt, visible vaults within the receipt, receipt freshness, contract identity match, and reports permission levels as verified_at_issuance; every check verified | not_verified | not_supported, never a success on unknown. JSON schema of the report.",
+        "owner": "agent",
+        "contract": true,
+        "track": "304",
+        "issue": 304
+      }
+    },
+    {
+      "id": "grant-receipt-domain",
+      "owned_files": [
+        "src/domain/grant_receipt.rs",
+        "src/domain/grant_receipt_tests.rs",
+        {
+          "path": "src/domain/mod.rs",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "grant-receipt-design",
+          "consumes": "receipt fields and finding states",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 3,
+        "likely": 4,
+        "pessimistic": 6
+      },
+      "earning_rule": "fifty_fifty",
+      "metadata": {
+        "artifact": "src/domain/grant_receipt.rs: pure receipt model (parse/render, names only) and the evaluation of observations against receipt and contract into findings; one test per rejection: wrong account, wrong or extra vault, write/create permission, mismatched identity, stale receipt, incomplete provider read, unknown permission = not_verified.",
+        "owner": "agent",
+        "track": "304",
+        "issue": 304
+      }
+    },
+    {
+      "id": "grant-receipt-issue",
+      "owned_files": [
+        "src/app/access_create.rs",
+        "src/app/access_create_tests.rs",
+        "src/app/access.rs",
+        "src/app/access_tests.rs",
+        {
+          "path": "src/adapters/onepassword_manifest.rs",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "grant-receipt-domain",
+          "consumes": "receipt model"
+        }
+      ],
+      "estimate": {
+        "optimistic": 3,
+        "likely": 4,
+        "pessimistic": 7
+      },
+      "earning_rule": "fifty_fifty",
+      "metadata": {
+        "artifact": "Owner flows write the receipt: `opv access --create` and `--rotate` record it after the token verifies; `opv access <env> --audit` (owner session, `op vault user list`) refreshes it. Owner-only (refused under a service account, policy_refused); fresh read and version check on every manifest write (FR-19); existing access, sync and delivery semantics unchanged (their tests pass untouched).",
+        "owner": "agent",
+        "track": "304",
+        "issue": 304
+      }
+    },
+    {
+      "id": "access-verify-ci",
+      "owned_files": [
+        "src/app/access_verify.rs",
+        "src/app/access_verify_tests.rs",
+        {
+          "path": "src/app/mod.rs",
+          "mode": "append"
+        },
+        {
+          "path": "src/main.rs",
+          "mode": "append"
+        },
+        {
+          "path": "tests/e2e/expected/surface.json",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "grant-receipt-domain",
+          "consumes": "finding evaluation"
+        }
+      ],
+      "estimate": {
+        "optimistic": 4,
+        "likely": 5,
+        "pessimistic": 8
+      },
+      "earning_rule": "fifty_fifty",
+      "metadata": {
+        "artifact": "`opv access <env> --verify [--json]`: under the CI reader's own token, reads whoami, its vault list and the receipt (no owner session, no item value read, no write); prints the names-only report; exit non-zero unless every required check is verified. Fake-provider positive and negative tests per finding; marker values never reach argv or output.",
+        "owner": "agent",
+        "track": "304",
+        "issue": 304
+      }
+    },
+    {
+      "id": "grants-docs",
+      "owned_files": [
+        {
+          "path": "docs/usage.md",
+          "mode": "append"
+        },
+        {
+          "path": "docs/configuration.md",
+          "mode": "append"
+        },
+        {
+          "path": "llms.txt",
+          "mode": "append"
+        },
+        {
+          "path": "docs/agent-skill.md",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "grant-receipt-issue",
+          "consumes": "owner commands"
+        },
+        {
+          "id": "access-verify-ci",
+          "consumes": "CI command and report"
+        }
+      ],
+      "estimated_effort_hours": 1.5,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Owner and CI qualification procedure: issue/rotate/audit, then `opv access <env> --verify` in the fixture job before any fixture is materialized; exactly what provider evidence can and cannot prove (from the spike).",
+        "owner": "agent",
+        "track": "304",
+        "issue": 304
+      }
+    },
+    {
+      "id": "q295-gap-audit",
+      "owned_files": [
+        ".delivery/v0200/q295-gaps.md"
+      ],
+      "prerequisites": [],
+      "estimated_effort_hours": 1,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": ".delivery/v0200/q295-gaps.md: each #295 acceptance line against scripts/qualify-distribution.ts, release.yml and scripts/npm/publish-manual.sh as of 0.19.0: met (with the line that proves it) or gap.",
+        "owner": "agent",
+        "track": "295",
+        "issue": 295,
+        "scope_folded": false
+      }
+    },
+    {
+      "id": "q295-gate-fixes",
+      "owned_files": [
+        "scripts/qualify-distribution.ts",
+        "scripts/npm/publish-manual.sh",
+        {
+          "path": ".github/workflows/release.yml",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "q295-gap-audit",
+          "consumes": "gap list"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1,
+        "likely": 3,
+        "pessimistic": 6
+      },
+      "earning_rule": "fifty_fifty",
+      "metadata": {
+        "artifact": "Every gap closed; in particular the manual npm publish refuses to publish the main package unless the release's qualification evidence for that tag is green and every platform package exists. Value-free evidence retained as a release asset.",
+        "owner": "agent",
+        "track": "295",
+        "issue": 295,
+        "scope_folded": false
+      }
+    },
+    {
+      "id": "close-299",
+      "owned_files": [],
+      "prerequisites": [],
+      "estimated_effort_hours": 0.25,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "#299 closed with an evidence comment: shipped in 0.18.3 (CHANGELOG, commit be6dcec, the GitHub secret byte preservation CI job).",
+        "owner": "manager",
+        "kind": "manual",
+        "track": "299",
+        "issue": 299
+      }
+    },
+    {
+      "id": "toolchain-pin",
+      "owned_files": [
+        "rust-toolchain.toml",
+        {
+          "path": ".github/workflows/ci-checks.yml",
+          "mode": "append"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "mode": "append"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "mode": "append"
+        },
+        {
+          "path": "Cargo.toml",
+          "mode": "append"
+        },
+        {
+          "path": "CONTRIBUTING.md",
+          "mode": "append"
+        },
+        {
+          "path": "docs/install.md",
+          "mode": "append"
+        },
+        {
+          "path": "README.md",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [],
+      "estimated_effort_hours": 1,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Rust 1.99.1 pinned everywhere: rust-toolchain.toml (channel 1.99.1, rustfmt + clippy), every dtolnay/rust-toolchain step given toolchain: 1.99.1 (CI, release builds), rust-version = \"1.99.1\" in Cargo.toml; README/CONTRIBUTING/install docs say 1.99.1. A CI step fails if rustc --version is not 1.99.1.",
+        "owner": "agent",
+        "track": "deps"
+      }
+    },
+    {
+      "id": "deps-major-upgrade",
+      "owned_files": [
+        {
+          "path": "Cargo.toml",
+          "mode": "append"
+        },
+        {
+          "path": "Cargo.lock",
+          "mode": "append"
+        },
+        {
+          "path": "deny.toml",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "toolchain-pin",
+          "consumes": "pinned 1.99.1 toolchain the upgrade resolves against"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 2,
+        "pessimistic": 6
+      },
+      "earning_rule": "fifty_fifty",
+      "metadata": {
+        "artifact": "Every direct dependency on its latest major release (`cargo upgrade --incompatible`, then `cargo update`), API breaks fixed in place; transitive older majors listed with the crate that holds them (2026-11-11: all 31 direct deps already latest; base64 0.22, block-buffer 0.10, generic-array, kem held by age/crypto_box/ssh-key). cargo deny clean; build and changed-scope tests green. Re-run at release time.",
+        "owner": "agent",
+        "track": "deps",
+        "scope_folded": false
+      }
+    },
+    {
+      "id": "version-bump",
+      "owned_files": [
+        {
+          "path": "Cargo.toml",
+          "mode": "append"
+        },
+        {
+          "path": "Cargo.lock",
+          "mode": "append"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "mode": "append"
+        }
+      ],
+      "prerequisites": [
+        {
+          "id": "grants-docs",
+          "consumes": "final 304 surface for the changelog"
+        },
+        {
+          "id": "q295-gate-fixes",
+          "consumes": "295 changes for the changelog"
+        },
+        {
+          "id": "deps-major-upgrade",
+          "consumes": "upgraded lockfile for the release"
+        }
+      ],
+      "estimated_effort_hours": 0.5,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Version 0.20.0 in Cargo.toml/lock and version-pinned docs/fixtures; CHANGELOG 0.20.0 entry citing #295 and #304.",
+        "owner": "agent"
+      }
+    },
+    {
+      "id": "integration-candidate",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "version-bump",
+          "consumes": "all 0.20.0 changes on feat/0.20.0"
+        }
+      ],
+      "estimated_effort_hours": 1,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "feat/0.20.0 joined tree: fmt, clippy -D warnings, cargo deny and the changed modules' tests green locally; PR into dev opened.",
+        "owner": "manager"
+      }
+    },
+    {
+      "id": "regression-gate",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "integration-candidate",
+          "consumes": "integration branch tree"
+        }
+      ],
+      "duration_hours": 0.75,
+      "estimated_effort_hours": 0,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "PR feat/0.20.0 \u2192 dev with green ci.yml on the candidate tree; evidence = run URL + tree SHA + Cargo.lock hash",
+        "owner": "ci",
+        "kind": "gate",
+        "candidate": "integration-candidate",
+        "evidence_scope": "gate"
+      }
+    },
+    {
+      "id": "dev-merge",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "regression-gate",
+          "consumes": "green CI"
+        }
+      ],
+      "estimated_effort_hours": 0.25,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "owner merges the 0.20.0 PR into dev",
+        "owner": "owner",
+        "kind": "manual",
+        "evidence_scope": "merge"
+      }
+    },
+    {
+      "id": "promote-and-release",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "dev-merge",
+          "consumes": "dev at 0.20.0"
+        }
+      ],
+      "duration_hours": 2,
+      "estimated_effort_hours": 0.5,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "dev\u2192staging\u2192main merged, tag v0.20.0 on main, release.yml green with assets and qualification evidence",
+        "owner": "manager",
+        "kind": "gate",
+        "evidence_scope": "gate",
+        "candidate": "dev-merge"
+      }
+    },
+    {
+      "id": "npm-publish",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "promote-and-release",
+          "consumes": "tagged release assets"
+        }
+      ],
+      "estimated_effort_hours": 0.25,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "owner runs scripts/npm/publish-manual.sh v0.20.0; npm shows 0.20.0",
+        "owner": "owner",
+        "kind": "manual",
+        "evidence_scope": "publish"
+      }
+    },
+    {
+      "id": "fresh-install-smoke",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "npm-publish",
+          "consumes": "published 0.20.0"
+        }
+      ],
+      "estimated_effort_hours": 0.5,
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Fresh npm install of 0.20.0: `opv schema` lists `--verify` and `--audit` on access; `opv access <env> --verify --json` against a fixture config returns a names-only report with not_verified on a missing receipt",
+        "owner": "manager",
+        "kind": "gate",
+        "evidence_scope": "activation",
+        "candidate": "npm-publish"
+      }
+    },
+    {
+      "id": "v0-20-0-shipped",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "fresh-install-smoke",
+          "consumes": "published-artifact smoke evidence"
+        },
+        {
+          "id": "close-299",
+          "consumes": "remaining ticket closed"
+        }
+      ],
+      "milestone": true,
+      "metadata": {
+        "artifact": "opv 0.20.0 released; #295 and #304 closed with evidence; 0.20.0 milestone closed; no open tickets remain",
+        "owner": "owner",
+        "kind": "manual"
+      }
+    }
+  ]
+}
