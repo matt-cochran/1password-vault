@@ -202,7 +202,7 @@ fn replaced_token_identity_is_rejected() {
 }
 #[test]
 fn revoked_or_unreadable_native_identity_is_rejected() {
-    let (result, _, _) = verify_result(vec![Output::failure(1)]);
+    let (result, _, _) = verify_result(crate::runner::fake::failed_read(1).collect());
     assert!(result.is_err());
 }
 #[test]
