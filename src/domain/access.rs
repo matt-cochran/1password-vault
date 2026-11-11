@@ -7,9 +7,10 @@
 //! `access-writers`); counts and findings never carry a person's name or email, only
 //! service-account names are named.
 //!
-//! 1Password's `op vault user list` reports the `type` and `state` strings used here. The
-//! `SERVICE_ACCOUNT` type string is from 1Password's documentation and has not yet been
-//! confirmed against a live account.
+//! 1Password's `op vault user list` reports the `type` and `state` strings used here. Spike
+//! #304 (Q3, docs/design/spike-304-findings.md) found that a service account never appears
+//! in that list at all, so a CI reader that is not listed is `not_supported`
+//! ([`CI_READER_NOT_VISIBLE`]), never reported as absent.
 
 use std::collections::BTreeMap;
 
@@ -58,7 +59,10 @@ pub struct AccessFinding {
 const ACCESS_NOT_VISIBLE: &str = "access_not_visible";
 /// #153: a needed vault that `op vault get` cannot find in the selected account.
 pub const VAULT_NOT_IN_ACCOUNT: &str = "vault_not_in_account";
-const NO_CI_READER: &str = "no_ci_reader";
+/// #304, FR-70: an environment's CI reader cannot be checked from the vaults' access lists,
+/// because 1Password never lists a service account there (spike Q3): `not_supported`, never
+/// "no reader".
+pub const CI_READER_NOT_VISIBLE: &str = "ci_reader_not_visible";
 const CI_READER_CAN_WRITE: &str = "ci_reader_can_write";
 /// 0.9.0: several service accounts with one name read a vault, as after `opv access
 /// --create` made a replacement: the older one waits to be removed in 1Password.
@@ -90,6 +94,23 @@ pub fn no_writer(vault_id: &str, env: &str) -> AccessFinding {
              nobody can fix a value there until 1Password gives someone write access"
         ),
         next: None,
+    }
+}
+
+/// The `ci_reader_not_visible` finding for `env`: whether its CI reader exists and what it
+/// can read is not visible in any vault's access list. Its step creates the reader the way
+/// opv records what it issued (#304); an existing reader is checked under its own token.
+pub fn ci_reader_not_visible(env: &str) -> AccessFinding {
+    AccessFinding {
+        code: CI_READER_NOT_VISIBLE,
+        environment: env.to_string(),
+        message: format!(
+            "cannot check the CI reader of {env} here (not_supported): 1Password never lists a \
+             service account in a vault's access list, so whether it exists and what it can \
+             read is not visible; if it does not exist yet, create it with opv"
+        ),
+        // The token goes straight into the CI secret, never shown (0.9.0).
+        next: Some(format!("opv access {env} --create --github <owner/repo>")),
     }
 }
 
@@ -165,7 +186,7 @@ fn named(user: &serde_json::Map<String, Value>) -> String {
 }
 
 /// Findings for the analysed vaults, in input order, then by code order: access_not_visible,
-/// no_ci_reader, single_writer, ci_reader_can_write, pending_revoke. Each names the vault
+/// ci_reader_not_visible, single_writer, ci_reader_can_write, pending_revoke. Each names the vault
 /// and the environment that needs it (07.10); a step is a typed opv command.
 pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
     let mut out = Vec::new();
@@ -185,14 +206,9 @@ pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
             });
             continue;
         }
+        // #304 (spike Q3): no listed read-only service account is not "no reader".
         if access.deployed && !access.service_accounts.iter().any(|s| s.read_only) {
-            out.push(AccessFinding {
-                code: NO_CI_READER,
-                environment: env.to_string(),
-                message: format!("{env} deploys but has no read-only service account for CI"),
-                // The token goes straight into the CI secret, never shown (0.9.0).
-                next: Some(format!("opv access {env} --create --github <owner/repo>")),
-            });
+            out.push(ci_reader_not_visible(env));
         }
         // Correction 17: a deployed-tier vault needs a second writer to fix a value when
         // the first is unavailable. `next` is none: only 1Password can add a writer.

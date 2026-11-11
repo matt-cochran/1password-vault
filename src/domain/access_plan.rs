@@ -71,6 +71,10 @@ pub enum GrantState {
     /// #153: the vault is not in the selected account, or this person cannot open it at
     /// all (`op vault get` fails): no owner command for this principal can succeed here.
     NotInAccount,
+    /// #304, FR-70: a CI reader's grant on a vault whose access list was read but does not
+    /// name it. 1Password never lists a service account there (spike Q3), so the grant can
+    /// be neither confirmed nor called missing from this view.
+    NotSupported,
 }
 
 /// One required grant and its observed state.
@@ -201,6 +205,27 @@ pub fn compare(required: &[Grant], observed: &[ObservedVault<'_>]) -> AccessRepo
         checked,
         unclassified,
     }
+}
+
+/// #304, FR-70 (spike Q3): 1Password never lists a service account in a vault's access list,
+/// so a CI reader's grant that reads as [`GrantState::Missing`] is [`GrantState::NotSupported`]
+/// instead, counted as unclassified, never as checked. Returns the CI readers so marked,
+/// once each, in report order.
+pub fn mark_unlisted_ci_readers(report: &mut AccessReport) -> Vec<Principal> {
+    let mut marked: Vec<Principal> = Vec::new();
+    for check in &mut report.checks {
+        if check.state == GrantState::Missing
+            && matches!(check.grant.principal, Principal::CiReader { .. })
+        {
+            check.state = GrantState::NotSupported;
+            report.checked -= 1;
+            report.unclassified += 1;
+            if !marked.contains(&check.grant.principal) {
+                marked.push(check.grant.principal.clone());
+            }
+        }
+    }
+    marked
 }
 
 /// The state of one required grant: a vault not observed or with unknown readers is

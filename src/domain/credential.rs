@@ -87,6 +87,17 @@ pub fn ci_reader_expires_path(env: &str) -> String {
     format!("environments.{env}.ci_reader.expires_on")
 }
 
+/// The dotted bindings key of the CI reader's grant receipt in `env` (#304, FR-70).
+pub fn ci_reader_receipt_path(env: &str) -> String {
+    format!("environments.{env}.ci_reader.receipt")
+}
+
+/// The dotted bindings key of the grant receipt of `target`'s CI identity in `env` (#304,
+/// FR-70).
+pub fn ci_identity_receipt_path(env: &str, target: &str) -> String {
+    format!("environments.{env}.targets.{target}.ci_identity.receipt")
+}
+
 /// The dotted bindings key holding the deploy credential expiry date of `target` in `env`.
 pub fn deploy_expires_path(env: &str, target: &str) -> String {
     format!("environments.{env}.targets.{target}.deploy_credentials_expires_on")

@@ -24,10 +24,13 @@ use crate::cause::{
     ResourceKind, ResourceName, ResourceRef, Scope, System, TargetName, Upstream,
 };
 use crate::domain::Tier;
-use crate::domain::access::{AccessFinding, Reader, VAULT_NOT_IN_ACCOUNT, analyse, findings};
+use crate::domain::access::{
+    AccessFinding, CI_READER_NOT_VISIBLE, Reader, VAULT_NOT_IN_ACCOUNT, analyse,
+    ci_reader_not_visible, findings,
+};
 use crate::domain::access_plan::{
     AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
-    TargetNeeds, compare, create_command, required,
+    TargetNeeds, compare, create_command, mark_unlisted_ci_readers, required,
 };
 use crate::domain::capability::{self, Capability, UnknownSource};
 use crate::error::Error;
@@ -595,6 +598,9 @@ fn build(
             check.state = GrantState::NotInAccount;
         }
     }
+    // #304 (spike Q3): a CI reader is a service account, which no access list names, so an
+    // unlisted one is not_supported and gets no owner command (it may well exist).
+    let unlisted = mark_unlisted_ci_readers(&mut report);
     let commands = owner_commands(&report.checks);
     // A deployed-tier vault needs a second writer; a local tier does not (design row
     // `access-writers`).
@@ -637,7 +643,7 @@ fn build(
         }
         for finding in findings(&[access]) {
             // The CI-reader warning is about the CI reader; `--target` leaves it out.
-            if finding.code == "no_ci_reader" && need.ci.is_empty() {
+            if finding.code == CI_READER_NOT_VISIBLE && need.ci.is_empty() {
                 continue;
             }
             // A deploy identity writes its own state vault by design (FR-59); the CI-reader
@@ -649,6 +655,9 @@ fn build(
         }
     }
     // After every vault's own findings: the per-vault causes keep their place.
+    if !unlisted.is_empty() {
+        env_findings.push(ci_reader_not_visible(need.name));
+    }
     env_findings.extend(no_writer);
     EnvReport {
         name: need.name.to_string(),
@@ -837,6 +846,7 @@ fn state_label(state: &GrantState) -> &'static str {
         GrantState::ReadOnlyNeeded => "read-only needed",
         GrantState::NotVisible => "not visible",
         GrantState::NotInAccount => "not in this account",
+        GrantState::NotSupported => "not supported (service accounts are never listed)",
     }
 }
 

@@ -310,8 +310,8 @@ pub fn run(
         .into());
     }
     let stored = ci_secrets::store(r, &gh.repo, gh.environment.as_deref(), &gh.secret, &token);
-    drop(token);
     if let Err(e) = stored {
+        drop(token);
         // The account exists and its token is lost (1Password shows it once): say so
         // whatever GitHub's cause is, before it is reported.
         ui.show(&format!(
@@ -321,18 +321,25 @@ pub fn run(
         ))?;
         return Err(e);
     }
-    // #296: the value-free expiry of the service account just created, beside the contract,
-    // once its token has been stored and read back. A manifest project has no bindings
-    // sibling (and a fleet parsed from nothing has no file), so nothing is recorded there.
-    if let crate::cause::ConfigSource::File { path, .. } = &fleet.read_from.0
-        && path.is_file()
-    {
-        let key = match target {
-            Some(t) => crate::domain::credential::ci_identity_expires_path(env, t),
-            None => crate::domain::credential::ci_reader_expires_path(env),
-        };
-        super::target_credentials::record_minted_expiry(path, &key, Some(VALIDITY_DAYS))?;
-    }
+    // #296, #304: the value-free expiry and grant receipt of the service account just
+    // created, beside the contract, once its token has been stored. A manifest project has
+    // no bindings sibling, so nothing is recorded there (and it is said).
+    let recorded = super::access_receipt::record(
+        fleet,
+        r,
+        &token,
+        &super::access_receipt::Issue {
+            env,
+            target,
+            service_account: &id.service_account,
+            grants: &id.grants,
+            issued_by: crate::domain::grant_receipt::IssuedBy::Create,
+            validity_days: VALIDITY_DAYS,
+        },
+        out,
+    );
+    drop(token);
+    recorded?;
     writeln!(
         out,
         "created {:?} and stored its token as {} in {place}; nothing was printed",
@@ -362,3 +369,7 @@ mod tests;
 #[cfg(test)]
 #[path = "expiry_recording_tests.rs"]
 mod expiry_recording_tests;
+
+#[cfg(test)]
+#[path = "grant_receipt_recording_tests.rs"]
+mod grant_receipt_recording_tests;

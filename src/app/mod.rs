@@ -11,6 +11,7 @@
 
 pub mod access;
 pub mod access_create;
+pub(crate) mod access_receipt;
 pub mod access_verify;
 pub mod account;
 pub mod agent_view;
