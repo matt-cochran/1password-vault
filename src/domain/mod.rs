@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod convention;
 pub mod credential;
 pub mod delivery;
+pub mod grant_receipt;
 pub mod health;
 pub mod history;
 pub mod import;
