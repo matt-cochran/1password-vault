@@ -176,6 +176,8 @@ pub fn run_targeted(
     print_extras(out, &parts[0].plan)?;
     print_no_channel(out, env_name, fleet, &parts)?;
     print_concealed_config(out, &parts)?;
+    // #296: one value-free line per recorded credential, with its one rotation command.
+    print_credentials(out, fleet, env_name)?;
     let several = fleet
         .environments
         .get(env_name)
@@ -380,6 +382,43 @@ fn print_concealed_config(out: &mut dyn Write, parts: &[StatusPart<'_>]) -> Resu
             crate::domain::key_label(product, key)
         )
         .map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// One line per recorded credential of `env` (#296), value-free: its state and the one
+/// rotation command to run next. An `ok` credential names no command. A manifest project
+/// records none, so the lines are absent.
+pub(crate) fn print_credentials(
+    out: &mut dyn Write,
+    fleet: &Fleet,
+    env_name: &str,
+) -> Result<(), Error> {
+    use crate::domain::credential::ExpiryState;
+    let today = crate::app::retire::today();
+    for record in crate::app::ready::credential_records(fleet, env_name) {
+        let state = crate::app::ready::credential_state(&record, &today);
+        let name = match (record.target.as_deref(), record.kind) {
+            (None, _) => "ci reader".to_string(),
+            (Some(t), crate::domain::credential::CredentialKind::Deploy) => {
+                format!("{t} deploy credential")
+            }
+            (Some(t), _) => format!("{t} ci identity"),
+        };
+        let text = match state {
+            ExpiryState::Ok { .. } => "ok".to_string(),
+            ExpiryState::Expiring { days_left } => format!("expiring in {days_left} days"),
+            ExpiryState::Expired => "expired".to_string(),
+            ExpiryState::Unknown => "expiry date unreadable".to_string(),
+        };
+        let line = if matches!(state, ExpiryState::Ok { .. }) {
+            format!("credential {name}: {text}")
+        } else {
+            let next =
+                crate::app::ready::credential_next(record.kind, env_name, record.target.as_deref());
+            format!("credential {name}: {text}; next: {next}")
+        };
+        writeln!(out, "{env_name}: {line}").map_err(write_err)?;
     }
     Ok(())
 }

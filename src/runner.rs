@@ -1569,7 +1569,9 @@ impl ProcessRunner {
     ) -> Vec<(&'e str, &'e str)> {
         let mut all = env.to_vec();
         if program == crate::host::OP_CLI.program
-            && !env.iter().any(|(k, _)| *k == "OP_ACCOUNT")
+            && !env
+                .iter()
+                .any(|(k, _)| matches!(*k, "OP_ACCOUNT" | "OP_SERVICE_ACCOUNT_TOKEN"))
             && let Some(a) = held
         {
             all.push(("OP_ACCOUNT", a.as_str()));
@@ -1851,11 +1853,34 @@ pub(crate) fn strip_session_vars(
 /// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
 fn command_for(call: &Call) -> Command {
     let mut cmd = Command::new(call.program);
-    isolate(&mut cmd, call.program);
-    cmd.args(with_account(call.program, call.args, call.env))
-        .envs(pinned_env(call.program).iter().copied());
-    add_op_session(&mut cmd, call.program);
-    cmd.envs(call.env.iter().copied());
+    let token_only = call.program == "op"
+        && call
+            .env
+            .iter()
+            .any(|(k, _)| *k == "OP_SERVICE_ACCOUNT_TOKEN");
+    if token_only {
+        // An explicitly supplied service-account token selects one identity (#304).
+        // No owner session, Connect credential or desktop integration may override it.
+        cmd.env_clear();
+        cmd.envs(
+            std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(crate::host::is_basic_env)),
+        );
+        cmd.args(call.args);
+    } else {
+        isolate(&mut cmd, call.program);
+        cmd.args(with_account(call.program, call.args, call.env));
+        add_op_session(&mut cmd, call.program);
+    }
+    cmd.envs(pinned_env(call.program).iter().copied());
+    cmd.envs(
+        call.env.iter().copied().filter(|(k, _)| {
+            !token_only || !k.starts_with("OP_") || *k == "OP_SERVICE_ACCOUNT_TOKEN"
+        }),
+    );
+    if token_only {
+        cmd.env("OP_BIOMETRIC_UNLOCK_ENABLED", "false");
+        cmd.env("OP_CACHE", "false");
+    }
     strip_op_session(&mut cmd, call.program);
     cmd.stdin(if call.stdin.is_some() {
         Stdio::piped()
@@ -4356,6 +4381,62 @@ mod tests {
     }
 
     /// FMECA M6: a captured call of another CLI carries no session, even one set on it.
+    #[test]
+    fn an_explicit_native_token_clears_every_alternative_identity() {
+        let env = [
+            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_FAKE304marker"),
+            ("OP_SESSION_owner", "OWNER_SESSION_CANARY"),
+            ("OP_CONNECT_TOKEN", "CONNECT_CANARY"),
+            ("OP_CONNECT_HOST", "https://connect.invalid"),
+            ("OP_ACCOUNT", "owner-account"),
+            ("OP_BIOMETRIC_UNLOCK_ENABLED", "true"),
+        ];
+        let call = Call {
+            env: &env,
+            ..Call::new("op", &["whoami", "--format", "json"])
+        };
+        let cmd = command_for(&call);
+        let set: std::collections::BTreeMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .filter(|(k, _)| k.starts_with("OP_"))
+            .collect();
+        assert_eq!(
+            set,
+            std::collections::BTreeMap::from([
+                (
+                    "OP_SERVICE_ACCOUNT_TOKEN".into(),
+                    "ops_FAKE304marker".into()
+                ),
+                ("OP_BIOMETRIC_UNLOCK_ENABLED".into(), "false".into()),
+                ("OP_CACHE".into(), "false".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_explicit_native_token_has_no_owner_account_in_argv() {
+        let env = [
+            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_FAKE304marker"),
+            ("OP_ACCOUNT", "owner-account"),
+        ];
+        let call = Call {
+            env: &env,
+            ..Call::new("op", &["whoami", "--format", "json"])
+        };
+        assert_eq!(
+            command_for(&call).get_args().collect::<Vec<_>>(),
+            ["whoami", "--format", "json"]
+        );
+    }
+
     #[test]
     fn a_captured_call_of_another_cli_has_no_session() {
         let env = [("OP_SESSION_acct", "canary"), ("OP_SESSION", "canary")];

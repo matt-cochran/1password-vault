@@ -40,8 +40,8 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv sync <env> [--deploy] [--prune [--retire]] [--rotate <product/KEY>] [--prune-immutable <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--target <t>] [--receipt <file>] [--supply-stdin] [--json]` | CI, person | delivery, opv as the courier; `--retire` is a retirement's prune step, `--supply-stdin` takes [infrastructure values](#infrastructure-values---supply-stdin) on stdin (CI only) |
 | deliver | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | CI, person | does every placement still hold what opv delivered |
 | runtime | `opv unseal <bundle> --env <e> --product <p> --signers <file> [--identity-file <path> \| --identity-env <VAR>] [--project <name>] [--min-revision <N>] [--verify-only] [--json] [--exec -- <cmd>]` | the runtime, CI; an assistant: `--verify-only` and inspect | verify a [sealed bundle](sealed-delivery.md), then inspect its names or run the command with its values; no configuration, `op` or network ([below](#sealed-bundles-opv-unseal)) |
-| deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests |
-| admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
+| deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>`, `opv ci workflow --expiry-check` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests; `--expiry-check` prints the daily [credential expiry](#ci-credential-expiry-and-rotation) check |
+| admin | `opv access <env> [--target <t>] --create\|--rotate --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create\|--rotate]`, `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <e>` | person | CI and deploy identities, their [rotation](#ci-credential-expiry-and-rotation), and an Azure federated (OIDC) identity |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
@@ -491,6 +491,8 @@ all clear: nothing pending
 - `--settings` also looks for likely-wrong values across every environment you can read (the same secret in two environments, a placeholder in a secret or a config key, a very weak secret, stray whitespace, `localhost` where it deploys, a test key in production): one `warn  settings:` line listing each, with `fix: opv open <key> --env <env>`. It reads every environment's item; values are compared, never shown. A warning never changes the exit code. `opv ready` reports the same findings. See [settings health](configuration.md#settings-health-likely-wrong-values).
 - `doctor` never writes 1Password, whoever runs it, so an assistant can rely on it in a person's session. When an item is not laid out the way opv expects, it reads it as it is and says so once, naming `opv config export <env>`, the explicit repair (a signed-in person runs it; one verified edit, nothing deleted).
 - With `deploy_credentials`, a failed sign-in is one `FAIL deploy credentials` line; the other checks still run.
+- `--env` also prints one line per recorded CI credential (`ci reader credential`, `deploy credential`, `ci identity credential`): `ok`, `expiring in N days` (warn) or `expired` (fail), with its rotation command ([below](#ci-credential-expiry-and-rotation)).
+- An Azure target with [`azure.federated`](configuration.md#federated-deploys-from-github-actions-azurefederated) gets a `deploy identity` line that explains the mode. In GitHub Actions it also checks that the app's federated credentials trust `repo:<owner>/<repo>:environment:<env>` (and prints the `az ad app federated-credential create` command when they do not), and warns on a self-hosted runner.
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
 - With no configuration at all, the config line lists both ways to start (`opv propose setup --from-item` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
 
@@ -525,6 +527,8 @@ Owner runs: op service-account create "myapp-prod-web" --vault vprd0000000000000
 The states are `present`, `missing` and `read-only needed`; a vault whose access list it cannot read is `not visible` and is counted under `unclassified`, never assumed fine. A vault that `op vault get` cannot find in the selected account at all is `not in this account`, with a `vault_not_in_account` finding whose step is `opv vault locate <vault ID>`; no `Owner runs:` command is printed for an identity that needs it, because it could not succeed in this account. It never says "clean": it says what was checked and what it could not classify. It warns when an environment that deploys has no read-only CI reader (`no_ci_reader`), when a reader can write (`ci_reader_can_write`), when several service accounts with one name read a vault, as after a re-created identity (`pending_revoke`: keep the newest until `opv delivery verify` shows its delivery, then remove the older ones in 1Password), or when it cannot see who uses a vault (`access_not_visible`); each finding carries its next step (`no_ci_reader`: `opv access <env> --create --github <owner/repo>`, which stores the token without showing it). One `Owner runs:` create command is printed per principal with a missing or too-broad grant, because 1Password fixes a service account's vaults and permissions at creation. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
 
 `opv access <env> --target <name> --create --github <owner/repo> --github-env <environment>` creates the identity instead of printing its command: it checks that gh is signed in and can see the repository and environment (creating the GitHub environment if missing, after asking), shows the account name, every grant and where the token goes, asks once, runs `op service-account create … --raw`, and pipes the token into `gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo … --env …` on stdin. The token is never shown, typed, logged or written to a file. It refuses before creating anything when a vault is not in the selected account, and if storing the token fails it says to remove the new account in 1Password and run it again (1Password shows a token once). An existing account of the same name is left alone: keep it until the new token has produced verified delivery evidence.
+
+`opv access <env> [--target <name>] --rotate --github <owner/repo> [--github-env <environment>]` replaces the identity: it creates a successor service account named `<old name>-YYYYMMDD` with the same grants and puts its token in the existing GitHub secret, never shown. It refuses when that secret does not exist yet (use `--create` first). It ends with `Do:` revoke the old service account in 1Password; opv cannot. See [CI credential expiry and rotation](#ci-credential-expiry-and-rotation).
 
 `--json` gives `{environments: [{environment, report, commands, vaults, findings}]}`, where `vaults` holds each vault line (`vault_id`, `production`, `capability`, `writers`) and `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
 
@@ -599,6 +603,7 @@ Non-blocking findings that never change the exit code, with or without `--gate`:
 | `environment_gap` | a key's explicit `environments` list leaves a declared environment out with no `except` ([presence](configuration.md#presence-every-environment-minus-except)); one finding per product, key and environment | `opv propose key <product/KEY> --env <env>`, or declare an `except` with its reason; the [`extend` intent](#extend-an-environment-to-every-key-the-extend-intent) closes every gap of one environment at once |
 | `retirement_incomplete` | a key is `retiring` and its retirement is not finished; the message names the remaining steps in order | `opv sync <env> --prune --retire` (actor `ci`) while a target still holds it, then a person's `opv apply rp-<id>` ([retiring a key](#retiring-a-key)) |
 | `expires_soon` | a key's `expires` date is within 30 days | rotate it |
+| `credential_expiring`, `credential_expired` | a recorded CI reader, CI identity or deploy credential expires within 14 days, or has expired ([below](#ci-credential-expiry-and-rotation)) | its rotation command: `opv access <env> [--target <t>] --rotate --github <owner/repo>` or `opv target credentials <env> --target <t> --rotate` |
 | [settings health](configuration.md#settings-health-likely-wrong-values) | a likely-wrong value: the same secret in two environments or under two keys, a placeholder (`changeme`, `<your key>`, … in a secret or a config key), `low_entropy` (a secret of at least 8 characters with very low entropy for its length), stray whitespace, a local address where it deploys, a test or live key in the wrong tier | `opv open <key> --env <env>` |
 
 ## The inventory: `opv inventory`
@@ -764,7 +769,31 @@ A contract `[sets.<SET>]` declares keys whose values must be made together and a
 ```sh
 opv target credentials staging --target web --create
 opv target credentials staging --target web
+opv target credentials staging --target web --rotate
 ```
+
+`--rotate` mints a fresh credential into the item the target already records (fresh read, one checked edit on stdin) and records its new expiry; then revoke the old one at the provider ([rotation](#ci-credential-expiry-and-rotation)).
+
+`--create --federated --github <owner/repo> --github-env <environment>` is for an Azure target that deploys through [GitHub OIDC](configuration.md#federated-deploys-from-github-actions-azurefederated): it creates no secret and no 1Password item. The identity gets only the target's deploy roles and trusts exactly `repo:<owner/repo>:environment:<environment>`; opv prints its tenant, client and subscription ids, and you record them in the target's `azure.federated` table, then print the job with `opv ci workflow <env> --target <name> --github-env <environment>`.
+
+## CI credential expiry and rotation
+
+CI credentials expire. When `opv access … --create` or `--rotate` and `opv target credentials … --create` or `--rotate` make one, they record its expiry date (90 days) in [`secrets.bindings.toml`](configuration.md#where-the-ids-live-secretsbindingstoml), never a value (#296). A project whose configuration lives in 1Password records none, and nothing below is reported for it.
+
+- `opv ready` reports a credential that expires within 14 days as `credential_expiring` and one past its date as `credential_expired`. Both are advisory: they never change the exit code or block `--gate`.
+- `opv doctor --env <env>` prints one line per recorded credential; an expiring one is a warning, an expired one a failing check.
+- `opv status <env>` prints one `credential` line per recorded credential, for example `prod: credential ci reader: expiring in 5 days; next: opv access prod --rotate --github <owner/repo>`.
+- `opv ci workflow --expiry-check` prints a daily workflow that runs `opv ready --json` with the CI reader token and opens or updates one issue, `opv: CI credential expiry`, when either finding is present. It only reports; it never rotates.
+
+Rotation is a person's step, in their own terminal:
+
+```sh
+opv access prod --rotate --github org/app                  # the CI reader
+opv access prod --target web --rotate --github org/app     # the target's CI identity
+opv target credentials prod --target web --rotate          # the minted deploy credential
+```
+
+Each asks once, keeps the token out of view, and ends by telling you to revoke the old credential (in 1Password, or at the provider). Revoke it once the new one has worked: `opv delivery verify <env>` after the next sync. A federated Azure identity holds no secret and has no expiry.
 
 ## Run a reviewed operation on a target: `opv target op`
 
@@ -976,6 +1005,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
 | `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
+| `federated_outside_ci` | 6 | never | no | the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one |
 | `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
@@ -1000,6 +1030,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
 | `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
+| `federated_identity_mismatch` | 7 | after_fix | no | the CI job's ambient sign-in is not the federated identity configured for the target |
 | `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
 | `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |
@@ -1008,6 +1039,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
 | `gate_failed` | 8 | after_fix | yes | ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them |
+| `reader_grants_unverified` | 8 | after_fix | no | CI reader immutable issuance proof is missing, stale or mismatched |
 | `target_drift` | 8 | after_fix | no | a pinned target no longer holds the version 1Password records (drift); opv sync restores it |
 | `budget_spent` | 9 | after_fix/check_first | no | the run's --timeout budget was spent |
 | `create_outcome_unknown` | 9 | check_first/safe | no/yes | a create may or may not have happened; find it before creating again |
@@ -1180,7 +1212,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.18.3  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.19.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
@@ -1320,3 +1352,5 @@ What changes in use, in short:
 - `opv run` file keys live on a RAM-backed runtime directory that other users cannot write, are written through a directory handle, and the app inherits no descriptor above 2 from opv's delivery step; what opv cannot enforce (same user, root, swap) is listed in [platforms and limits](design/local-delivery.md#platforms-and-limits). [Security](security.md) has the whole model.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.
+
+Reader grant verification: see [CI reader grant evidence](reader-grants.md) for owner issuance, restricted CI verification, the metadata schema and proof limitations.

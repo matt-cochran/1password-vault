@@ -1,10 +1,10 @@
 [package]
 name = "opv"
 default-run = "opv"
-version = "0.18.3"
+version = "0.19.0"
 edition = "2024"
-# let-chains (`if let ... && let ...`) are stable from 1.88.
-rust-version = "1.88"
+# The minimum supported Rust is the stable release current at 0.19.0.
+rust-version = "1.99"
 license = "MIT"
 description = "Sync secrets from 1Password into runtime targets such as Fly.io without ever printing, logging or writing a value"
 repository = "https://github.com/matt-cochran/1password-vault"

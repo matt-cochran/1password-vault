@@ -306,6 +306,43 @@ members = { "app/SESSION_KEY" = { generate = "rules" } }
     assert!(load(set).is_ok());
 }
 
+#[test]
+fn generate_rules_on_an_ssh_ed25519_key_records_the_rules_generator() {
+    let set = r#"
+[products.app.keys.SSH_KEY]
+kind = "secret"
+rules = { ssh_ed25519 = true }
+file = "ssh-key"
+
+[sets.identities]
+environments = ["prod"]
+members = { "app/SSH_KEY" = { generate = "rules" } }
+"#;
+    let key = KeyRef::parse("app/SSH_KEY").unwrap();
+    assert_eq!(
+        load(set).unwrap().sets["identities"].members[&key],
+        MemberSource::Generate(Generator::Rules)
+    );
+}
+
+#[test]
+fn generate_rules_on_an_age_identity_key_records_the_rules_generator() {
+    let set = r#"
+[products.app.keys.AGE_KEY]
+kind = "secret"
+rules = { age_identity = true }
+
+[sets.identities]
+environments = ["prod"]
+members = { "app/AGE_KEY" = { generate = "rules" } }
+"#;
+    let key = KeyRef::parse("app/AGE_KEY").unwrap();
+    assert_eq!(
+        load(set).unwrap().sets["identities"].members[&key],
+        MemberSource::Generate(Generator::Rules)
+    );
+}
+
 // ---- other load rules -------------------------------------------------------------------
 
 #[test]

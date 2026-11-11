@@ -1,0 +1,550 @@
+{
+  "deliverables": [
+    {
+      "id": "ssh-key-shape-decision",
+      "owned_files": [
+        "docs/design/ssh-signing-key.md"
+      ],
+      "prerequisites": [],
+      "estimated_effort_hours": 0.5,
+      "metadata": {
+        "artifact": "docs/design/ssh-signing-key.md: decision for #294 — one key with an `ssh_ed25519` rule (public key + fingerprint printed, like age_identity) vs a stored private/public matched set; rule name, field layout, file-channel expectations",
+        "owner": "owner",
+        "kind": "manual",
+        "track": "development"
+      }
+    },
+    {
+      "id": "generate-rule-core",
+      "owned_files": [
+        "src/domain/model.rs",
+        "src/app/generate.rs",
+        "src/config.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "ssh-key-shape-decision",
+          "consumes": "ssh rule name and single-key vs pair shape"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.0,
+        "likely": 3.0,
+        "pessimistic": 5.0
+      },
+      "metadata": {
+        "artifact": "one shared generate-recipe predicate: KeySpec::has_generate_recipe and generate::recipe agree (fixes #293 config_invalid for age_identity), new Recipe::SshEd25519 variant + `ssh_ed25519` rule field, `#[cfg(test)] mod` lines for generate_age_tests and generate_ssh_tests",
+        "owner": "agent",
+        "contract": true,
+        "track": "development",
+        "issues": [
+          "#293",
+          "#294"
+        ],
+        "verify": [
+          "cargo build --features fake",
+          "cargo test --features fake generate",
+          "cargo test --features fake config"
+        ],
+        "junior": {
+          "acceptance": [
+            "#293 probe config from the issue loads without config_invalid",
+            "has_generate_recipe and generate::recipe share one predicate",
+            "Recipe::SshEd25519 and the ssh_ed25519 rule exist; recipe() returns it",
+            "test mod slots for generate_age_tests and generate_ssh_tests compile"
+          ],
+          "checks": [
+            "cargo test --features fake generate",
+            "cargo test --features fake config",
+            "cargo clippy --all-targets --features fake -- -D warnings"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "age-generation-tests",
+      "owned_files": [
+        "src/app/generate_age_tests.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "generate-rule-core",
+          "consumes": "unified recipe predicate and test module slot",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.5,
+        "pessimistic": 4.0
+      },
+      "metadata": {
+        "artifact": "src/app/generate_age_tests.rs: #293 acceptance — the issue's probe config loads, valid X25519 identity + age1 recipient, malformed input refused, repeated apply preserves nonempty key, independent environment keys, identity never in output/argv",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#293"
+        ],
+        "verify": [
+          "cargo test --features fake generate_age"
+        ],
+        "junior": {
+          "acceptance": [
+            "each #293 acceptance case is one atomic test with a declarative name and one assertion",
+            "marker values never reach argv or output"
+          ],
+          "checks": [
+            "cargo test --features fake generate_age"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "ssh-key-deps",
+      "owned_files": [
+        "Cargo.toml",
+        "deny.toml"
+      ],
+      "prerequisites": [],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1.0,
+        "pessimistic": 2.0
+      },
+      "metadata": {
+        "artifact": "Cargo.toml: ssh-key features needed to generate and encode Ed25519 private keys (getrandom/rand_core, encryption off); Cargo.lock refreshed; cargo deny check clean",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#294"
+        ],
+        "verify": [
+          "cargo build --features fake",
+          "cargo deny check"
+        ],
+        "junior": {
+          "acceptance": [
+            "ssh-key can generate and encode an Ed25519 OpenSSH private key",
+            "cargo deny check passes with no new exceptions"
+          ],
+          "checks": [
+            "cargo build --features fake",
+            "cargo deny check"
+          ]
+        }
+      }
+    },
+    {
+      "id": "ssh-keygen",
+      "owned_files": [
+        "src/app/generate_ssh.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "generate-rule-core",
+          "consumes": "Recipe::SshEd25519 variant",
+          "kind": "interface"
+        },
+        {
+          "id": "ssh-key-deps",
+          "consumes": "ssh-key with keygen/rand features enabled"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.5,
+        "likely": 3.5,
+        "pessimistic": 5.0
+      },
+      "metadata": {
+        "artifact": "src/app/generate_ssh.rs: Ed25519 keygen from the OS CSPRNG via ssh-key, OpenSSH private-key encoding into a zeroizing SecretValue, public key + SHA256 fingerprint for value-free output",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#294"
+        ],
+        "verify": [
+          "cargo build --features fake",
+          "cargo test --features fake generate_ssh"
+        ],
+        "junior": {
+          "acceptance": [
+            "generated key parses back as an unencrypted Ed25519 OpenSSH private key",
+            "only the public key and SHA256 fingerprint are returned for output",
+            "private key lives only in SecretValue and is registered with scrub"
+          ],
+          "checks": [
+            "cargo test --features fake generate_ssh",
+            "cargo clippy --all-targets --features fake -- -D warnings"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "ssh-provision-wiring",
+      "owned_files": [
+        "src/app/provision.rs",
+        "src/domain/provision.rs",
+        "src/config/sets.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "generate-rule-core",
+          "consumes": "Recipe::SshEd25519 variant",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 3.0,
+        "pessimistic": 6.0
+      },
+      "metadata": {
+        "artifact": "propose-generate/owner-apply and provision paths accept the ssh recipe (and, if the decision chose a pair, a matched-set generator with partial/conflicting-pair states); agent and service-account paths never generate or replace",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#294"
+        ],
+        "verify": [
+          "cargo test --features fake provision",
+          "cargo test --features fake sets"
+        ],
+        "junior": {
+          "acceptance": [
+            "owner apply/provision generate ssh keys; agent and service-account paths refuse",
+            "a nonempty existing key is preserved unless replacement is explicit"
+          ],
+          "checks": [
+            "cargo test --features fake provision",
+            "cargo test --features fake sets"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "surface-texts",
+      "owned_files": [
+        "src/cause/mod.rs",
+        "src/cause/render.rs",
+        "src/schema.rs",
+        "src/main.rs",
+        "src/app/explain.rs",
+        "src/domain/relaxation.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "generate-rule-core",
+          "consumes": "rule field names and recipe set",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.5,
+        "pessimistic": 4.0
+      },
+      "metadata": {
+        "artifact": "help, `opv schema`, refusal texts, explain and relaxation all name base64_bytes, hex_bytes, age_identity and ssh_ed25519 consistently; schema/golden tests updated",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#293",
+          "#294"
+        ],
+        "verify": [
+          "cargo test --features fake schema",
+          "cargo test --features fake explain",
+          "cargo test --features fake relaxation"
+        ],
+        "junior": {
+          "acceptance": [
+            "help, opv schema and refusal texts list base64_bytes, hex_bytes, age_identity and ssh_ed25519",
+            "explain prints the new rule; relaxation treats dropping it as a relaxation"
+          ],
+          "checks": [
+            "cargo test --features fake schema",
+            "cargo test --features fake explain",
+            "cargo test --features fake relaxation"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "docs-and-skill",
+      "owned_files": [
+        "docs/configuration.md",
+        "docs/agent-skill.md",
+        "docs/design/requirements.md",
+        "llms.txt"
+      ],
+      "prerequisites": [
+        {
+          "id": "surface-texts",
+          "consumes": "final rule names and help wording"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.0,
+        "likely": 2.0,
+        "pessimistic": 3.0
+      },
+      "metadata": {
+        "artifact": "configuration, installed agent skill, llms.txt and requirements.md (FR ids cited) describe age_identity and ssh_ed25519 generation exactly as the binary does",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#293",
+          "#294"
+        ],
+        "verify": [
+          "cargo test --features fake --test docs_commands",
+          "cargo test --features fake skill"
+        ],
+        "junior": {
+          "acceptance": [
+            "docs and skill describe exactly what help/schema say",
+            "requirements.md cites FR ids for both capabilities"
+          ],
+          "checks": [
+            "cargo test --features fake --test docs_commands",
+            "cargo test --features fake skill"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "integration-candidate",
+      "owned_files": [
+        "Cargo.toml",
+        "CHANGELOG.md",
+        "Cargo.lock"
+      ],
+      "prerequisites": [
+        {
+          "id": "age-generation-tests",
+          "consumes": "#293 tests"
+        },
+        {
+          "id": "docs-and-skill",
+          "consumes": "docs and skill text"
+        },
+        {
+          "id": "ssh-tests-green",
+          "consumes": "green #294 tests and implementation"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.0,
+        "likely": 1.5,
+        "pessimistic": 3.0
+      },
+      "metadata": {
+        "artifact": "feature branch feat/0.19.0-key-generation: all work merged, version 0.19.0 in Cargo.toml/Cargo.lock, CHANGELOG 0.19.0 entry; fmt, clippy -D warnings and the full local test run pass once on the merged tree",
+        "owner": "manager",
+        "track": "development",
+        "verify": [
+          "cargo fmt --all --check",
+          "cargo clippy --all-targets --features fake -- -D warnings",
+          "cargo test --locked --features fake"
+        ]
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "regression-gate",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "integration-candidate",
+          "consumes": "integration branch tree"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 0.75,
+        "pessimistic": 1.5
+      },
+      "metadata": {
+        "artifact": "PR feat/0.19.0-key-generation → dev with green ci.yml (full suite, deny, npm tests, install tests) on the candidate tree; evidence = run URL + tree SHA + Cargo.lock hash",
+        "owner": "ci",
+        "kind": "gate",
+        "track": "regression",
+        "observed": "PR CI into dev 25–45 min (runs 2026-11-06)"
+      }
+    },
+    {
+      "id": "dev-merge",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "regression-gate",
+          "consumes": "green regression evidence"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.25,
+        "likely": 0.5,
+        "pessimistic": 2.0
+      },
+      "metadata": {
+        "artifact": "owner review and merge of the 0.19.0 PR into dev",
+        "owner": "owner",
+        "kind": "manual",
+        "track": "cicd"
+      }
+    },
+    {
+      "id": "promote-and-release",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "dev-merge",
+          "consumes": "merged dev tree"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.4,
+        "likely": 0.75,
+        "pessimistic": 2.0
+      },
+      "metadata": {
+        "artifact": "dev→staging and staging→main PRs merged (CI reuse ~30 s each), tag v0.19.0 on main, release.yml green (~6 min), npm published via scripts/npm/publish-manual.sh v0.19.0",
+        "owner": "ci",
+        "kind": "gate",
+        "track": "cicd",
+        "boundary_reason": "gitflow trust boundary: main and the published artifact"
+      }
+    },
+    {
+      "id": "fresh-install-smoke",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "promote-and-release",
+          "consumes": "published 0.19.0 binary and npm package"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 0.75,
+        "pessimistic": 1.5
+      },
+      "metadata": {
+        "artifact": "fresh install of published 0.19.0: #293 probe `opv --config age-probe.toml contract --json` accepted, ssh_ed25519 probe accepted, help/schema list both; transcript posted on #293 and #294",
+        "owner": "ci",
+        "kind": "gate",
+        "track": "regression"
+      }
+    },
+    {
+      "id": "v0-19-0-shipped",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "fresh-install-smoke",
+          "consumes": "published-artifact smoke evidence"
+        }
+      ],
+      "metadata": {
+        "artifact": "opv 0.19.0 released; #293 and #294 closed with evidence",
+        "owner": "owner",
+        "kind": "manual"
+      },
+      "milestone": true
+    },
+    {
+      "id": "ssh-acceptance-tests",
+      "owned_files": [
+        "src/app/generate_ssh_tests.rs",
+        "tests/ssh_file_delivery.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "generate-rule-core",
+          "consumes": "Recipe::SshEd25519 and ssh_ed25519 rule contract",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.0,
+        "likely": 3.0,
+        "pessimistic": 5.0
+      },
+      "metadata": {
+        "artifact": "#294 acceptance tests written test-first against the ssh_ed25519 contract (sign/verify, multiline file bytes + permissions, separate envs, repeated apply, partial/conflicting pairs, invalid formats, redaction); may be red until ssh-tests-green",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#294"
+        ],
+        "verify": [
+          "cargo test --features fake generate_ssh",
+          "cargo test --features fake --test ssh_file_delivery"
+        ],
+        "junior": {
+          "acceptance": [
+            "each #294 acceptance case is one atomic test with one assertion",
+            "tests compile against the contract; failures are only unimplemented behaviour"
+          ],
+          "checks": [
+            "cargo test --features fake --no-run"
+          ]
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "ssh-tests-green",
+      "owned_files": [
+        "src/app/generate_ssh.rs",
+        "src/app/provision.rs"
+      ],
+      "prerequisites": [
+        {
+          "id": "ssh-acceptance-tests",
+          "consumes": "failing #294 acceptance tests"
+        },
+        {
+          "id": "ssh-keygen",
+          "consumes": "keygen implementation"
+        },
+        {
+          "id": "ssh-provision-wiring",
+          "consumes": "owner apply path"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1.0,
+        "pessimistic": 2.5
+      },
+      "metadata": {
+        "artifact": "every #294 acceptance test green against the real keygen and apply path; fixes confined to generate_ssh.rs/provision.rs",
+        "owner": "agent",
+        "track": "development",
+        "issues": [
+          "#294"
+        ],
+        "verify": [
+          "cargo test --features fake generate_ssh",
+          "cargo test --features fake --test ssh_file_delivery"
+        ],
+        "junior": {
+          "acceptance": [
+            "all ssh acceptance tests pass without editing the tests"
+          ],
+          "checks": [
+            "cargo test --features fake generate_ssh",
+            "cargo test --features fake --test ssh_file_delivery"
+          ]
+        }
+      }
+    }
+  ]
+}

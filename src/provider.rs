@@ -14,7 +14,7 @@ use toml::Spanned;
 use toml::de::{DeValue, ValueDeserializer};
 
 use crate::domain::runtime::FileMount;
-use crate::domain::{Kind, SecretValue};
+use crate::domain::{FederatedIdentity, Kind, SecretValue};
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::ports::{PinnedStore, Ports};
@@ -65,6 +65,53 @@ pub trait Provider: Sync {
     /// `steps:` (one list entry), or `None` when CI needs no provider-specific setup. Core
     /// code prints it through this trait, so it never names a provider (FR-37).
     fn ci_setup_step(&self) -> Option<&'static str> {
+        None
+    }
+    /// How many days a credential this provider mints stays valid, when it knows. `None`
+    /// when the provider does not mint or states no lifetime (#296).
+    fn minted_lifetime_days(&self) -> Option<i64> {
+        None
+    }
+    /// Create a federated deploy identity for `target` with the given OIDC trust `subject`
+    /// (#297), returning its non-secret ids, or `None` when this provider has no federated
+    /// mode. The same default as `mint_deploy_credential`: only called for a provider that
+    /// declares federated support.
+    fn mint_federated(
+        &self,
+        target: &dyn TargetConfig,
+        subject: &str,
+        r: &dyn CommandRunner,
+    ) -> Option<Result<FederatedIdentity, Error>> {
+        let _ = (target, subject, r);
+        None
+    }
+    /// The login for `target` when it signs in from an ambient federated identity instead
+    /// of `deploy_credentials` (#297): `None` when the target is not federated (the
+    /// default). The login's `sign_in` receives no values; it only verifies the identity
+    /// the CI job already signed in as, refusing anything else before any provider call.
+    fn federated_login(
+        &self,
+        target: &dyn TargetConfig,
+    ) -> Option<Result<Box<dyn DeployLogin>, Error>> {
+        let _ = target;
+        None
+    }
+    /// True when a CI job for `target` needs `permissions: id-token: write` to sign in
+    /// (#297); false otherwise.
+    fn ci_needs_id_token(&self, target: &dyn TargetConfig) -> bool {
+        let _ = target;
+        false
+    }
+    /// The provider's CLI setup step for a GitHub Actions job deploying `target`. Default:
+    /// the target-independent [`Provider::ci_setup_step`] (#297).
+    fn ci_setup_step_for(&self, target: &dyn TargetConfig) -> Option<String> {
+        let _ = target;
+        self.ci_setup_step().map(str::to_owned)
+    }
+    /// The provider's CLI teardown step for a GitHub Actions job deploying `target` (e.g. a
+    /// sign-out under `if: always()`), or `None` when CI needs none (#297).
+    fn ci_teardown_step_for(&self, target: &dyn TargetConfig) -> Option<String> {
+        let _ = target;
         None
     }
     /// The fields `opv target add` takes for this provider (FR-56, H3), each as the option

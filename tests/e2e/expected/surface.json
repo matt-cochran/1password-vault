@@ -8,10 +8,14 @@
         "create",
         "github",
         "github-env",
+        "grant-receipt",
+        "grant-receipt-sha256",
         "json",
         "project",
+        "rotate",
         "secret-name",
-        "target"
+        "target",
+        "verify-reader"
       ],
       "name": "access"
     },
@@ -64,6 +68,7 @@
         "deploy",
         "drift",
         "every",
+        "expiry-check",
         "github-env",
         "on-change",
         "supply",
@@ -550,6 +555,10 @@
       ],
       "flags": [
         "create",
+        "federated",
+        "github",
+        "github-env",
+        "rotate",
         "target"
       ],
       "name": "target credentials"

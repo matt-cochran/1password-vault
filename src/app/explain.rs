@@ -994,11 +994,11 @@ fn describe_rules(r: &Rules) -> Vec<String> {
     if let Some(t) = transform {
         out.push(format!("transform = {t:?}"));
     }
-    if *ssh_ed25519 {
-        out.push("ssh_ed25519 = true".into());
-    }
     if *age_identity {
         out.push("age_identity = true".into());
+    }
+    if *ssh_ed25519 {
+        out.push("ssh_ed25519 = true".into());
     }
     out
 }
@@ -1213,6 +1213,15 @@ mod tests {
             rules_line(r#"base64_bytes = 32, email_list = true, https_url = true, enum = ["a"]"#),
             r#"enum = ["a"], base64_bytes = 32, email_list = true, https_url = true"#
         );
+    }
+
+    #[test]
+    fn prints_ssh_ed25519_rule() {
+        let f = fleet_with(
+            "[products.extra.keys.SSH_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = { ssh_ed25519 = true }\nfile = \"ssh-key\"\n",
+        );
+        let out = explain(&f, "extra/SSH_KEY", Some("prod")).unwrap();
+        assert!(out.contains("ssh_ed25519 = true"), "{out}");
     }
 
     #[test]

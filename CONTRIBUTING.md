@@ -10,7 +10,7 @@ cargo build
 
 ## Prerequisites
 
-- Rust 1.88 or newer (`rust-version` in `Cargo.toml`).
+- Rust 1.99 or newer (`rust-version` in `Cargo.toml`).
 - `op` (1Password CLI), `flyctl`, `az` and `kubectl` are only needed for manual testing.
   The test suite uses fakes and recorded CLI output and calls none of them.
 - Node.js, `shellcheck` and `bash` for the packaging and install-script checks.

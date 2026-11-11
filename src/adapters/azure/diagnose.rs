@@ -7,8 +7,15 @@
 //! failure as `Unrecognized` with the facts it did establish. Azure phrases are added when
 //! a recording exists.
 
+use serde_json::Value;
+
+use super::AzureTarget;
+use super::az::{self, Effect};
 use crate::cause::{Cause, DiagnoseContext, ExitClass, Observed, Principal, System, Unanswered};
+use crate::error::Error;
 use crate::host::Host;
+use crate::provider::{Check, Verdict};
+use crate::runner::{CommandRunner, Outcome};
 
 /// Turn what opv observed about one failed `az` call into a cause.
 pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
@@ -97,6 +104,173 @@ fn exit_fact(exit: ExitClass) -> String {
         ExitClass::TimedOut => "the call timed out".to_string(),
         ExitClass::SpawnFailed => "az could not be started".to_string(),
         ExitClass::Lost => "the call's reply was lost".to_string(),
+    }
+}
+
+/// The ambient GitHub Actions context of a federated deploy (#297): the repository and
+/// environment whose subject the app's federated credential must trust, plus whether the
+/// job runs on a self-hosted runner. Every field is read from the job's environment and
+/// holds no secret. Tests inject one with [`with_github_context`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GithubContext {
+    /// `GITHUB_ACTIONS` is exactly `true`; `CI` alone is not enough (the federated ambient
+    /// sign-in only exists in an Actions job that ran `azure/login`).
+    pub actions: bool,
+    /// `GITHUB_REPOSITORY`, `<owner>/<repo>`.
+    pub repository: Option<String>,
+    /// `GITHUB_ENVIRONMENT`: the job's GitHub environment, the trust subject's `environment`.
+    pub environment: Option<String>,
+    /// `RUNNER_ENVIRONMENT` is `self-hosted`.
+    pub self_hosted: bool,
+}
+
+impl GithubContext {
+    /// The trust subject `repo:<owner>/<repo>:environment:<env>`, when the job names both.
+    pub fn subject(&self) -> Option<String> {
+        Some(format!(
+            "repo:{}:environment:{}",
+            self.repository.as_deref()?,
+            self.environment.as_deref()?
+        ))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests force the ambient context without touching the process environment.
+    static TEST_GITHUB_CONTEXT: std::cell::RefCell<Option<GithubContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with the ambient GitHub context forced to `ctx` (unit tests only).
+#[cfg(test)]
+pub(crate) fn with_github_context<T>(ctx: GithubContext, f: impl FnOnce() -> T) -> T {
+    let prev = TEST_GITHUB_CONTEXT.with(|c| c.replace(Some(ctx)));
+    let out = f();
+    TEST_GITHUB_CONTEXT.with(|c| c.replace(prev));
+    out
+}
+
+/// The ambient GitHub Actions context (#297). `GITHUB_ACTIONS=true` alone decides GitHub
+/// Actions; `CI` is not enough, because the federated sign-in only exists in an Actions job
+/// that ran `azure/login` first.
+pub fn github_context() -> GithubContext {
+    #[cfg(test)]
+    if let Some(ctx) = TEST_GITHUB_CONTEXT.with(|c| c.borrow().clone()) {
+        return ctx;
+    }
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    GithubContext {
+        actions: var("GITHUB_ACTIONS").is_some_and(|v| v == "true"),
+        repository: var("GITHUB_REPOSITORY"),
+        environment: var("GITHUB_ENVIRONMENT"),
+        self_hosted: var("RUNNER_ENVIRONMENT").is_some_and(|v| v == "self-hosted"),
+    }
+}
+
+/// The `doctor` checks of a federated Azure target (#297), appended to the target's other
+/// checks: one `deploy identity` line that explains the mode, a `federated credential` line
+/// that compares the trust subject with the app's credentials when `probe` is asked for,
+/// and a `runner` warning on a self-hosted runner. `probe` is `false` when an earlier check
+/// already failed, so no `az` call follows a broken sign-in.
+pub fn federated_checks(t: &AzureTarget, r: &dyn CommandRunner, probe: bool) -> Vec<Check> {
+    let Some(f) = t.federated.as_ref() else {
+        return Vec::new();
+    };
+    let ctx = github_context();
+    let mode = format!(
+        "federated (tenant {}, client {}, subscription {})",
+        f.tenant_id, f.client_id, f.subscription_id
+    );
+    let mut checks = vec![Check {
+        name: "deploy identity".into(),
+        outcome: Ok(if ctx.actions {
+            Verdict::Ok(mode)
+        } else {
+            Verdict::Ok(format!(
+                "{mode}; CI only: this identity exists in a GitHub Actions job that signed \
+                 in with azure/login, so doctor cannot check it here"
+            ))
+        }),
+    }];
+    if ctx.self_hosted {
+        checks.push(Check {
+            name: "runner".into(),
+            outcome: Ok(Verdict::Warn(
+                "self-hosted: the federated sign-in may stay on disk after the job; the \
+                 generated workflow's az logout step (if: always()) removes it"
+                    .into(),
+            )),
+        });
+    }
+    if !probe || !ctx.actions {
+        return checks;
+    }
+    let Some(subject) = ctx.subject() else {
+        checks.push(Check {
+            name: "federated credential".into(),
+            outcome: Ok(Verdict::Warn(
+                "cannot check the app's federated credentials: GITHUB_REPOSITORY and \
+                 GITHUB_ENVIRONMENT are not both set in this job"
+                    .into(),
+            )),
+        });
+        return checks;
+    };
+    checks.push(match listed_subjects(r, &f.client_id) {
+        Ok(subjects) if subjects.iter().any(|s| s == &subject) => Check {
+            name: "federated credential".into(),
+            outcome: Ok(Verdict::Ok(format!(
+                "{subject} is trusted by the app's federated credentials"
+            ))),
+        },
+        Ok(_) => Check {
+            name: "federated credential".into(),
+            outcome: Ok(Verdict::Warn(format!(
+                "the app's federated credentials do not include {subject}\n  az ad app \
+                 federated-credential create --id {} --parameters \
+                 '{{\"name\":\"github\",\"issuer\":\"https://token.actions.githubusercontent.com\",\
+                 \"subject\":\"{subject}\",\"audiences\":[\"api://AzureADTokenExchange\"]}}'",
+                f.client_id
+            ))),
+        },
+        // Advisory, like the identity-access check: an app registration the sign-in cannot
+        // read does not prove the credential missing, so it is a warning, never a failure.
+        Err(e) => Check {
+            name: "federated credential".into(),
+            outcome: Ok(Verdict::Warn(format!(
+                "could not check the app's federated credentials ({e})"
+            ))),
+        },
+    });
+    checks
+}
+
+/// The subjects of an app's federated credentials (`az ad app federated-credential list
+/// --id <client> -o json`, a read). Subjects and issuers are identifiers, never secrets.
+fn listed_subjects(r: &dyn CommandRunner, client_id: &str) -> Result<Vec<String>, Error> {
+    const OP: &str = "ad app federated-credential list";
+    let args = [
+        "ad",
+        "app",
+        "federated-credential",
+        "list",
+        "--id",
+        client_id,
+        "-o",
+        "json",
+    ];
+    match az::invoke(r, Effect::Read, OP, &args, None, &[])? {
+        Outcome::Done(out) => {
+            let list: Vec<Value> = super::preflight::unreadable_json(&out.stdout, OP)?;
+            Ok(list
+                .iter()
+                .filter_map(|c| c["subject"].as_str().map(String::from))
+                .collect())
+        }
+        Outcome::Refused(_) | Outcome::Unknown { .. } => {
+            Err(az::failed(r, DiagnoseContext::default()))
+        }
     }
 }
 

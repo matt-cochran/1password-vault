@@ -23,7 +23,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.18.3  # install exactly this release (default: latest)
+sh install.sh --version v0.19.0  # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -69,7 +69,7 @@ Windows: rename the `.exe` to `opv.exe` and put it on your `PATH`.
 cargo install --git https://github.com/matt-cochran/1password-vault --locked
 ```
 
-The minimum supported Rust version is 1.88.
+The minimum supported Rust version is 1.99.
 
 ### npm
 

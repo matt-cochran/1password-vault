@@ -73,6 +73,14 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "HandoffPipeContested",
         "Windows-only named pipe; Azure has no simulator",
     ),
+    // #297: raised only by the Azure federated login (src/adapters/azure/login.rs), and
+    // opv-sim answers `az` as not installed. Reached by src/adapters/azure/login_tests.rs
+    // (`federated_sign_in_refuses_outside_github_actions`,
+    // `federated_sign_in_names_a_mismatch_by_its_own_code`) and src/cause/render_tests.rs.
+    (
+        "FederatedRefused",
+        "Azure federated login only; Azure has no simulator",
+    ),
     // Built only after `op service-account create` (src/app/access_create.rs), which opv-sim
     // does not model and nobody has recorded.
     (
@@ -882,6 +890,25 @@ mod cases {
                 })
             }),
             &["sync", "prod", "--confirm", "prod"],
+        )
+    }
+
+    /// A CI reader without its own service credential cannot establish native authority.
+    /// The refusal occurs before local config discovery or any simulated provider call.
+    pub fn reader_grants_unverified() -> Case {
+        case(
+            Scenario::new(),
+            &[
+                "--config",
+                "secrets.toml",
+                "access",
+                "dev",
+                "--verify-reader",
+                "--grant-receipt",
+                "absent-grants.json",
+                "--grant-receipt-sha256",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ],
         )
     }
 
@@ -2225,6 +2252,7 @@ scenarios! {
         confirm_mismatch => ConfirmMismatch,
         keys_blocking => KeysBlocking,
         values_needed => ValuesNeeded,
+        reader_grants_unverified => ReaderGrantsUnverified,
         plan_changed => PlanChanged,
         local_file_too_open => LocalFileTooOpen,
         private_dir_failed => PrivateDirFailed,

@@ -518,6 +518,11 @@ fn run_on_with(
             }
         }
     }
+    // #296: one check per recorded CI or deploy credential of the scoped environment. The
+    // bindings are read, never `op`, so these run whether or not the session checks passed.
+    if let (Some(f), Some(env_name)) = (&fleet, scope.env) {
+        credential_checks(f, env_name, &mut report);
+    }
     if cfg!(windows) {
     } else if op_present {
         report.push("op local run", local_run(r, scope.local_only));
@@ -554,17 +559,14 @@ fn run_on_with(
 /// The last line of a run without failures: "all clear" only when no check warned, since
 /// a warning is something to look at (07.21, X26).
 fn closing_line(report: &Report) -> String {
-    match report
-        .rows
-        .iter()
-        .filter(|r| r.state == State::Warn)
-        .count()
-    {
-        0 => "all clear: nothing pending".into(),
-        n => format!(
+    let count = |state: State| report.rows.iter().filter(|r| r.state == state).count();
+    match (count(State::Fail), count(State::Warn)) {
+        (0, 0) => "all clear: nothing pending".into(),
+        (0, n) => format!(
             "no failures; {} above",
             super::plural(n, "warning", "warnings")
         ),
+        (n, _) => format!("{} above", super::plural(n, "failure", "failures")),
     }
 }
 
@@ -782,6 +784,39 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
         text,
         format!("opv open {label} --env {env}"),
     );
+}
+
+/// One check per recorded CI or deploy credential of `env` (#296), value-free: `ok`,
+/// `expiring in N days` (a warning) or `expired` (a failing check), each with the one
+/// rotation command as its Next. Reads the bindings beside the contract; a manifest project
+/// records none and so gets no line.
+fn credential_checks(fleet: &Fleet, env_name: &str, report: &mut Report) {
+    use crate::domain::credential::{CredentialKind, ExpiryState};
+    let today = crate::app::retire::today();
+    for record in crate::app::ready::credential_records(fleet, env_name) {
+        let state = crate::app::ready::credential_state(&record, &today);
+        let name = match (record.target.as_deref(), record.kind) {
+            (None, _) => "ci reader credential",
+            (Some(_), CredentialKind::Deploy) => "deploy credential",
+            (Some(_), _) => "ci identity credential",
+        };
+        let (text, row_state) = match state {
+            ExpiryState::Ok { .. } => ("ok".to_string(), State::Ok),
+            ExpiryState::Expiring { days_left } => {
+                (format!("expiring in {days_left} days"), State::Warn)
+            }
+            ExpiryState::Expired => ("expired".to_string(), State::Fail),
+            ExpiryState::Unknown => ("expiry date unreadable".to_string(), State::Warn),
+        };
+        // The one runnable Next: a failing or warning credential names its rotation
+        // command; an `ok` one has nothing to do.
+        let fix = (!matches!(row_state, State::Ok)).then(|| {
+            crate::app::ready::credential_next(record.kind, env_name, record.target.as_deref())
+        });
+        report.target = record.target.clone();
+        report.row(name, row_state, text, fix);
+        report.target = None;
+    }
 }
 
 /// The per-target checks of one environment (FR-40, FR-56), for every target or only

@@ -110,3 +110,31 @@ pub fn store(
         &[(name.to_string(), value)],
     )
 }
+
+/// The step-script lines of `opv ci workflow --expiry-check` (#296) that open one issue
+/// titled `$title`, or update the open one, with body `$body`. Both shell variables are set
+/// by the lines before; neither holds a value (names and dates only).
+pub const OPEN_OR_UPDATE_ISSUE: &str = "          number=$(gh issue list --state open --search \"\\\"$title\\\" in:title\" --json number --jq '.[0].number // empty')
+          if [ -n \"$number\" ]; then
+            gh issue edit \"$number\" --title \"$title\" --body \"$body\"
+          else
+            gh issue create --title \"$title\" --body \"$body\"
+          fi
+";
+
+/// Whether the secret `name` exists in `repo` (or its `environment`): rotation replaces a
+/// secret a CI job already reads and never creates the first (#296). Names only; GitHub
+/// never returns a secret's value.
+pub fn secret_exists(
+    r: &dyn CommandRunner,
+    repo: &str,
+    environment: Option<&str>,
+    name: &str,
+) -> Result<bool, Error> {
+    let repos = [repo.to_string()];
+    let scope = Scope {
+        repos: &repos,
+        environment,
+    };
+    Ok(gh::list_secrets(r, scope)?.iter().any(|e| e.name == name))
+}

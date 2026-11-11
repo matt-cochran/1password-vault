@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-11-10
+
+0.19.0 records when CI credentials expire and rotates them in one step, lets an Azure target deploy from GitHub Actions with no stored secret, and prints the public half of every identity a provision set generates.
+
+### Added
+
+- **CI credential expiry (#296).** `opv access --create` and `opv target credentials --create` record a value-free `expires_on` date in `secrets.bindings.toml` (a manifest project records none). `opv ready` (`credential_expiring`, `credential_expired`), `opv doctor --env` and `opv status <env>` report a credential within 14 days of expiry or past it, with its one rotation command.
+- **Rotation (#296).** `opv access <env> [--target <t>] --rotate --github <owner/repo>` makes a successor service account (`<old>-YYYYMMDD`), replaces the existing GitHub secret on stdin and verifies the new token; you then revoke the old account in 1Password. `opv target credentials <env> --target <t> --rotate` mints a fresh deploy credential into the item the target records.
+- **`opv ci workflow --expiry-check` (#296)** prints a daily workflow that opens or updates one issue when a CI credential is expiring or expired. It only reports.
+- **Azure federated deploys from GitHub Actions (#297).** An Azure target with `azure.federated` (tenant, client and subscription ids) and no `deploy_credentials` signs in through GitHub OIDC: the generated workflow adds `id-token: write`, `azure/login@v2` and `az logout` under `if: always()`, and opv only checks that `az account show` is that identity. Outside GitHub Actions it is refused (`federated_outside_ci`, exit 6); another identity is `federated_identity_mismatch` (exit 7). `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <env>` creates or reuses the app registration, its service principal, the target's least-privilege grants and one federated credential trusting exactly `repo:<owner/repo>:environment:<env>`, and prints the ids. `opv doctor --env` explains the mode, checks the trust subject in CI and warns on a self-hosted runner.
+
+### Changed
+
+- **A provision set's generated identities print their public half (#293, #294).** `generate = "rules"` on an `age_identity` key prints its `age1…` recipient; on an `ssh_ed25519` key, the public key line and its SHA256 fingerprint. The private value is never printed.
+- **`ssh_ed25519` failures name the cause (#294):** `not an OpenSSH private key`, `encrypted key`, `not an Ed25519 key` or `not delivered as a file`.
+- **Building from source needs Rust 1.99 or newer** (was 1.88). Every dependency is updated to its latest compatible version, including `rustix` 1.1.6 for its xattr unsoundness advisory. npm and release-binary installs are unaffected.
+
+## [0.18.3] - 2026-11-10
+
+0.18.3 makes the documented generated age identity load, adds a file-delivered Ed25519 OpenSSH key recipe, and keeps the bytes of file-backed GitHub Actions secrets.
+
+### Fixed
+
+- **`rules = { age_identity = true }` with `source = "generated"` loads (#293).** 0.18.2 refused it at load; generation reports only the `age1…` recipient.
+- **File-backed GitHub Actions secrets keep their bytes (#299),** including a trailing LF or CRLF, through GitHub's sealed-box secret API.
+
+### Added
+
+- **`rules = { ssh_ed25519 = true }` (#294):** an unencrypted Ed25519 OpenSSH private key, `kind = "secret"` and delivered only as a file. Generation reports only the public key and its SHA256 fingerprint.
+
+### Security
+
+- rmcp 3.9.0 (RUSTSEC-2026-0457, RUSTSEC-2026-0461, RUSTSEC-2026-0462).
+
 ## [0.18.2] - 2026-11-06
 
 0.18.2 lets a sealed target carry deliver-only keys, gives a misplaced `.opv config` its own error, and saves a 1Password read in `registry-push`.
