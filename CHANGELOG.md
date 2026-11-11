@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A provision set's generated identities print their public half (#293, #294).** `generate = "rules"` on an `age_identity` key prints its `age1…` recipient; on an `ssh_ed25519` key, the public key line and its SHA256 fingerprint. The private value is never printed.
 - **`ssh_ed25519` failures name the cause (#294):** `not an OpenSSH private key`, `encrypted key`, `not an Ed25519 key` or `not delivered as a file`.
+- **Building from source needs Rust 1.99 or newer** (was 1.88). Every dependency is updated to its latest compatible version, including `rustix` 1.1.6 for its xattr unsoundness advisory. npm and release-binary installs are unaffected.
 
 ## [0.18.3] - 2026-11-10
 
