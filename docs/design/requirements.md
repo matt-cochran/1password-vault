@@ -1105,6 +1105,14 @@ Adopted for 0.19.0.
 
 # 4. Security Requirements
 
+## FR-70 — Verified CI Reader Grants (#304)
+
+Design: `docs/design/ci-reader-grants.md`; evidence: `docs/design/spike-304-findings.md`.
+
+- `opv access <env> [--target <t>] --create` and `--rotate` record, after the new token verifies, a names-only issuance receipt (`opv.grant-receipt/1`: account id, the service account's user id from `op whoami` under the new token, its name, vault ids with the permissions requested, issued_at, issued_by, expires_on, and a digest of the computed grant table) in the contract's sibling bindings file. No token, value, session or secret hash is recorded. A manifest-configured project records none and says so.
+- `opv access <env> [--target <t>] --verify [--json]` runs under the reader's own token: `op whoami`, `op vault list` and the committed receipt and contract only; no item read, no write, no owner session. It reports `receipt`, `identity`, `vault_set`, `contract`, `permissions_issued`, `permissions_live` and `freshness`, each `verified`, `not_verified` (fixed reason) or `not_supported`; an unknown answer is never `verified`. It exits 0 only when every check but `permissions_live` (always `not_supported`: 1Password shows no service-account permission level) is verified; otherwise `Next:` is the owner's `--rotate` command.
+- `opv access`'s reader audit reports a service-account reader as `not_supported` (service accounts never appear in `op vault user list`), never as `no_ci_reader`.
+
 ## SR-1 — No Secret Logging
 
 Secret values shall never appear in:

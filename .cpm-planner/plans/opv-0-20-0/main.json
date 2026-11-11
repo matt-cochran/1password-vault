@@ -118,7 +118,7 @@
       },
       "earning_rule": "fifty_fifty",
       "metadata": {
-        "artifact": "Owner flows write the receipt: `opv access --create` and `--rotate` record it after the token verifies; `opv access <env> --audit` (owner session, `op vault user list`) refreshes it. Owner-only (refused under a service account, policy_refused); fresh read and version check on every manifest write (FR-19); existing access, sync and delivery semantics unchanged (their tests pass untouched).",
+        "artifact": "Owner flows write the receipt (docs/design/ci-reader-grants.md): `opv access --create` and `--rotate` run `op whoami` under the new token (child env only) and record opv.grant-receipt/1 in the sibling bindings file; manifest-configured projects record none and say so. The reader audit reports service-account readers as not_supported (spike Q3). Owner-only (refused under a service account, policy_refused); existing access, sync and delivery semantics unchanged (their tests pass untouched). No --audit: owners cannot see service-account permissions (spike Q3).",
         "owner": "agent",
         "track": "304",
         "issue": 304
@@ -478,7 +478,7 @@
       "estimated_effort_hours": 0.5,
       "earning_rule": "zero_hundred",
       "metadata": {
-        "artifact": "Fresh npm install of 0.20.0: `opv schema` lists `--verify` and `--audit` on access; `opv access <env> --verify --json` against a fixture config returns a names-only report with not_verified on a missing receipt",
+        "artifact": "Fresh npm install of 0.20.0: `opv schema` lists `--verify` on access; `opv access <env> --verify --json` against a fixture config returns a names-only report with not_verified (receipt_missing) when no receipt exists",
         "owner": "manager",
         "kind": "gate",
         "evidence_scope": "activation",
