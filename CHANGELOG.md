@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-11
+
+0.20.0 lets CI prove its 1Password reader has exactly the grants its contract expects, and makes the npm release refuse anything that was not qualified.
+
+### Added
+
+- **`opv access <env> [--target <t>] --verify [--json]` (#304, FR-70).** Under the CI identity's own token it reads only `op whoami` and `op vault list`, compares them with an issuance receipt and the grants opv computes now, and reports seven checks (`receipt`, `identity`, `vault_set`, `contract`, `permissions_issued`, `permissions_live`, `freshness`), each `verified`, `not_verified` with a fixed reason, or `not_supported`. It exits 0 only when every check but `permissions_live` is verified, otherwise `grants_not_verified` (exit 6) with the owner's `--rotate` command. No item read, no write, no owner session.
+- **Issuance receipts (#304).** `opv access --create` and `--rotate` record a names-only `opv.grant-receipt/1` (the service account's ids from `whoami` under the new token, its vaults and requested permissions, dates and a digest of the computed grants) beside the expiry in `secrets.bindings.toml`. A token issued before 0.20.0 has none and is `receipt_missing` until it is rotated.
+- **`docs/install.md` has an update command** (`npm i -g @matthew-cochran/opv@latest`).
+
+### Changed
+
+- **A service-account CI reader is reported `not_supported` (`ci_reader_not_visible`) by `opv access`, never as a missing grant (#304).** 1Password never lists service accounts in a vault's users (recorded in `docs/design/spike-304-findings.md`), so permission levels are proven only at issuance.
+- **The manual npm publish refuses an unqualified release (#295).** `scripts/npm/publish-manual.sh` must run from a clean checkout of the tag; it verifies the release's qualified candidate (the retained artifact, or the GitHub release's assets with an attested `manifest.json`) and publishes through the same verified path as CI. A missing or extra file fails. The GitHub release now carries the value-free qualification evidence.
+- **Release qualification tests the installed binary more (#295):** it delivers a disposable Ed25519 key through the installed `opv` and checks its bytes, mode and that it never reaches output, and it installs through `install.sh` on Linux and macOS.
+- **Rust 1.99.1 is pinned** (`rust-toolchain.toml`, every CI and release build; CI fails on any other `rustc`). Every direct dependency is on its latest major version.
+
 ## [0.19.0] - 2026-11-10
 
 0.19.0 records when CI credentials expire and rotates them in one step, lets an Azure target deploy from GitHub Actions with no stored secret, and prints the public half of every identity a provision set generates.

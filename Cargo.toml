@@ -1,7 +1,7 @@
 [package]
 name = "opv"
 default-run = "opv"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 # Pinned with rust-toolchain.toml; the minimum supported Rust is that toolchain.
 rust-version = "1.99.1"
