@@ -138,11 +138,30 @@ fn identity(r: &dyn CommandRunner, token: &SecretValue) -> Option<NativeIdentity
         .then_some(native)
 }
 
+/// Check actual native vault UUIDs before issuing a public receipt. A mutable name
+/// shaped like an ID is insufficient; malformed or duplicate metadata fails closed.
+fn issuance_vaults(r: &dyn CommandRunner, token: &SecretValue) -> Option<BTreeSet<String>> {
+    #[derive(Deserialize)]
+    struct Vault {
+        id: String,
+    }
+    let raw = metadata(r, token, &["vault", "list", "--format", "json"])?;
+    let vaults: Vec<Vault> = serde_json::from_slice(&raw).ok()?;
+    let actual: BTreeSet<_> = vaults.iter().map(|v| v.id.clone()).collect();
+    (actual.len() == vaults.len() && actual.iter().all(|v| id(v))).then_some(actual)
+}
+
 pub fn issued(c: &Contract, token: &SecretValue, r: &dyn CommandRunner) -> Result<Receipt, Error> {
     let native = identity(r, token)
         .ok_or_else(|| refusal(&c.environment, "native_service_identity_unverified"))?;
     if native.account_uuid != c.account_id {
         return Err(refusal(&c.environment, "native_account_mismatch"));
+    }
+    let actual = issuance_vaults(r, token)
+        .ok_or_else(|| refusal(&c.environment, "native_issuance_access_unverified"))?;
+    let expected: BTreeSet<_> = c.vaults.iter().map(|v| v.vault_id.clone()).collect();
+    if actual != expected {
+        return Err(refusal(&c.environment, "native_create_vault_set_mismatch"));
     }
     let issued_at = now();
     Ok(Receipt {
@@ -242,10 +261,25 @@ pub fn verify(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    verify_at(fleet, env, path, trusted_digest, token, r, json, out, now())
+}
+
+#[allow(clippy::too_many_arguments)] // Private clock seam for deterministic wire qualification.
+fn verify_at(
+    fleet: &Fleet,
+    env: &str,
+    path: &Path,
+    trusted_digest: &str,
+    token: &SecretValue,
+    r: &dyn CommandRunner,
+    json: bool,
+    out: &mut dyn Write,
+    checked_at: u64,
+) -> Result<(), Error> {
     let expected = contract(fleet, env)?;
     let bytes = std::fs::read(path).map_err(|e| io_error(LocalOp::Read, path, e))?;
     let result = (|| {
-        let receipt = validate(&expected, &bytes, trusted_digest, now())?;
+        let receipt = validate(&expected, &bytes, trusted_digest, checked_at)?;
         let native = identity(r, token).ok_or("native_identity_unverified")?;
         if native.user_uuid != receipt.service_account_id
             || native.account_uuid != expected.account_id
@@ -284,7 +318,7 @@ pub fn verify(
             "service_account_id": result.as_ref().ok().map(|r| &r.service_account_id),
             "issued_at": result.as_ref().ok().map(|r| r.issued_at),
             "not_after": result.as_ref().ok().map(|r| r.not_after),
-            "checked_at": now()
+            "checked_at": checked_at
         }
     });
     if json {

@@ -8,11 +8,14 @@
         "create",
         "github",
         "github-env",
+        "grant-receipt",
+        "grant-receipt-sha256",
         "json",
         "project",
         "rotate",
         "secret-name",
-        "target"
+        "target",
+        "verify-reader"
       ],
       "name": "access"
     },

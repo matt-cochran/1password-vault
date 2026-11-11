@@ -54,7 +54,9 @@ contract and every grant is read-only. Its fixed native create request explicitl
 names UUID/read_items pairs, omits create-vault permission, and requests 90 days.
 The token remains in zeroizing memory and is used for a token-only native `whoami`
 call before GitHub delivery. The returned `user_type` must be `SERVICE_ACCOUNT`, and
-native account UUID must equal the committed environment account UUID. The resulting
+native account UUID must equal the committed environment account UUID. A fresh
+native vault listing must also match the exact requested UUID set before token storage;
+a mutable name shaped like an ID is insufficient. The resulting
 `user_uuid` binds the receipt; the mutable service-account name is never authority.
 If identity verification fails, no receipt or GitHub token is stored; the owner must
 remove the new account before trying again. Native creates are never retried.
@@ -169,3 +171,9 @@ provider qualification. Before first activation, the owner/trusted CI should:
 
 No live vaults, service accounts, tokens or provider writes were used to develop the
 fake-provider tests. This source change does not claim production qualification.
+
+The synthetic wire fixtures in `tests/fixtures/reader_grants/` are emitted by the actual
+Rust receipt/report/frame serializers at a fixed clock, using only fake native metadata.
+The fixture test locks their exact bytes. To reproduce the public files locally, run
+`OPV_304_CONSUMER_GOLDEN_DIR=/tmp/opv-304-consumer-golden cargo test --locked --features fake --lib consumer_wire_golden`.
+These fixtures are format qualification, never provider grant or delivery evidence.

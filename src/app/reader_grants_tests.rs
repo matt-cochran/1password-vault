@@ -6,14 +6,17 @@ const VAULT: &str = "cccccccccccccccccccccccccc";
 const TOKEN: &str = "ops_FAKE304_SECRET_MARKER";
 
 fn fleet() -> Fleet {
+    fleet_for("test")
+}
+fn fleet_for(env: &str) -> Fleet {
     crate::config::parse(&format!(
         r#"
-[environments.test]
+[environments.{env}]
 account = "{ACCOUNT}"
 boundaries.app = {{ vault_id = "{VAULT}", item_id = "dddddddddddddddddddddddddd" }}
 [products.app.keys.KEY]
 kind = "secret"
-environments = ["test"]
+environments = ["{env}"]
 "#
     ))
     .unwrap()
@@ -26,7 +29,10 @@ fn native(user_type: &str, user: &str, account: &str) -> Output {
 }
 fn receipt() -> Receipt {
     let c = contract(&fleet(), "test").unwrap();
-    let r = FakeRunner::new(vec![native("SERVICE_ACCOUNT", USER, ACCOUNT)]);
+    let r = FakeRunner::new(vec![
+        native("SERVICE_ACCOUNT", USER, ACCOUNT),
+        Output::success(format!(r#"[{{"id":"{VAULT}"}}]"#)),
+    ]);
     issued(&c, &SecretValue::new(TOKEN.into()), &r).unwrap()
 }
 fn bytes(r: &Receipt) -> Vec<u8> {
@@ -348,4 +354,135 @@ fn an_unknown_receipt_field_is_not_ignored() {
         validate(&r.contract, &b, &digest(&b), r.issued_at).unwrap_err(),
         "receipt_invalid"
     );
+}
+
+/// Actual receipt/save/report/frame serializers, with a private fixed clock and native
+/// fake metadata only. Opt-in export writes public metadata, never the fake token.
+#[test]
+fn consumer_wire_golden_uses_actual_rust_serializers_and_fake_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipt.json");
+    let golden_fleet = fleet_for("staging-worker");
+    let expected = contract(&golden_fleet, "staging-worker").unwrap();
+    let issuer = FakeRunner::new(vec![
+        native("SERVICE_ACCOUNT", USER, ACCOUNT),
+        Output::success(format!(r#"[{{"id":"{VAULT}"}}]"#)),
+    ]);
+    let mut issued = issued(&expected, &SecretValue::new(TOKEN.into()), &issuer).unwrap();
+    issued.issued_at = 1_800_000_000;
+    issued.not_after = issued.issued_at + LIFETIME;
+    let sha = save(&path, &issued).unwrap();
+    let receipt_bytes = std::fs::read(&path).unwrap();
+    let mut body = Vec::new();
+    let runner = FakeRunner::new(vec![
+        native("SERVICE_ACCOUNT", USER, ACCOUNT),
+        Output::success(format!(r#"[{{"id":"{VAULT}"}}]"#)),
+    ]);
+    let success_result = verify_at(
+        &golden_fleet,
+        "staging-worker",
+        &path,
+        &sha,
+        &SecretValue::new(TOKEN.into()),
+        &runner,
+        true,
+        &mut body,
+        1_800_000_060,
+    );
+    success_result.unwrap();
+    let success = crate::json::finish(&body, Ok(()), false);
+    let mut failed_body = Vec::new();
+    let rejected = FakeRunner::new(vec![native("HUMAN", USER, ACCOUNT)]);
+    let failed_result = verify_at(
+        &golden_fleet,
+        "staging-worker",
+        &path,
+        &sha,
+        &SecretValue::new(TOKEN.into()),
+        &rejected,
+        true,
+        &mut failed_body,
+        1_800_000_060,
+    );
+    let error = failed_result.unwrap_err();
+    let invocation = crate::cause::Invocation::from_cli(&[
+        "opv".into(),
+        "access".into(),
+        "staging-worker".into(),
+        "--verify-reader".into(),
+        "--grant-receipt".into(),
+        "receipt.json".into(),
+        "--grant-receipt-sha256".into(),
+        sha.clone(),
+        "--json".into(),
+    ]);
+    let failure = crate::json::finish_with(&failed_body, Err(&error), false, &invocation, false);
+    let metadata = serde_json::to_vec_pretty(&serde_json::json!({
+        "synthetic": true, "receipt_sha256": sha,
+        "contract_sha256": issued.contract_sha256,
+        "account_id": ACCOUNT, "environment": "staging-worker", "role": "ci_reader",
+        "vault_ids": [VAULT], "service_account_id": USER, "checked_at": 1_800_000_060u64
+    }))
+    .unwrap();
+    let code = crate::cause::codes::table()
+        .into_iter()
+        .find(|row| row.code == "reader_grants_unverified")
+        .unwrap();
+    let error_row = format!(
+        "| `{}` | {} | {} | {} | {} |\n",
+        code.code,
+        code.exits
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join("/"),
+        code.retry
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("/"),
+        code.human_required
+            .iter()
+            .map(|h| if *h { "yes" } else { "no" })
+            .collect::<Vec<_>>()
+            .join("/"),
+        code.meaning.replace('|', "\\|")
+    );
+    let outputs = [
+        ("reader-error-row.txt", error_row.into_bytes()),
+        ("receipt.json", receipt_bytes),
+        ("success.json", success),
+        ("failure.json", failure),
+        ("metadata.json", metadata),
+    ];
+    if let Some(destination) = std::env::var_os("OPV_304_CONSUMER_GOLDEN_DIR") {
+        std::fs::create_dir_all(&destination).unwrap();
+        for (name, bytes) in &outputs {
+            std::fs::write(Path::new(&destination).join(name), bytes).unwrap();
+        }
+    }
+    let expected: [&[u8]; 5] = [
+        include_bytes!("../../tests/fixtures/reader_grants/reader-error-row.txt"),
+        include_bytes!("../../tests/fixtures/reader_grants/receipt.json"),
+        include_bytes!("../../tests/fixtures/reader_grants/success.json"),
+        include_bytes!("../../tests/fixtures/reader_grants/failure.json"),
+        include_bytes!("../../tests/fixtures/reader_grants/metadata.json"),
+    ];
+    assert!(
+        outputs
+            .iter()
+            .zip(expected)
+            .all(|((_, bytes), expected)| bytes.as_slice() == expected
+                && !String::from_utf8_lossy(bytes).contains(TOKEN))
+    );
+}
+
+#[test]
+fn issuance_requires_actual_native_vault_ids_not_a_name_shaped_as_an_id() {
+    let c = contract(&fleet(), "test").unwrap();
+    let r = FakeRunner::new(vec![
+        native("SERVICE_ACCOUNT", USER, ACCOUNT),
+        Output::success(format!(r#"[{{"id":"{USER}","name":"{VAULT}"}}]"#)),
+    ]);
+    assert!(issued(&c, &SecretValue::new(TOKEN.into()), &r).is_err());
 }

@@ -102,6 +102,17 @@ impl CommandRunner for World {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
         self.record(call);
         if call.program == "op"
+            && call.args.starts_with(&["vault", "list"])
+            && call
+                .env
+                .iter()
+                .any(|(name, _)| *name == "OP_SERVICE_ACCOUNT_TOKEN")
+        {
+            return Ok(Outcome::Done(Output::success(
+                r#"[{"id":"cccccccccccccccccccccccccc"}]"#,
+            )));
+        }
+        if call.program == "op"
             && call.args.first() == Some(&"whoami")
             && call
                 .env

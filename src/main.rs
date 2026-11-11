@@ -1143,7 +1143,7 @@ enum Cmd {
         #[arg(long, requires_all = ["env", "grant_receipt", "grant_receipt_sha256"], conflicts_with_all = ["create", "rotate", "target", "project"])]
         verify_reader: bool,
         /// Independently approved receipt digest, pinned outside untrusted job inputs.
-        #[arg(long, requires = "verify_reader")]
+        #[arg(long, value_name = "SHA256", requires = "verify_reader")]
         grant_receipt_sha256: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
@@ -2390,7 +2390,16 @@ fn shorten(sub: clap::Command, globals: &[clap::Id]) -> clap::Command {
         Some(a) => format!("{a}\n\n{GLOBAL_LINE}"),
         None => GLOBAL_LINE.to_string(),
     };
-    sub.help_template(SUB_TEMPLATE).after_help(after)
+    let mut sub = sub.help_template(SUB_TEMPLATE).after_help(after);
+    if sub.get_name() == "access" {
+        // Keep every issuance/verification flag discoverable on one screen. Clap's
+        // long-help layout puts each flag on three lines; use its generated compact
+        // layout for this expanded command instead of hiding required proof flags.
+        sub = sub.mut_arg("help", |a| a.help("Print help").long_help("Print help"));
+        let compact = sub.render_help().to_string();
+        sub = sub.override_help(compact);
+    }
+    sub
 }
 
 /// A clap usage error (or the help shown for a missing command, exit 2), then the `Next:`
