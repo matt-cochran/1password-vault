@@ -27,14 +27,15 @@ jobs:
       timeout-minutes: 12
       run: |
         # GitHub's Azure-hosted Ubuntu mirror can stop resolving for hours: use the main archive
-        # when it does, and never let one install hang the job.
+        # when it does, never let one install hang the job, and never fail the job over it: the
+        # zsh/fish tests skip themselves (and say so) when the shell is absent.
         use_archive() {
           echo "::warning::azure.archive.ubuntu.com unreachable; using archive.ubuntu.com"
           sudo sed -i 's#http://azure.archive.ubuntu.com#http://archive.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
         }
         install() { timeout 300 sh -c 'sudo apt-get update -o Acquire::Retries=2 && sudo apt-get install -y --no-install-recommends -o Acquire::Retries=2 zsh fish'; }
         getent hosts azure.archive.ubuntu.com >/dev/null || use_archive
-        install || { use_archive; install; }
+        install || { use_archive; install; } || echo "::warning::zsh and fish could not be installed: their syntax and session tests skip in this run"
     - name: Check formatting
       run: cargo fmt --all --check
     - name: Run clippy
