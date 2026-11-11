@@ -183,6 +183,14 @@ Rotation is also the person's step. On `credential_expiring` or `credential_expi
 --github <owner/repo>` or `opv target credentials <env> --target <name> --rotate`) and
 wait; they revoke the old credential afterwards. Never rotate or revoke one yourself.
 
+To prove in CI that a reader has exactly the grants its contract expects, put
+`opv access <env> [--target <name>] --verify` before any step that uses the token. It reads only
+the token's own `whoami` and vault list and the issuance receipt that `--create`/`--rotate`
+record in `secrets.bindings.toml`. Permission levels are proven only at issuance
+(`permissions_live` is always `not_supported`). On `grants_not_verified` (for example
+`receipt_missing` for a token issued before 0.20.0), hand the user its `--rotate` command.
+Never treat a successful item read as proof of grants.
+
 An Azure target with `azure.federated` deploys only from a GitHub Actions job that signed
 in through OIDC. `federated_outside_ci` on a local `status`, `plan`, `sync` or
 `doctor --env` is expected: do not sign in with `az login` to get past it; use the CI
