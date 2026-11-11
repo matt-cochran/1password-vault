@@ -23,7 +23,14 @@ jobs:
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
     - name: Install shells for the syntax tests
       if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh fish
+      shell: bash
+      run: |
+        # GitHub's Azure-hosted Ubuntu mirror can stop resolving for hours: retry, then use the main archive.
+        install() { sudo apt-get update -o Acquire::Retries=3 && sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 zsh fish; }
+        for attempt in 1 2; do install && exit 0; sleep 15; done
+        echo "::warning::apt mirror unreachable; switching to archive.ubuntu.com"
+        sudo sed -i 's#http://azure.archive.ubuntu.com#http://archive.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+        install
     - name: Check formatting
       run: cargo fmt --all --check
     - name: Run clippy
