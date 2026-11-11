@@ -3,8 +3,8 @@ name = "opv"
 default-run = "opv"
 version = "0.19.0"
 edition = "2024"
-# The minimum supported Rust is the stable release current at 0.19.0.
-rust-version = "1.99"
+# Pinned with rust-toolchain.toml; the minimum supported Rust is that toolchain.
+rust-version = "1.99.1"
 license = "MIT"
 description = "Sync secrets from 1Password into runtime targets such as Fly.io without ever printing, logging or writing a value"
 repository = "https://github.com/matt-cochran/1password-vault"
