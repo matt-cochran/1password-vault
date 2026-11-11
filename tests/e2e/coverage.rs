@@ -893,6 +893,25 @@ mod cases {
         )
     }
 
+    /// A CI reader without its own service credential cannot establish native authority.
+    /// The refusal occurs before local config discovery or any simulated provider call.
+    pub fn reader_grants_unverified() -> Case {
+        case(
+            Scenario::new(),
+            &[
+                "--config",
+                "secrets.toml",
+                "access",
+                "dev",
+                "--verify-reader",
+                "--grant-receipt",
+                "absent-grants.json",
+                "--grant-receipt-sha256",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ],
+        )
+    }
+
     pub fn values_needed() -> Case {
         case(
             Scenario::new().world(|w| {
@@ -2233,6 +2252,7 @@ scenarios! {
         confirm_mismatch => ConfirmMismatch,
         keys_blocking => KeysBlocking,
         values_needed => ValuesNeeded,
+        reader_grants_unverified => ReaderGrantsUnverified,
         plan_changed => PlanChanged,
         local_file_too_open => LocalFileTooOpen,
         private_dir_failed => PrivateDirFailed,

@@ -4801,7 +4801,7 @@ impl Cause {
             },
             ReaderGrantsUnverified { .. } => plan(
                 inspect("have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create"),
-                Next::None(NoNext::PersonPicksDirection),
+                Next::None(NoNext::NothingToRun),
             ),
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(

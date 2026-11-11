@@ -1,0 +1,18 @@
+# reader_grants_unverified: opv --config secrets.toml access dev --verify-reader --grant-receipt absent-grants.json --grant-receipt-sha256 0000000000000000000000000000000000000000000000000000000000000000
+
+## text exit: 8
+## text stdout
+
+## text stderr
+opv: CI reader grants for dev are not verified: service_account_token_required
+Do: have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create
+Next: none
+
+## json exit: 8
+## json stdout
+{"schema_version":4,"ok":false,"exit_code":8,"next":{"kind":"none","actor":"person","command":null},"do":"have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create","error":{"code":"reader_grants_unverified","category":"findings","message":"CI reader grants for dev are not verified: service_account_token_required","subject":{"reason":"service_account_token_required","env":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create","next":{"kind":"none","actor":"person","command":null}}}
+
+## json stderr
+opv: CI reader grants for dev are not verified: service_account_token_required
+Do: have the owner review the reader grant receipt and trusted CI digest; replace an unproven identity using opv access --create
+Next: none
