@@ -4,9 +4,24 @@
       "id": "spike-304-sa-visibility",
       "owned_files": [
         "docs/design/spike-304-findings.md",
-        "tests/fixtures/op/success/s30-whoami-service-account.json",
-        "tests/fixtures/op/success/s31-vault-list-service-account.json",
-        "tests/fixtures/op/success/s32-vault-user-list-service-account.json"
+        "tests/fixtures/op/success/s30-whoami-service-account.stdout",
+        "tests/fixtures/op/success/s30-whoami-service-account.stderr",
+        "tests/fixtures/op/success/s30-whoami-service-account.exit",
+        "tests/fixtures/op/success/s31-vault-list-service-account.stdout",
+        "tests/fixtures/op/success/s31-vault-list-service-account.stderr",
+        "tests/fixtures/op/success/s31-vault-list-service-account.exit",
+        "tests/fixtures/op/success/s32-vault-user-list-granted.stdout",
+        "tests/fixtures/op/success/s32-vault-user-list-granted.stderr",
+        "tests/fixtures/op/success/s32-vault-user-list-granted.exit",
+        "tests/fixtures/op/success/s33-vault-user-list-other.stdout",
+        "tests/fixtures/op/success/s33-vault-user-list-other.stderr",
+        "tests/fixtures/op/success/s33-vault-user-list-other.exit",
+        "tests/fixtures/op/success/s34-grant-after-create.stdout",
+        "tests/fixtures/op/success/s34-grant-after-create.stderr",
+        "tests/fixtures/op/success/s34-grant-after-create.exit",
+        "tests/fixtures/op/success/s35-vault-list-after-grant.stdout",
+        "tests/fixtures/op/success/s35-vault-list-after-grant.stderr",
+        "tests/fixtures/op/success/s35-vault-list-after-grant.exit"
       ],
       "prerequisites": [],
       "estimate": {
