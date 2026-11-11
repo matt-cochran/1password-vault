@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-11-10
+
+0.19.0 generates age and SSH identity keys, records when CI credentials expire and rotates them in one step, and lets an Azure target deploy from GitHub Actions with no stored secret.
+
+### Added
+
+- **`rules = { ssh_ed25519 = true }` (#294).** The value is an unencrypted OpenSSH Ed25519 private key, staged byte-exact and delivered through the file channel. `generate = "rules"` makes one and prints only the public key line and its SHA256 fingerprint. It cannot be combined with `age_identity`.
+- **CI credential expiry (#296).** `opv access --create` and `opv target credentials --create` record a value-free `expires_on` date in `secrets.bindings.toml` (a manifest project records none). `opv ready` (`credential_expiring`, `credential_expired`), `opv doctor --env` and `opv status <env>` report a credential within 14 days of expiry or past it, with its one rotation command.
+- **Rotation (#296).** `opv access <env> [--target <t>] --rotate --github <owner/repo>` makes a successor service account (`<old>-YYYYMMDD`), replaces the existing GitHub secret on stdin and verifies the new token; you then revoke the old account in 1Password. `opv target credentials <env> --target <t> --rotate` mints a fresh deploy credential into the item the target records.
+- **`opv ci workflow --expiry-check` (#296)** prints a daily workflow that opens or updates one issue when a CI credential is expiring or expired. It only reports.
+- **Azure federated deploys from GitHub Actions (#297).** An Azure target with `azure.federated` (tenant, client and subscription ids) and no `deploy_credentials` signs in through GitHub OIDC: the generated workflow adds `id-token: write`, `azure/login@v2` and `az logout` under `if: always()`, and opv only checks that `az account show` is that identity. Outside GitHub Actions it is refused (`federated_outside_ci`, exit 6); another identity is `federated_identity_mismatch` (exit 7). `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <env>` creates or reuses the app registration, its service principal, the target's least-privilege grants and one federated credential trusting exactly `repo:<owner/repo>:environment:<env>`, and prints the ids. `opv doctor --env` explains the mode, checks the trust subject in CI and warns on a self-hosted runner.
+
+### Fixed
+
+- **`rules = { age_identity = true }` keys load and generate (#293).** A generated key with an `age_identity` rule (and a prefix rule) was refused at load; it now generates an X25519 identity and prints only its `age1` recipient.
+
+### Security
+
+- rmcp 3.9.0 (RUSTSEC-2026-0457, RUSTSEC-2026-0461, RUSTSEC-2026-0462).
+
 ## [0.18.2] - 2026-11-06
 
 0.18.2 lets a sealed target carry deliver-only keys, gives a misplaced `.opv config` its own error, and saves a 1Password read in `registry-push`.
