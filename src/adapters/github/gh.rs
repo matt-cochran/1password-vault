@@ -432,6 +432,103 @@ pub fn environments(r: &dyn CommandRunner, repo: &str) -> Result<Vec<String>, Er
     Ok(envs.environments.into_iter().map(|e| e.name).collect())
 }
 
+/// `gh api repos/<repo>/actions/oidc/customization/sub` output. Unknown fields (the claim
+/// keys of a customized template) are ignored.
+#[derive(Deserialize)]
+struct OidcCustomization {
+    use_default: bool,
+    #[serde(default)]
+    use_immutable_subject: bool,
+    #[serde(default)]
+    sub_claim_prefix: Option<String>,
+}
+
+/// The subject GitHub Actions' OIDC tokens carry for a job in `environment` of `repo`
+/// (#323, FR-40), from the repository's subject customization (a read): the immutable
+/// `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>` that GitHub issues by
+/// default (`sub_claim_prefix`), or the classic `repo:<owner>/<repo>:environment:<env>`
+/// when the reply has neither a prefix nor immutable subjects. A customized claim template
+/// (`use_default: false`), or a prefix that is not this repository's, is refused: opv cannot
+/// know the token's subject, and a guessed trust only fails later at sign-in. A failed read
+/// (no such repository, no access) is gh's diagnosed error, never a guess.
+pub fn oidc_subject(r: &dyn CommandRunner, repo: &str, environment: &str) -> Result<String, Error> {
+    const WHAT: &str = "gh api";
+    let path = format!("repos/{repo}/actions/oidc/customization/sub");
+    let args = ["api", path.as_str()];
+    let out = read_out(
+        r,
+        WHAT,
+        &context(repo, None, false),
+        vec![format!("Actions read on {repo}")],
+        &Call::new(PROGRAM, &args),
+    )?;
+    let reply: OidcCustomization = parse_json(&out, WHAT)?;
+    if !reply.use_default {
+        return Err(unknown_subject(
+            repo,
+            "uses a customized OIDC subject template (use_default: false)",
+        ));
+    }
+    let prefix = match reply.sub_claim_prefix {
+        Some(p) => p,
+        None if !reply.use_immutable_subject => format!("repo:{repo}"),
+        None => {
+            return Err(unknown_subject(
+                repo,
+                "issues immutable OIDC subjects but its reply names no subject prefix",
+            ));
+        }
+    };
+    if !prefix_of(&prefix, repo) {
+        return Err(unknown_subject(
+            repo,
+            "answered with an OIDC subject prefix for another repository",
+        ));
+    }
+    Ok(format!("{prefix}:environment:{environment}"))
+}
+
+/// `prefix` is `repo:<owner>[@<id>]/<repo>[@<id>]` for `repo` (owner and name compared
+/// case-insensitively, ids all digits): GitHub's output validated before reuse (NR-6).
+fn prefix_of(prefix: &str, repo: &str) -> bool {
+    let Some(rest) = prefix.strip_prefix("repo:") else {
+        return false;
+    };
+    let strip = |part: &str| -> Option<String> {
+        match part.split_once('@') {
+            Some((name, id)) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => {
+                Some(name.to_string())
+            }
+            Some(_) => None,
+            None => Some(part.to_string()),
+        }
+    };
+    let Some((owner, name)) = rest.split_once('/') else {
+        return false;
+    };
+    match (strip(owner), strip(name)) {
+        (Some(o), Some(n)) => format!("{o}/{n}").eq_ignore_ascii_case(repo),
+        _ => false,
+    }
+}
+
+/// The refusal of a repository whose OIDC subject opv cannot know (`why`): the federated
+/// credential is the owner's to create by hand, with the subject their template produces.
+fn unknown_subject(repo: &str, why: &str) -> Error {
+    Cause::Usage {
+        problem: crate::cause::UsageProblem::Rejected {
+            message: format!(
+                "GitHub repository {repo} {why}, so opv cannot know the subject its OIDC \
+                 tokens carry; create the cloud's federated credential by hand with the subject \
+                 your template produces, or reset the repository's OIDC subject to GitHub's \
+                 default"
+            ),
+            help: vec!["target".into(), "credentials".into()],
+        },
+    }
+    .into()
+}
+
 /// A listing that failed in a GitHub environment for a reason gh's reply does not name:
 /// when the environment is absent from `repo`'s listing (a read, so a fact, not a guess),
 /// the owner's setup; any other failure unchanged. One read-only call, only on that path.

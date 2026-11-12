@@ -491,6 +491,87 @@ fn validate_secrets_error_never_contains_the_value() {
     assert!(!err.to_string().contains(MARKER));
 }
 
+// ------------------------------------------------------------------- oidc_subject (#323)
+
+/// The subject `oidc_subject` builds for `prod` of example-org/example-repo from `reply`.
+fn subject_from(reply: &str) -> Result<String, Error> {
+    let r = FakeRunner::new([Output::success(reply.to_string())]);
+    oidc_subject(&r, "example-org/example-repo", "prod")
+}
+
+#[test]
+fn oidc_subject_uses_githubs_immutable_prefix() {
+    let got = subject_from(
+        r#"{"use_default":true,"use_immutable_subject":true,"sub_claim_prefix":"repo:example-org@1000/example-repo@2000"}"#,
+    );
+    assert_eq!(
+        got.unwrap(),
+        "repo:example-org@1000/example-repo@2000:environment:prod"
+    );
+}
+
+#[test]
+fn oidc_subject_without_a_prefix_is_the_classic_form() {
+    let got = subject_from(r#"{"use_default":true}"#);
+    assert_eq!(
+        got.unwrap(),
+        "repo:example-org/example-repo:environment:prod"
+    );
+}
+
+#[test]
+fn oidc_subject_of_a_customized_template_is_refused() {
+    let got = subject_from(r#"{"use_default":false,"include_claim_keys":["repo","context"]}"#);
+    assert_eq!(got.unwrap_err().code_str(), "usage");
+}
+
+#[test]
+fn oidc_subject_refusal_names_the_customized_template() {
+    let got = subject_from(r#"{"use_default":false,"include_claim_keys":["repo"]}"#);
+    assert!(rendered(&got.unwrap_err()).contains("customized OIDC subject template"));
+}
+
+#[test]
+fn oidc_subject_refusal_has_one_next() {
+    let got = subject_from(r#"{"use_default":false,"include_claim_keys":["repo"]}"#);
+    let text = rendered(&got.unwrap_err());
+    assert_eq!(text.lines().filter(|l| l.starts_with("Next: ")).count(), 1);
+}
+
+#[test]
+fn oidc_subject_immutable_without_a_prefix_is_refused() {
+    let got = subject_from(r#"{"use_default":true,"use_immutable_subject":true}"#);
+    assert_eq!(got.unwrap_err().code_str(), "usage");
+}
+
+#[test]
+fn oidc_subject_prefix_of_another_repository_is_refused() {
+    let got = subject_from(
+        r#"{"use_default":true,"sub_claim_prefix":"repo:other-org@1000/other-repo@2000"}"#,
+    );
+    assert_eq!(got.unwrap_err().code_str(), "usage");
+}
+
+#[test]
+fn oidc_subject_reads_the_repositorys_customization() {
+    let r = FakeRunner::new([Output::success(r#"{"use_default":true}"#.to_string())]);
+    oidc_subject(&r, "example-org/example-repo", "prod").unwrap();
+    assert_eq!(
+        r.calls.borrow()[0].args,
+        [
+            "api",
+            "repos/example-org/example-repo/actions/oidc/customization/sub"
+        ]
+    );
+}
+
+#[test]
+fn oidc_subject_of_a_failed_read_is_an_error_not_a_guess() {
+    let r = FakeRunner::default();
+    r.push_with_stderr(Output::failure(1), "gh: Not Found (HTTP 404)\n");
+    assert!(oidc_subject(&r, "example-org/example-repo", "prod").is_err());
+}
+
 // ------------------------------------------------------------------------- environments
 
 const ENVIRONMENTS: &str = include_str!("../../../tests/fixtures/github/environments.json");
