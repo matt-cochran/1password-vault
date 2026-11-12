@@ -3,7 +3,7 @@
 # A fallback: releases publish to npm from the release workflow through trusted publishing
 # (NPM_PUBLISH=true). Use this when that job is off or fails.
 #
-#   git checkout v0.20.0 && scripts/npm/publish-manual.sh v0.20.0
+#   git checkout v0.20.1 && scripts/npm/publish-manual.sh v0.20.1
 #
 # Refuses unless the tag's qualified release candidate verifies (#295). It publishes the
 # retained, qualified npm tarballs exactly as the release workflow does, never a rebuild:
