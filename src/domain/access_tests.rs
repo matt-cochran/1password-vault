@@ -506,3 +506,38 @@ fn access_not_visible_says_who_can_run_the_check() {
         found[0].message
     );
 }
+
+// --- #314, FR-70: unlisted service accounts ------------------------------------------
+
+#[test]
+fn ci_reader_not_visible_says_not_supported() {
+    assert!(
+        ci_reader_not_visible("prod")
+            .message
+            .contains("not_supported")
+    );
+}
+
+#[test]
+fn ci_reader_not_visible_never_suggests_creating_a_service_account() {
+    let found = ci_reader_not_visible("prod");
+    assert!(!found.next.unwrap_or_default().contains("--create"));
+}
+
+#[test]
+fn deploy_identity_not_visible_names_the_target() {
+    assert!(
+        deploy_identity_not_visible("prod", "web")
+            .message
+            .contains("prod/web")
+    );
+}
+
+#[test]
+fn deploy_identity_not_visible_says_not_supported() {
+    assert!(
+        deploy_identity_not_visible("prod", "web")
+            .message
+            .contains("not_supported")
+    );
+}

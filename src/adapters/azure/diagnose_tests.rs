@@ -132,7 +132,77 @@ fn in_actions(repo: &str, environment: &str) -> GithubContext {
         repository: Some(repo.into()),
         environment: Some(environment.into()),
         self_hosted: false,
+        owner_id: None,
+        repository_id: None,
     }
+}
+
+/// The ambient context of a job whose runner sets the owner and repository ids (#323).
+fn in_actions_with_ids(repo: &str, environment: &str) -> GithubContext {
+    GithubContext {
+        owner_id: Some("1000".into()),
+        repository_id: Some("2000".into()),
+        ..in_actions(repo, environment)
+    }
+}
+
+/// The doctor's `federated credential` check against an app trusting `subject`.
+fn credential_check_trusting(subject: &str, ctx: GithubContext) -> Check {
+    let r = FakeRunner::new(vec![Output::success(
+        serde_json::to_vec(&json!([{ "subject": subject }])).unwrap(),
+    )]);
+    let checks = with_github_context(ctx, || federated_checks(&federated_target(), &r, true));
+    checks
+        .into_iter()
+        .find(|c| c.name == "federated credential")
+        .expect("missing check")
+}
+
+/// #323: a credential trusting GitHub's immutable subject passes.
+#[test]
+fn federated_doctor_accepts_the_immutable_subject() {
+    let c = credential_check_trusting(
+        "repo:example-org@1000/example-repo@2000:environment:prod",
+        in_actions_with_ids("example-org/example-repo", "prod"),
+    );
+    assert!(matches!(c.outcome, Ok(Verdict::Ok(_))));
+}
+
+/// #323: a credential trusting the classic subject still passes when the job has the ids.
+#[test]
+fn federated_doctor_accepts_the_classic_subject_when_ids_are_set() {
+    let c = credential_check_trusting(
+        "repo:example-org/example-repo:environment:prod",
+        in_actions_with_ids("example-org/example-repo", "prod"),
+    );
+    assert!(matches!(c.outcome, Ok(Verdict::Ok(_))));
+}
+
+/// #323: with the ids, the fix command creates the immutable subject.
+#[test]
+fn federated_doctor_mismatch_suggests_the_immutable_subject() {
+    let c = credential_check_trusting(
+        "repo:other/repo:environment:prod",
+        in_actions_with_ids("example-org/example-repo", "prod"),
+    );
+    assert!(matches!(
+        c.outcome,
+        Ok(Verdict::Warn(ref m))
+            if m.contains("\"subject\":\"repo:example-org@1000/example-repo@2000:environment:prod\"")
+    ));
+}
+
+/// #323: the mismatch also names the classic subject.
+#[test]
+fn federated_doctor_mismatch_mentions_the_classic_subject() {
+    let c = credential_check_trusting(
+        "repo:other/repo:environment:prod",
+        in_actions_with_ids("example-org/example-repo", "prod"),
+    );
+    assert!(matches!(
+        c.outcome,
+        Ok(Verdict::Warn(ref m)) if m.contains("needs repo:example-org/example-repo:environment:prod instead")
+    ));
 }
 
 fn check<'a>(checks: &'a [Check], name: &str) -> &'a Check {

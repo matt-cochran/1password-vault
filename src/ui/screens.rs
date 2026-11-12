@@ -362,6 +362,9 @@ pub fn access(f: &mut Frame, area: Rect, app: &App) {
                         GrantState::ReadOnlyNeeded => "can write, should only read",
                         GrantState::NotVisible => "not visible to you",
                         GrantState::NotInAccount => "vault not in this account",
+                        GrantState::NotSupported => {
+                            "not supported: service accounts are never listed"
+                        }
                     };
                     lines.push(Line::raw(format!(
                         "  {who} ({}): {needs} on vault {}: {state}",

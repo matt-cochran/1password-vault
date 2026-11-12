@@ -12,6 +12,7 @@
         "grant-receipt-sha256",
         "json",
         "project",
+        "revoked",
         "rotate",
         "secret-name",
         "target",

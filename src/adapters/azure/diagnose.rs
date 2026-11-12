@@ -122,16 +122,35 @@ pub struct GithubContext {
     pub environment: Option<String>,
     /// `RUNNER_ENVIRONMENT` is `self-hosted`.
     pub self_hosted: bool,
+    /// `GITHUB_REPOSITORY_OWNER_ID`: the owner's numeric id, in GitHub's immutable subject.
+    pub owner_id: Option<String>,
+    /// `GITHUB_REPOSITORY_ID`: the repository's numeric id, in GitHub's immutable subject.
+    pub repository_id: Option<String>,
 }
 
 impl GithubContext {
-    /// The trust subject `repo:<owner>/<repo>:environment:<env>`, when the job names both.
-    pub fn subject(&self) -> Option<String> {
-        Some(format!(
-            "repo:{}:environment:{}",
-            self.repository.as_deref()?,
-            self.environment.as_deref()?
-        ))
+    /// The subjects the job's OIDC token may carry, GitHub's default first (#323): the
+    /// immutable `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>` when the job
+    /// has both ids, then the classic `repo:<owner>/<repo>:environment:<env>`. Empty unless
+    /// the job names its repository and environment. The token carries exactly one; which
+    /// one is the repository's setting, which doctor does not read.
+    pub fn subjects(&self) -> Vec<String> {
+        let (Some(repo), Some(env)) = (self.repository.as_deref(), self.environment.as_deref())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let (Some(owner_id), Some(repo_id), Some((owner, name))) = (
+            self.owner_id.as_deref(),
+            self.repository_id.as_deref(),
+            repo.split_once('/'),
+        ) {
+            out.push(format!(
+                "repo:{owner}@{owner_id}/{name}@{repo_id}:environment:{env}"
+            ));
+        }
+        out.push(format!("repo:{repo}:environment:{env}"));
+        out
     }
 }
 
@@ -165,6 +184,8 @@ pub fn github_context() -> GithubContext {
         repository: var("GITHUB_REPOSITORY"),
         environment: var("GITHUB_ENVIRONMENT"),
         self_hosted: var("RUNNER_ENVIRONMENT").is_some_and(|v| v == "self-hosted"),
+        owner_id: var("GITHUB_REPOSITORY_OWNER_ID"),
+        repository_id: var("GITHUB_REPOSITORY_ID"),
     }
 }
 
@@ -206,7 +227,8 @@ pub fn federated_checks(t: &AzureTarget, r: &dyn CommandRunner, probe: bool) -> 
     if !probe || !ctx.actions {
         return checks;
     }
-    let Some(subject) = ctx.subject() else {
+    let subjects = ctx.subjects();
+    let Some(subject) = subjects.first() else {
         checks.push(Check {
             name: "federated credential".into(),
             outcome: Ok(Verdict::Warn(
@@ -218,21 +240,33 @@ pub fn federated_checks(t: &AzureTarget, r: &dyn CommandRunner, probe: bool) -> 
         return checks;
     };
     checks.push(match listed_subjects(r, &f.client_id) {
-        Ok(subjects) if subjects.iter().any(|s| s == &subject) => Check {
-            name: "federated credential".into(),
-            outcome: Ok(Verdict::Ok(format!(
-                "{subject} is trusted by the app's federated credentials"
-            ))),
-        },
-        Ok(_) => Check {
-            name: "federated credential".into(),
-            outcome: Ok(Verdict::Warn(format!(
-                "the app's federated credentials do not include {subject}\n  az ad app \
-                 federated-credential create --id {} --parameters \
-                 '{{\"name\":\"github\",\"issuer\":\"https://token.actions.githubusercontent.com\",\
-                 \"subject\":\"{subject}\",\"audiences\":[\"api://AzureADTokenExchange\"]}}'",
-                f.client_id
-            ))),
+        Ok(listed) => match subjects.iter().find(|s| listed.contains(s)) {
+            Some(s) => Check {
+                name: "federated credential".into(),
+                outcome: Ok(Verdict::Ok(format!(
+                    "{s} is trusted by the app's federated credentials"
+                ))),
+            },
+            // The first subject is GitHub's default; a repository that still issues the
+            // classic one is named too, so the person can tell which their tokens carry.
+            None => Check {
+                name: "federated credential".into(),
+                outcome: Ok(Verdict::Warn(format!(
+                    "the app's federated credentials do not include {subject}{}\n  az ad app \
+                     federated-credential create --id {} --parameters \
+                     '{{\"name\":\"{}\",\"issuer\":\"https://token.actions.githubusercontent.com\",\
+                     \"subject\":\"{subject}\",\"audiences\":[\"api://AzureADTokenExchange\"]}}'",
+                    match subjects.get(1) {
+                        Some(classic) => format!(
+                            " (GitHub's immutable subject; a repository that still issues the \
+                             classic subject needs {classic} instead)"
+                        ),
+                        None => String::new(),
+                    },
+                    f.client_id,
+                    super::federated::credential_name(subject),
+                ))),
+            },
         },
         // Advisory, like the identity-access check: an app registration the sign-in cannot
         // read does not prove the credential missing, so it is a warning, never a failure.
