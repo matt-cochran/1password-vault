@@ -98,6 +98,33 @@ pub fn ci_identity_expires_path(env: &str, target: &str) -> String {
     format!("environments.{env}.targets.{target}.ci_identity.expires_on")
 }
 
+/// The dotted bindings table of a 1Password service account's records: `env`'s CI reader,
+/// or the CI deploy identity of `target` in `env`.
+fn service_account_records(env: &str, target: Option<&str>) -> String {
+    match target {
+        Some(t) => format!("environments.{env}.targets.{t}.ci_identity"),
+        None => format!("environments.{env}.ci_reader"),
+    }
+}
+
+/// The dotted bindings key holding the name of the successor service account a rotation of
+/// that identity is creating, from before `op service-account create` until its token is
+/// stored and verified (#324, NR-1).
+pub fn rotation_successor_path(env: &str, target: Option<&str>) -> String {
+    format!(
+        "{}.rotation_successor",
+        service_account_records(env, target)
+    )
+}
+
+/// The dotted bindings key holding when (UTC, `YYYYMMDDTHHMMSSZ`) that rotation started.
+pub fn rotation_started_path(env: &str, target: Option<&str>) -> String {
+    format!(
+        "{}.rotation_started_at",
+        service_account_records(env, target)
+    )
+}
+
 /// Every credential record recorded in `bindings` for `env` and its `targets`: the CI
 /// reader, then each target's deploy credential and CI service account, in target order.
 /// Only expiry dates are recorded here; `identity` names the credential's holder in a

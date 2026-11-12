@@ -257,6 +257,56 @@ fn check_of_a_copy_with_other_ids_is_copies_differ() {
     assert_eq!(e.code_str(), "copies_differ");
 }
 
+/// `<dir>/secrets.bindings.toml` with `line` (one more dotted key) added to its ids.
+fn add_binding(dir: &Path, line: &str) {
+    let path = dir.join(crate::config::bindings::FILE);
+    let now = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{now}{line}\n")).unwrap();
+}
+
+/// #325: an expiry date recorded only in the file is not an id the copies disagree on.
+#[test]
+fn check_of_a_copy_whose_file_alone_records_an_expiry_passes() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    add_binding(
+        dir.path(),
+        "environments.dev.ci_reader.expires_on = \"2027-01-01\"",
+    );
+    let found = manifest_of(dir.path(), &op);
+    let res = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
+/// #325: with an expiry recorded in the file, an id that differs still differs.
+#[test]
+fn check_of_a_copy_with_other_ids_and_a_file_expiry_is_copies_differ() {
+    let (dir, op) = checkout();
+    put(
+        &op,
+        "myapp",
+        &TOML.replace("item_id = \"app\"", "item_id = \"other\""),
+    );
+    add_binding(
+        dir.path(),
+        "environments.dev.ci_reader.expires_on = \"2027-01-01\"",
+    );
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "copies_differ");
+}
+
 /// 03.07: either copy may be the intended one; no step picks the direction for the person.
 #[test]
 fn check_of_a_different_copy_runs_nothing_next() {

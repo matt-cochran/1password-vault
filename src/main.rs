@@ -1119,6 +1119,10 @@ enum Cmd {
         /// 1Password. Your own terminal only; the token is never shown (#296).
         #[arg(long, requires_all = ["env", "github"])]
         rotate: bool,
+        /// With --rotate: the successor an interrupted rotation left (named in its refusal),
+        /// which you revoked in 1Password; rotation then goes ahead (#324).
+        #[arg(long, value_name = "NAME", requires = "rotate")]
+        revoked: Option<String>,
         /// With --create or --rotate: the GitHub repository (owner/repo) whose secret
         /// receives the token.
         #[arg(long, value_name = "OWNER/REPO", requires = "identity_write")]
@@ -5455,6 +5459,7 @@ fn run_other(
             grant_receipt,
             create,
             rotate,
+            revoked,
             github: Some(repo),
             github_env,
             secret_name,
@@ -5484,6 +5489,7 @@ fn run_other(
                 opv::app::credentials_rotate::run_access(
                     &loaded?,
                     &req,
+                    revoked.as_deref(),
                     r,
                     &mut opv::app::setup_runtime::Console,
                     out,

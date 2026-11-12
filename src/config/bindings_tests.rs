@@ -317,6 +317,37 @@ fn the_applied_digest_leaves_out_a_ci_identity_expiry() {
 }
 
 #[test]
+fn the_applied_digest_leaves_out_a_pending_rotation_marker() {
+    let ids = Bindings::parse(&format!(
+        "{BINDINGS}environments.prod.targets.web.ci_identity.rotation_started_at = \"20261112T101500Z\"\n\
+         environments.prod.targets.web.ci_identity.rotation_successor = \"shop-prod-web-deploy-20261112\"\n"
+    ))
+    .unwrap();
+    assert_eq!(applied_digest(&ids), applied_digest(&plain()));
+}
+
+/// #324: a target's bookkeeping records stay in the bindings file; filled into the contract
+/// they would read as an unknown section of the target.
+#[test]
+fn a_contract_loads_with_its_targets_bookkeeping_records() {
+    let contract = "[environments.prod]\n\
+         boundaries.web = { vault_id = \"vweb\", item_id = \"iweb\" }\n\n\
+         [environments.prod.targets.web]\n\
+         fly.app = \"shop-prod\"\n\
+         fly.secret_name = \"{KEY}\"\n\n\
+         [products.web.keys.WEB_KEY]\n\
+         kind = \"secret\"\n\
+         environments = [\"prod\"]\n";
+    let ids = Bindings::parse(
+        "environments.prod.targets.web.ci_identity.expires_on = \"2027-01-01\"\n\
+         environments.prod.targets.web.ci_identity.rotation_successor = \"shop-prod-web-deploy-20261112\"\n\
+         environments.prod.targets.web.deploy_credentials_expires_on = \"2027-01-01\"\n",
+    )
+    .unwrap();
+    assert!(crate::config::parse(&super::merge(contract, &ids)).is_ok());
+}
+
+#[test]
 fn the_applied_digest_covers_a_changed_id() {
     let changed = Bindings::parse(&BINDINGS.replace("vweb", "vother")).unwrap();
     assert_ne!(applied_digest(&changed), applied_digest(&plain()));
