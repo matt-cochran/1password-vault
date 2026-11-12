@@ -313,8 +313,13 @@ pub fn check(
         committed.replace("\r\n", "\n"),
     );
     let (a, b) = if contract.trim_end() == committed.trim_end() {
+        // #325: only the ids `opv apply` governs are compared; the value-free expiry
+        // records (#296) live only in the file, so they never make the copies differ.
         let committed_ids = config::bindings::read_sibling(file)?;
-        (ids.render(), committed_ids.render())
+        (
+            ids.applied_part().render(),
+            committed_ids.applied_part().render(),
+        )
     } else {
         (contract, committed)
     };
