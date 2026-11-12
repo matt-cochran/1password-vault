@@ -15,6 +15,12 @@ replaced with the fixed fakes below before commit.
 | object IDs | `44444444-4444-4444-4444-44444444444N` (N = 1, 2, …) |
 | repository | `example-org/example-repo` |
 
+**Run it as one script:** `az login`, then
+`scripts/spikes/spike-297.sh <subscription id> <resource group> <owner/repo>`. It does sections 1–3
+below (4 is optional and not run), scrubs every id to the fakes above, refuses to copy a
+token-shaped string, copies the files here and deletes the app registration and the workflow on
+exit.
+
 ## You need
 
 - `az` signed in as a person who can create app registrations in Entra ID and assign roles
