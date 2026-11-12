@@ -522,3 +522,62 @@ fn each_target_writes_only_its_own_state_vault_and_the_ci_reader_writes_none() {
         ]
     );
 }
+
+// --- #314, FR-70: service accounts are never listed (spike #304, Q3) ----------------
+
+/// One deploy grant and one CI-reader grant on vault `b`, whose list names no service
+/// account, compared and then marked.
+fn marked_unlisted() -> (AccessReport, Vec<Principal>) {
+    let grants = [
+        grant(
+            deploy("prod", "web"),
+            "shop-prod-web-deploy",
+            "b",
+            Permission::Read,
+        ),
+        grant(ci("prod"), "shop-prod-ci", "b", Permission::Read),
+    ];
+    let observed = [ObservedVault {
+        vault_id: "b",
+        readers: Some(&[]),
+    }];
+    let mut report = compare(&grants, &observed);
+    let marked = mark_unlisted_service_accounts(&mut report, |_| false);
+    (report, marked)
+}
+
+#[test]
+fn a_missing_grant_on_a_list_naming_no_service_account_is_not_supported() {
+    let (report, _) = marked_unlisted();
+    assert!(
+        report
+            .checks
+            .iter()
+            .all(|c| c.state == GrantState::NotSupported)
+    );
+}
+
+#[test]
+fn a_not_supported_grant_counts_as_unclassified() {
+    let (report, _) = marked_unlisted();
+    assert_eq!((report.checked, report.unclassified), (0, 2));
+}
+
+#[test]
+fn marking_unlisted_grants_returns_each_principal_once() {
+    let (_, marked) = marked_unlisted();
+    assert_eq!(marked, [deploy("prod", "web"), ci("prod")]);
+}
+
+#[test]
+fn a_missing_grant_on_a_list_naming_service_accounts_stays_missing() {
+    let grants = [grant(ci("prod"), "shop-prod-ci", "b", Permission::Read)];
+    let readers = [reader("someone-else", true)];
+    let observed = [ObservedVault {
+        vault_id: "b",
+        readers: Some(&readers),
+    }];
+    let mut report = compare(&grants, &observed);
+    mark_unlisted_service_accounts(&mut report, |_| true);
+    assert_eq!(report.checks[0].state, GrantState::Missing);
+}

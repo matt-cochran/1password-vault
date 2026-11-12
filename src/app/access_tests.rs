@@ -130,14 +130,31 @@ fn visible() -> FakeOp {
     op
 }
 
-/// A fake where every vault is readable but names no service account: every required grant
-/// is missing.
+/// A fake where every vault is readable but names no service account, as 1Password always
+/// lists them (spike #304, Q3): every required grant is `not_supported` (#314).
 fn members_only() -> FakeOp {
     let op = FakeOp::default();
     {
         let mut users = op.vault_users.borrow_mut();
         for vault in [VSHARED, VWEB, VWORKER, VWEB_STATE, VWORKER_STATE] {
             users.insert(vault.into(), json!([viewer()]));
+        }
+    }
+    op
+}
+
+/// A fake where every vault is readable and its list names a service account, though not
+/// one this configuration needs: such a list shows service accounts, so every required
+/// grant is missing.
+fn others_listed() -> FakeOp {
+    let op = FakeOp::default();
+    {
+        let mut users = op.vault_users.borrow_mut();
+        for vault in [VSHARED, VWEB, VWORKER, VWEB_STATE, VWORKER_STATE] {
+            users.insert(
+                vault.into(),
+                json!([viewer(), account("other-app-ci", &["allow_viewing"])]),
+            );
         }
     }
     op
@@ -299,14 +316,14 @@ fn a_present_grant_is_reported_present() {
 #[test]
 fn each_principal_with_a_missing_grant_gets_exactly_one_owner_command() {
     assert_eq!(
-        commands(&run_json(&members_only(), Some("prod"), None)).len(),
+        commands(&run_json(&others_listed(), Some("prod"), None)).len(),
         3
     );
 }
 
 #[test]
 fn one_owner_command_covers_every_vault_of_its_principal() {
-    let command = commands(&run_json(&members_only(), Some("prod"), None))
+    let command = commands(&run_json(&others_listed(), Some("prod"), None))
         .into_iter()
         .find(|c| c.contains("shop-prod-web-deploy"))
         .unwrap();
@@ -344,7 +361,7 @@ fn a_reader_that_can_write_a_boundary_gets_an_owner_command() {
 #[test]
 fn the_text_prefixes_each_owner_command() {
     assert!(
-        run_text(&members_only(), Some("prod"), None)
+        run_text(&others_listed(), Some("prod"), None)
             .contains("Owner runs: op service-account create")
     );
 }
@@ -480,7 +497,7 @@ fn the_project_option_names_the_service_accounts() {
         Some("prod"),
         None,
         Some("acme"),
-        &members_only(),
+        &others_listed(),
         true,
         &mut out,
     )
@@ -513,10 +530,10 @@ fn the_json_document_carries_the_commands() {
 
 // --- #153: a vault not in the selected account is not "not visible" ---
 
-/// Every grant missing, and the `web` boundary vault unreadable: in the account (`op vault
+/// Every grant missing (the lists show service accounts), and the `web` boundary vault unreadable: in the account (`op vault
 /// get` finds it) when `in_account`, else not.
 fn web_vault_unreadable(in_account: bool) -> Probed {
-    let op = members_only();
+    let op = others_listed();
     op.vault_users.borrow_mut().remove(VWEB);
     if in_account {
         op.vaults
@@ -931,4 +948,140 @@ fn the_text_output_says_none_listed_for_a_vault_without_writers() {
 fn a_member_who_only_reads_is_never_named() {
     let text = run_stage_text("production", &writers_op(json!([viewer()])));
     assert!(!text.contains("Alice"), "{text}");
+}
+
+// --- #314, FR-70: service accounts are never listed (spike #304, Q3) ----------------
+
+/// The states of every check of one principal kind, in report order.
+fn states(doc: &Value, kind: &str) -> Vec<String> {
+    doc["environments"][0]["report"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["grant"]["principal"]["kind"] == kind)
+        .map(|c| c["state"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The finding codes of the first environment, in order.
+fn finding_codes(doc: &Value) -> Vec<String> {
+    doc["environments"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_unlisted_ci_reader_grant_is_not_supported() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    assert_eq!(states(&doc, "ci_reader"), ["not_supported"; 3]);
+}
+
+#[test]
+fn an_unlisted_deploy_identity_grant_is_not_supported() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    assert_eq!(states(&doc, "deploy"), ["not_supported"; 5]);
+}
+
+#[test]
+fn an_unlisted_ci_reader_is_reported_once_as_ci_reader_not_visible() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    let codes: Vec<String> = finding_codes(&doc)
+        .into_iter()
+        .filter(|c| c.starts_with("ci_reader"))
+        .collect();
+    assert_eq!(codes, ["ci_reader_not_visible"]);
+}
+
+#[test]
+fn an_unlisted_deploy_identity_is_reported_once_per_target() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    let codes: Vec<String> = finding_codes(&doc)
+        .into_iter()
+        .filter(|c| c == "deploy_identity_not_visible")
+        .collect();
+    assert_eq!(codes.len(), 2);
+}
+
+#[test]
+fn ci_reader_not_visible_steps_to_verify_reader() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    let next = doc["environments"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "ci_reader_not_visible")
+        .unwrap()["next"]
+        .clone();
+    assert_eq!(
+        next,
+        "opv access prod --verify-reader --grant-receipt <file> --grant-receipt-sha256 \
+         <approved-sha256>"
+    );
+}
+
+#[test]
+fn deploy_identity_not_visible_steps_to_its_delivery_evidence() {
+    let doc = run_json(&members_only(), Some("prod"), Some("web"));
+    let next = doc["environments"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "deploy_identity_not_visible")
+        .unwrap()["next"]
+        .clone();
+    assert_eq!(next, "opv delivery verify prod --target web");
+}
+
+#[test]
+fn an_unlisted_ci_reader_gets_no_owner_command() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    assert!(
+        !commands(&doc).iter().any(|c| c.contains("shop-prod-ci")),
+        "{doc}"
+    );
+}
+
+#[test]
+fn an_unlisted_deploy_identity_gets_no_owner_command() {
+    let doc = run_json(&members_only(), Some("prod"), Some("web"));
+    assert!(commands(&doc).is_empty(), "{doc}");
+}
+
+#[test]
+fn no_service_account_create_is_suggested_for_unlisted_identities() {
+    let text = run_text(&members_only(), Some("prod"), None);
+    assert!(!text.contains("op service-account create"), "{text}");
+}
+
+#[test]
+fn unlisted_service_account_grants_count_as_unclassified() {
+    let doc = run_json(&members_only(), Some("prod"), None);
+    assert_eq!(doc["environments"][0]["report"]["unclassified"], 8);
+}
+
+#[test]
+fn the_text_never_reports_an_unlisted_identity_missing() {
+    let text = run_text(&members_only(), Some("prod"), None);
+    assert!(!text.lines().any(|l| l.ends_with(": missing")), "{text}");
+}
+
+/// A list that names service accounts shows them, so a needed one absent from it is
+/// missing, not unknowable.
+#[test]
+fn a_grant_absent_from_a_list_that_names_service_accounts_still_reports_missing() {
+    let doc = run_json(&others_listed(), Some("prod"), None);
+    assert_eq!(state_of(&doc, VWEB_STATE), "missing");
+}
+
+#[test]
+fn a_listed_read_only_ci_reader_raises_no_ci_reader_not_visible() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert!(
+        !finding_codes(&doc)
+            .iter()
+            .any(|c| c == "ci_reader_not_visible")
+    );
 }

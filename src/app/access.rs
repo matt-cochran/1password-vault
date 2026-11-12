@@ -5,7 +5,10 @@
 //! compares the readers with
 //! the configuration's needs, and prints the owner's exact commands for the missing grants
 //! (1Password fixes a service account's vaults at creation, so one command creates one
-//! principal with all its vaults). It never runs a create or grant command.
+//! principal with all its vaults). It never runs a create or grant command. 1Password never
+//! lists a service account in a vault's access list (spike #304, Q3), so a CI reader's or
+//! deploy identity's grant that a list naming no service account leaves out is
+//! `not_supported`, never `missing` (#314, FR-70).
 //!
 //! Results state what was checked and what could not be classified, and never say "clean"
 //! (S7, FR-59). Only service-account names appear; no person's name, and no value, digest
@@ -24,10 +27,13 @@ use crate::cause::{
     ResourceKind, ResourceName, ResourceRef, Scope, System, TargetName, Upstream,
 };
 use crate::domain::Tier;
-use crate::domain::access::{AccessFinding, Reader, VAULT_NOT_IN_ACCOUNT, analyse, findings};
+use crate::domain::access::{
+    AccessFinding, Reader, VAULT_NOT_IN_ACCOUNT, analyse, ci_reader_not_visible,
+    deploy_identity_not_visible, findings,
+};
 use crate::domain::access_plan::{
     AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
-    TargetNeeds, compare, create_command, required,
+    TargetNeeds, compare, create_command, mark_unlisted_service_accounts, required,
 };
 use crate::domain::capability::{self, Capability, UnknownSource};
 use crate::error::Error;
@@ -560,6 +566,15 @@ fn build(
             check.state = GrantState::NotInAccount;
         }
     }
+    // #314 (spike #304, Q3): CI readers and deploy identities are service accounts, which
+    // 1Password never lists in a vault's access list, so one absent from a list naming no
+    // service account is not_supported and gets no owner command (it may well exist).
+    let unlisted = mark_unlisted_service_accounts(&mut report, |vault| {
+        readers
+            .get(vault)
+            .and_then(|r| r.as_deref())
+            .is_some_and(|listed| !listed.is_empty())
+    });
     let commands = owner_commands(&report.checks);
     // A deployed-tier vault needs a second writer; a local tier does not (design row
     // `access-writers`).
@@ -614,6 +629,15 @@ fn build(
         }
     }
     // After every vault's own findings: the per-vault causes keep their place.
+    for principal in &unlisted {
+        env_findings.push(match principal {
+            Principal::Deploy {
+                environment,
+                target,
+            } => deploy_identity_not_visible(environment, target),
+            Principal::CiReader { environment } => ci_reader_not_visible(environment),
+        });
+    }
     env_findings.extend(no_writer);
     EnvReport {
         name: need.name.to_string(),
@@ -802,6 +826,7 @@ fn state_label(state: &GrantState) -> &'static str {
         GrantState::ReadOnlyNeeded => "read-only needed",
         GrantState::NotVisible => "not visible",
         GrantState::NotInAccount => "not in this account",
+        GrantState::NotSupported => "not supported (service accounts are never listed)",
     }
 }
 

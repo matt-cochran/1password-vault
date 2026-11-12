@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **`opv access` no longer calls an unlisted service account missing (#314, FR-70).** 1Password never lists a service account in `op vault user list` (spike #304, Q3), so a CI reader's or deploy identity's grant on a readable vault whose list names no service account is now `not_supported`, counted as unclassified, with no `Owner runs: op service-account create …` command. A CI reader gets one `ci_reader_not_visible` finding stepping to `opv access <env> --verify-reader`; a deploy identity gets one `deploy_identity_not_visible` finding per target stepping to `opv delivery verify <env> --target <name>`. A list that names service accounts still reports an absent one `missing`.
+
 ## [0.20.0] - 2026-11-11
 
 0.20.0 makes the npm release refuse anything that was not qualified, tests the installed binary harder before release, and pins Rust 1.99.1.
