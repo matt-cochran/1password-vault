@@ -2,8 +2,8 @@
 //! and the apply record (D-G).
 
 use super::{
-    APPLIED, ApplyRecord, Bindings, digest, original_lines, read_record, split, write_record,
-    write_sibling, write_split,
+    APPLIED, ApplyRecord, Bindings, applied_digest, digest, original_lines, read_record, split,
+    write_record, write_sibling, write_split,
 };
 
 /// A minimal valid contract: one environment, one boundary (ids inline), one product whose
@@ -284,4 +284,47 @@ fn the_apply_record_is_written_beside_a_dot_opv_account_pointer() {
         bindings_digest: digest(b"b"),
     };
     assert!(write_record(&dir.path().join(APPLIED), &record).is_ok());
+}
+
+// #315: the apply record's digest covers only what apply governs -------------------------
+
+/// [`BINDINGS`] with `line` (one more dotted key) recorded beside its ids.
+fn with_line(line: &str) -> Bindings {
+    Bindings::parse(&format!("{BINDINGS}{line}\n")).unwrap()
+}
+
+fn plain() -> Bindings {
+    Bindings::parse(BINDINGS).unwrap()
+}
+
+#[test]
+fn the_applied_digest_leaves_out_the_ci_reader_expiry() {
+    let ids = with_line("environments.prod.ci_reader.expires_on = \"2027-01-01\"");
+    assert_eq!(applied_digest(&ids), applied_digest(&plain()));
+}
+
+#[test]
+fn the_applied_digest_leaves_out_a_deploy_credential_expiry() {
+    let ids =
+        with_line("environments.prod.targets.web.deploy_credentials_expires_on = \"2027-01-01\"");
+    assert_eq!(applied_digest(&ids), applied_digest(&plain()));
+}
+
+#[test]
+fn the_applied_digest_leaves_out_a_ci_identity_expiry() {
+    let ids = with_line("environments.prod.targets.web.ci_identity.expires_on = \"2027-01-01\"");
+    assert_eq!(applied_digest(&ids), applied_digest(&plain()));
+}
+
+#[test]
+fn the_applied_digest_covers_a_changed_id() {
+    let changed = Bindings::parse(&BINDINGS.replace("vweb", "vother")).unwrap();
+    assert_ne!(applied_digest(&changed), applied_digest(&plain()));
+}
+
+/// A record written by 0.20.0 digested the canonical file's bytes: for a file without an
+/// expiry record the new digest is the same, so that record keeps matching.
+#[test]
+fn the_applied_digest_of_a_file_without_expiry_records_is_its_byte_digest() {
+    assert_eq!(applied_digest(&plain()), digest(BINDINGS.as_bytes()));
 }

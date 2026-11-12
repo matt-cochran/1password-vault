@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **Recording a credential expiry no longer makes `opv config check` report `bindings_unapplied` (#315).** The apply record's `bindings_digest` now covers only what `opv apply` writes: the expiry dates that `opv access --create/--rotate` and `opv target credentials --create/--rotate` record in `secrets.bindings.toml` are left out. An apply record written by 0.20.0 or earlier keeps matching; one written while the file already held an expiry date that has since changed reports `bindings_unapplied` once, and `opv apply` rewrites it. Grant receipts are saved to their own file (`--grant-receipt FILE`) and never touched the bindings digest.
+
 ## [0.20.0] - 2026-11-11
 
 0.20.0 makes the npm release refuse anything that was not qualified, tests the installed binary harder before release, and pins Rust 1.99.1.
