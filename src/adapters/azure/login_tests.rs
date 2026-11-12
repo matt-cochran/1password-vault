@@ -504,3 +504,14 @@ fn federated_login_holds_no_secret() {
     let l = federated_login();
     assert!(l.held("AZURE_CLIENT_SECRET").is_none());
 }
+
+/// #297 live spike: the `az account show -o json` a real federated GitHub job recorded is
+/// accepted as the configured service principal.
+#[test]
+fn federated_sign_in_accepts_the_recorded_federated_account() {
+    let mut l = federated_login();
+    let r = FakeRunner::new([Output::success(
+        include_bytes!("../../../tests/fixtures/azure/oidc/account-show.json").to_vec(),
+    )]);
+    assert!(with_github_actions(true, || l.sign_in(BTreeMap::new(), &r)).is_ok());
+}

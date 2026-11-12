@@ -189,6 +189,8 @@ for p in files:
     for n, real in enumerate(re.findall(r"@(\d+)", prefix)):
         t = t.replace(real, ("1000", "2000")[n])
     t = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", t)
+    t = re.sub(r'"publisherDomain": "[^"]*"', '"publisherDomain": "example.onmicrosoft.com"', t)
+    t = re.sub(r'("environmentName": "[^"]*",(?:\s*"[^"]*": [^,]*,)*?\s*"name": )"[^"]*"', r'\1"example-subscription"', t)
     pathlib.Path(p.name + ".scrubbed").write_text(t)
 print(len(others), "other ids replaced")
 EOF

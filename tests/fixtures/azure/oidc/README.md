@@ -122,3 +122,23 @@ Put every file from steps 1–4 (and the downloaded workflow artifact) in this d
 tell the assistant they are here: it will replace the IDs with the fakes above, check that no
 token is present, and accept the spike. Clean up afterwards with
 `az ad app delete --id "$APP"`.
+
+## Recorded (2026-11-12)
+
+`scripts/spikes/spike-297.sh` ran against a scratch repository and a resource group in a real
+tenant. The job signed in through OIDC as the service principal (`account-show.json`,
+`user.type = servicePrincipal`), read the resource group (`group-show.txt`) and saw a token
+expiry (`access-token-expires-on.txt`); `az logout` left no account (`account-show-after-logout.*`).
+What the run found:
+
+- GitHub issued the immutable subject `repo:<owner>@<id>/<repo>@<id>:environment:<env>`
+  (`oidc-sub-customization.json`, the repository default); a credential trusting the classic
+  form failed with AADSTS700213 (fixed in 0.20.1, #323).
+- A job run seconds after the Reader grant failed in `azure/login` with `No subscriptions
+  found`; the grant took effect within one refresh after a 180 s wait (`rbac-wait.txt`).
+- Creating the same federated credential twice fails with `already exists` (exit 1,
+  `federated-credential-create-again.*`).
+
+Tests read `account-show.json`, `federated-credential-list.json` and
+`oidc-sub-customization.json` (`src/adapters/azure/login_tests.rs`, `diagnose_tests.rs`,
+`src/adapters/github/gh_tests.rs`).
