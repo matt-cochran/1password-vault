@@ -229,7 +229,7 @@ pub fn run_federated(
     ui.show(&format!("  trusts: {subject}"))?;
     ui.show("  roles: the target's least-privilege deploy roles only")?;
     ui.show("No secret is created: the GitHub job signs in through OIDC.")?;
-    ui.show("Azure applies new role assignments within a few minutes: a job run before then fails with \"No subscriptions found\"; re-run it.")?;
+    ui.show("New role assignments can take a few minutes to apply: a job run before then may fail to sign in; re-run it.")?;
     if !ui.confirm("Go ahead?")? {
         return Err(Cause::Guard {
             guard: Guard::Declined,
