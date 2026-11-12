@@ -54,6 +54,11 @@ impl Bindings {
         self.ids.insert(path.into(), id.into())
     }
 
+    /// Forget the record at `path`; the record that was there, if any.
+    pub fn remove(&mut self, path: &str) -> Option<String> {
+        self.ids.remove(path)
+    }
+
     /// The union of two bindings: every id of either; `other` wins where both record a path
     /// (so a later file may correct an earlier one).
     pub fn union(mut self, other: Bindings) -> Bindings {
@@ -62,7 +67,8 @@ impl Bindings {
     }
 
     /// The bindings `opv apply` governs: every id, without the value-free bookkeeping
-    /// records later commands write on their own (the credential expiry dates of #296).
+    /// records later commands write on their own (the credential expiry dates of #296, the
+    /// pending-rotation marker of #324).
     /// The apply record's digest covers only these (#315).
     pub fn applied_part(&self) -> Bindings {
         let ids = self
@@ -203,6 +209,11 @@ pub fn merge(text: &str, bindings: &Bindings) -> String {
         let Some((last, prefix)) = parts.split_last() else {
             continue;
         };
+        // A bookkeeping record (an expiry date, a pending rotation) is no field of the
+        // contract: filled into a target, it would read as an unknown section.
+        if is_bookkeeping(&parts) {
+            continue;
+        }
         // A stale id, for a boundary or target the contract no longer declares, fills
         // nothing: it must not make the contract declare it again.
         if !declared(&doc, &parts[..parts.len().min(4)]) {
@@ -328,44 +339,49 @@ pub fn write_record(path: &Path, record: &ApplyRecord) -> Result<(), Error> {
     std::fs::write(path, text).map_err(|e| unreadable(path, &e))
 }
 
-/// The id families of the contract (D-G) plus the value-free credential expiry records
-/// (#296): a boundary's vault/item, a target's state vault, a target's per-product delivery
-/// item, the environment's CI reader expiry, and a target's deploy-credential and CI
-/// service-account expiry. Anything else is not a binding.
+/// The id families of the contract (D-G) plus the value-free [`is_bookkeeping`] records: a
+/// boundary's vault/item, a target's state vault and a target's per-product delivery item.
+/// Anything else is not a binding.
 fn recognized(path: &[&str]) -> bool {
-    matches!(
-        path,
-        ["environments", _, "boundaries", _, "vault_id" | "item_id"]
-            | ["environments", _, "targets", _, "state_vault_id"]
-            | ["environments", _, "targets", _, "delivery_items", _]
-            | ["environments", _, "ci_reader", "expires_on"]
-            | [
-                "environments",
-                _,
-                "targets",
-                _,
-                "deploy_credentials_expires_on"
-            ]
-            | ["environments", _, "targets", _, "ci_identity", "expires_on"]
-    )
+    is_bookkeeping(path)
+        || matches!(
+            path,
+            ["environments", _, "boundaries", _, "vault_id" | "item_id"]
+                | ["environments", _, "targets", _, "state_vault_id"]
+                | ["environments", _, "targets", _, "delivery_items", _]
+        )
 }
 
-/// The value-free bookkeeping records among the [`recognized`] families: the credential
-/// expiry dates `opv access --create/--rotate` and `opv target credentials
-/// --create/--rotate` write beside the contract (#296). `opv apply` does not govern them,
-/// so they are left out of the apply record's digest (#315).
+/// The value-free bookkeeping records among the [`recognized`] families, which later
+/// commands write beside the contract on their own: the credential expiry dates `opv access
+/// --create/--rotate` and `opv target credentials --create/--rotate` record (#296) for the
+/// environment's CI reader, a target's deploy credential and its CI service account, and the
+/// pending-rotation marker `opv access --rotate` records before it creates a successor (its
+/// name and UTC start, #324, NR-1). `opv apply` does not govern them, so they are left out
+/// of the apply record's digest (#315) and of `opv config check`'s comparison (#325), and
+/// they are never filled into the contract.
 fn is_bookkeeping(path: &[&str]) -> bool {
     matches!(
         path,
-        ["environments", _, "ci_reader", "expires_on"]
-            | [
-                "environments",
-                _,
-                "targets",
-                _,
-                "deploy_credentials_expires_on"
-            ]
-            | ["environments", _, "targets", _, "ci_identity", "expires_on"]
+        [
+            "environments",
+            _,
+            "ci_reader",
+            "expires_on" | "rotation_successor" | "rotation_started_at"
+        ] | [
+            "environments",
+            _,
+            "targets",
+            _,
+            "deploy_credentials_expires_on"
+        ] | [
+            "environments",
+            _,
+            "targets",
+            _,
+            "ci_identity",
+            "expires_on" | "rotation_successor" | "rotation_started_at"
+        ]
     )
 }
 

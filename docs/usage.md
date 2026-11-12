@@ -41,7 +41,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | CI, person | does every placement still hold what opv delivered |
 | runtime | `opv unseal <bundle> --env <e> --product <p> --signers <file> [--identity-file <path> \| --identity-env <VAR>] [--project <name>] [--min-revision <N>] [--verify-only] [--json] [--exec -- <cmd>]` | the runtime, CI; an assistant: `--verify-only` and inspect | verify a [sealed bundle](sealed-delivery.md), then inspect its names or run the command with its values; no configuration, `op` or network ([below](#sealed-bundles-opv-unseal)) |
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>`, `opv ci workflow --expiry-check` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests; `--expiry-check` prints the daily [credential expiry](#ci-credential-expiry-and-rotation) check |
-| admin | `opv access <env> [--target <t>] --create\|--rotate --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create\|--rotate]`, `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <e>` | person | CI and deploy identities, their [rotation](#ci-credential-expiry-and-rotation), and an Azure federated (OIDC) identity |
+| admin | `opv access <env> [--target <t>] --create\|--rotate --github <owner/repo> [--github-env <e>] [--secret-name <n>] [--revoked <name>]`, `opv target credentials <env> --target <t> [--create\|--rotate]`, `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <e>` | person | CI and deploy identities, their [rotation](#ci-credential-expiry-and-rotation), and an Azure federated (OIDC) identity |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
@@ -794,6 +794,14 @@ opv target credentials prod --target web --rotate          # the minted deploy c
 ```
 
 Each asks once, keeps the token out of view, and ends by telling you to revoke the old credential (in 1Password, or at the provider). Revoke it once the new one has worked: `opv delivery verify <env>` after the next sync. A federated Azure identity holds no secret and has no expiry.
+
+An interrupted `opv access --rotate` is safe to run again (#324). Before it creates the successor it records a pending rotation in `secrets.bindings.toml` (`rotation_successor`, the successor's name, and `rotation_started_at`, UTC; no value), and it clears both in the same write that records the new expiry, once the token is stored and verified. A run that finds the record refuses (`secret_not_stored`, exit 9) and creates nothing: that successor's token may be lost. Revoke the account it names in 1Password (Developer > Service accounts) if it exists, then rotate again with `--revoked <that name>`, which the refusal prints in full:
+
+```sh
+opv access prod --target web --rotate --github org/app --revoked myapp-prod-web-deploy-20261112
+```
+
+(Deleting the two `rotation_*` lines from `secrets.bindings.toml` by hand does the same.) 1Password never lists service accounts in `op vault user list`, so opv cannot look for the successor itself. A project whose configuration lives in 1Password records nothing locally, so it cannot detect an interrupted run: the question names the successor, and if the run stops before the token is stored, revoke that account before running it again. `opv target credentials --rotate` mints a provider token into an existing item and creates no service account.
 
 ## Run a reviewed operation on a target: `opv target op`
 
