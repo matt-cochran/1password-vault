@@ -547,7 +547,7 @@ All three are ids, not secrets. A target with `azure.federated` may not also hav
 - `opv ci workflow <env> --target <t>` adds `id-token: write`, an `azure/login@v2` step with the three ids, and `az logout` under `if: always()` at the end.
 - opv never reads the GitHub token. Before any other `az` call it checks that `az account show` is this tenant, client and subscription. Another identity is refused (`federated_identity_mismatch`, exit 7).
 - The identity exists only in a GitHub Actions job: `status`, `plan`, `sync` and `doctor --env` against this target anywhere else are refused (`federated_outside_ci`, exit 6). Both errors name `opv ci workflow <env> --target <t>`.
-- The app's federated credential trusts the subject `repo:<owner>/<repo>:environment:<env>`, so the GitHub environment's protection rules decide who can deploy. In CI, `opv doctor --env` checks that the app trusts the job's subject and warns on a self-hosted runner.
+- The app's federated credential trusts the subject GitHub issues for that environment: GitHub's default immutable `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>`, or the classic `repo:<owner>/<repo>:environment:<env>` for a repository that still uses it (setup reads which with `gh`, and refuses a customized subject template), so the GitHub environment's protection rules decide who can deploy. In CI, `opv doctor --env` checks that the app trusts the job's subject and warns on a self-hosted runner.
 - `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <env>` is the setup command ([below](#mint-a-targets-deploy-credential-opv-target-credentials)).
 
 #### Companion jobs
@@ -916,7 +916,7 @@ opv target credentials prod --target shared
 opv target credentials prod --target shared --rotate
 ```
 
-For an Azure target with [`azure.federated`](#federated-deploys-from-github-actions-azurefederated), `--create --federated --github <owner/repo> --github-env <env>` sets up the CI identity instead, in your own terminal: no secret and no 1Password item. The identity gets only the target's deploy roles and trusts exactly `repo:<owner>/<repo>:environment:<env>`; opv prints its tenant, client and subscription ids for the target's `azure.federated` table.
+For an Azure target with [`azure.federated`](#federated-deploys-from-github-actions-azurefederated), `--create --federated --github <owner/repo> --github-env <env>` sets up the CI identity instead, in your own terminal: no secret and no 1Password item. The identity gets only the target's deploy roles and trusts exactly the subject GitHub issues for that environment, which opv reads from the repository with `gh` (the immutable `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>` by default); opv prints its tenant, client and subscription ids for the target's `azure.federated` table.
 
 <a id="start-from-an-existing-env-opv-init---from"></a>
 

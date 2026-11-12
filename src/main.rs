@@ -1847,8 +1847,9 @@ enum TargetCmd {
         /// With --federated: the GitHub repository (owner/repo) the identity trusts.
         #[arg(long, value_name = "OWNER/REPO", requires = "federated")]
         github: Option<String>,
-        /// With --federated: the GitHub environment the identity trusts (its subject is
-        /// repo:<owner/repo>:environment:<name>).
+        /// With --federated: the GitHub environment the identity trusts (its subject is the
+        /// one GitHub issues, read from the repository: repo:<owner>@<id>/<repo>@<id> or
+        /// repo:<owner/repo>, then :environment:<name>).
         #[arg(long, value_name = "NAME", requires = "federated")]
         github_env: Option<String>,
     },

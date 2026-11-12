@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **Federated Azure setup trusts the subject GitHub actually issues (#323, FR-40).** GitHub now issues immutable OIDC subjects by default (`repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>`), so a credential trusting the classic `repo:<owner>/<repo>:environment:<env>` failed `azure/login` with AADSTS700213. `opv target credentials --create --federated` reads the repository's subject with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` and trusts that one; a customized subject template, or a reply opv cannot read, is refused with one `Next:`. An identity made for the classic subject keeps its app and gains the new credential. In CI, `opv doctor --env` accepts a credential trusting either form and suggests the immutable one.
+
 ## [0.20.0] - 2026-11-11
 
 0.20.0 makes the npm release refuse anything that was not qualified, tests the installed binary harder before release, and pins Rust 1.99.1.
