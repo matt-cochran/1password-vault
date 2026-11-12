@@ -53,7 +53,12 @@ cleanup() {
 trap cleanup EXIT
 
 TENANT=$(az account show --subscription "$SUB" --query tenantId -o tsv)
-cred() { printf '{"name":"github-spike","issuer":"https://token.actions.githubusercontent.com","subject":"repo:%s:environment:spike","audiences":["api://AzureADTokenExchange"]}' "$REPO"; }
+# GitHub's subject prefix: repo:<owner>/<repo> by default, or repo:<owner>@<id>/<repo>@<id> when the
+# repository uses immutable subjects (the default for newer repositories). Record which one is in use.
+gh api "repos/$REPO/actions/oidc/customization/sub" > oidc-sub-customization.json
+PREFIX=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sub_claim_prefix") or "repo:"+sys.argv[2])' oidc-sub-customization.json "$REPO")
+SUBJECT="$PREFIX:environment:spike"
+cred() { printf '{"name":"github-spike","issuer":"https://token.actions.githubusercontent.com","subject":"%s","audiences":["api://AzureADTokenExchange"]}' "$SUBJECT"; }
 
 echo "== 1. create the identity"
 az ad app create --display-name "$name" -o json > app-create.json
@@ -74,7 +79,7 @@ if az ad app federated-credential create --id "$APP" -o json --parameters "$(cre
 else
   echo $? > federated-credential-create-again.exit
 fi
-echo "created $name (Reader on $RG, federated credential for repo:$REPO:environment:spike)"
+echo "created $name (Reader on $RG, federated credential for $SUBJECT)"
 
 echo "== 2. OIDC sign-in in GitHub Actions"
 gh api -X PUT "repos/$REPO/environments/spike" >/dev/null
@@ -133,8 +138,9 @@ done
 echo "waiting for run $run (an environment with required reviewers needs your approval in the Actions tab)"
 gh run watch "$run" -R "$REPO" --interval 15 >/dev/null || true
 gh run view "$run" -R "$REPO" --json conclusion --jq .conclusion > workflow-conclusion.txt
-mkdir -p artifact && gh run download "$run" -R "$REPO" -n opv-oidc-spike -D artifact
-mv artifact/* . && rmdir artifact
+gh run view "$run" -R "$REPO" --log-failed > workflow-failed.log 2>&1 || true
+mkdir -p artifact && { gh run download "$run" -R "$REPO" -n opv-oidc-spike -D artifact || echo "no artifact: see workflow-failed.log" >&2; }
+mv artifact/* . 2>/dev/null || true; rmdir artifact
 echo "workflow concluded: $(cat workflow-conclusion.txt)"
 
 echo "== 3. a sign-in that is not there"
@@ -151,12 +157,12 @@ fi
 rm -f workflow.yml
 cat > scrub.py <<'EOF'
 import pathlib, re, sys
-tenant, client, sub, repo, rg, name = sys.argv[1:7]
+tenant, client, sub, repo, rg, name, prefix = sys.argv[1:8]
 fixed = {tenant.lower(): "11111111-1111-1111-1111-111111111111", client.lower(): "22222222-2222-2222-2222-222222222222",
          sub.lower(): "33333333-3333-3333-3333-333333333333"}
 guid = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 files = sorted(p for p in pathlib.Path(".").iterdir()
-               if p.is_file() and p.suffix in (".json", ".txt", ".stderr", ".exit") and p.name != "workflow-conclusion.txt")
+               if p.is_file() and p.suffix in (".json", ".txt", ".stderr", ".exit", ".log") and p.name != "workflow-conclusion.txt")
 others = {}
 for p in files:
     for g in guid.findall(p.read_text()):
@@ -166,14 +172,17 @@ owner = repo.split("/")[0]
 for p in files:
     t = p.read_text()
     t = guid.sub(lambda m: fixed.get(m.group(0).lower()) or others[m.group(0).lower()], t)
-    for real, fake in ((repo, "example-org/example-repo"), (name, "opv-oidc-spike"), (rg, "example-rg"), (owner, "example-org")):
+    for real, fake in ((prefix, "repo:example-org@1000/example-repo@2000" if "@" in prefix else "repo:example-org/example-repo"), (repo, "example-org/example-repo"), (name, "opv-oidc-spike"), (rg, "example-rg"), (owner, "example-org")):
         t = t.replace(real, fake)
+    for n, real in enumerate(re.findall(r"@(\d+)", prefix)):
+        t = t.replace(real, ("1000", "2000")[n])
     t = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", t)
     pathlib.Path(p.name + ".scrubbed").write_text(t)
 print(len(others), "other ids replaced")
 EOF
-python3 -I scrub.py "$TENANT" "$APP" "$SUB" "$REPO" "$RG" "$name"
-left=$(grep -l -i -F -e "$TENANT" -e "$APP" -e "$SUB" -e "$REPO" -e "$RG" ./*.scrubbed || true)
+python3 -I scrub.py "$TENANT" "$APP" "$SUB" "$REPO" "$RG" "$name" "$PREFIX"
+left=$(grep -l -i -F -e "$TENANT" -e "$APP" -e "$SUB" -e "$REPO" -e "$RG" -e "$PREFIX" ./*.scrubbed || true)
+for id in $(grep -o -E '@[0-9]+' <<<"$PREFIX" | tr -d @); do left="$left$(grep -l -w -F -e "$id" ./*.scrubbed || true)"; done
 left="$left$(grep -l -E 'eyJ[A-Za-z0-9_-]{10,}' ./*.scrubbed || true)"
 if [ -n "$left" ]; then echo "real ids left in: $left (not copied; inspect $out)" >&2; exit 8; fi
 echo "no real ids left"
