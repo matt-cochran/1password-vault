@@ -7,9 +7,11 @@
 //! `access-writers`); counts and findings never carry a person's name or email, only
 //! service-account names are named.
 //!
-//! 1Password's `op vault user list` reports the `type` and `state` strings used here. The
-//! `SERVICE_ACCOUNT` type string is from 1Password's documentation and has not yet been
-//! confirmed against a live account.
+//! 1Password's `op vault user list` reports the `type` and `state` strings used here. Spike
+//! #304 (Q3, docs/design/spike-304-findings.md) found that a service account never appears
+//! in that list at all, so an unlisted CI reader or deploy identity is `not_supported`
+//! ([`CI_READER_NOT_VISIBLE`], [`DEPLOY_IDENTITY_NOT_VISIBLE`]), never reported as absent
+//! (#314).
 
 use std::collections::BTreeMap;
 
@@ -59,6 +61,12 @@ const ACCESS_NOT_VISIBLE: &str = "access_not_visible";
 /// #153: a needed vault that `op vault get` cannot find in the selected account.
 pub const VAULT_NOT_IN_ACCOUNT: &str = "vault_not_in_account";
 const NO_CI_READER: &str = "no_ci_reader";
+/// #314, FR-70: an environment's CI reader cannot be checked from the vaults' access lists,
+/// because 1Password never lists a service account there (spike #304, Q3).
+pub const CI_READER_NOT_VISIBLE: &str = "ci_reader_not_visible";
+/// #314, FR-70: a target's deploy identity cannot be checked from the vaults' access lists,
+/// for the same reason.
+pub const DEPLOY_IDENTITY_NOT_VISIBLE: &str = "deploy_identity_not_visible";
 const CI_READER_CAN_WRITE: &str = "ci_reader_can_write";
 /// 0.9.0: several service accounts with one name read a vault, as after `opv access
 /// --create` made a replacement: the older one waits to be removed in 1Password.
@@ -90,6 +98,44 @@ pub fn no_writer(vault_id: &str, env: &str) -> AccessFinding {
              nobody can fix a value there until 1Password gives someone write access"
         ),
         next: None,
+    }
+}
+
+/// The `ci_reader_not_visible` finding for `env` (#314): whether its CI reader exists and
+/// what it can read is not visible in any vault's access list, so the check runs in CI
+/// under the reader's own token against its approved issuance receipt (#310).
+pub fn ci_reader_not_visible(env: &str) -> AccessFinding {
+    AccessFinding {
+        code: CI_READER_NOT_VISIBLE,
+        environment: env.to_string(),
+        message: format!(
+            "cannot check the CI reader of {env} here (not_supported): 1Password never lists a \
+             service account in a vault's access list; verify it in CI under its own token \
+             against its approved grant receipt"
+        ),
+        next: Some(format!(
+            "opv access {env} --verify-reader --grant-receipt <file> --grant-receipt-sha256 \
+             <approved-sha256>"
+        )),
+    }
+}
+
+/// The `deploy_identity_not_visible` finding for `target`'s deploy identity in `env`
+/// (#314): no access list shows it, and `--verify-reader` covers CI readers only, so the
+/// evidence is the delivery that identity's sync recorded.
+pub fn deploy_identity_not_visible(env: &str, target: &str) -> AccessFinding {
+    AccessFinding {
+        code: DEPLOY_IDENTITY_NOT_VISIBLE,
+        environment: env.to_string(),
+        message: format!(
+            "cannot check the deploy identity of {env}/{target} here (not_supported): \
+             1Password never lists a service account in a vault's access list; its recorded \
+             delivery shows whether it reads and writes what it needs"
+        ),
+        next: Some(cmd_text(&Cmd {
+            command: vec!["delivery".into(), "verify".into()],
+            args: vec![env.to_string(), "--target".into(), target.to_string()],
+        })),
     }
 }
 

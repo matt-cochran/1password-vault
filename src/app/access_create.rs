@@ -98,6 +98,18 @@ fn usage(flag: &str, format: &'static str) -> Error {
     .into()
 }
 
+/// `--github` and `--github-env` of a federated identity (#297, #323), before the
+/// repository's OIDC subject is read with them: the same formats `access --create` takes.
+pub(crate) fn check_repo_and_env(repo: &str, environment: &str) -> Result<(), Error> {
+    if !valid_repo(repo) {
+        return Err(usage("--github", "owner/repo"));
+    }
+    if !valid_name(environment) {
+        return Err(usage("--github-env", "letters, digits, '-' or '_'"));
+    }
+    Ok(())
+}
+
 /// Check the arguments before any call (X23: before anything irreversible).
 pub fn check(gh: &GitHub) -> Result<(), Error> {
     if !valid_repo(&gh.repo) {

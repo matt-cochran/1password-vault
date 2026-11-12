@@ -10,7 +10,15 @@ A target may declare a federated deploy identity instead of `deploy_credentials`
 tenant ID, client ID and subscription ID, all non-secret. No Azure secret exists anywhere.
 Config refuses a target that declares both.
 
-- **Trust subject:** the GitHub environment, `repo:<owner>/<repo>:environment:<env>`. The
+- **Trust subject:** the GitHub environment, in the form GitHub issues for the repository
+  (#323): GitHub's default immutable subject
+  `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>`, or the classic
+  `repo:<owner>/<repo>:environment:<env>`. Setup reads it with `gh api
+  repos/<owner>/<repo>/actions/oidc/customization/sub` (`sub_claim_prefix`; no prefix and
+  no immutable subjects is the classic form) and refuses a customized template
+  (`use_default: false`) or a failed read, never guessing. In CI, `doctor` accepts a
+  credential trusting either form, built from `GITHUB_REPOSITORY_OWNER_ID` and
+  `GITHUB_REPOSITORY_ID`. The
   environment's protection rules (a `main`-only branch rule, required reviewers) are the
   security boundary for who can deploy, so `opv ci workflow` and `doctor` recommend them.
 - **Sign-in:** the workflow's `azure/login` step (OIDC, `permissions: id-token: write`)

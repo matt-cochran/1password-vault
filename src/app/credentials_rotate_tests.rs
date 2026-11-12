@@ -61,6 +61,10 @@ struct World {
     created: String,
     minted: Option<String>,
     calls: RefCell<Vec<Recorded>>,
+    /// The contract whose bindings `op service-account create` looks at as it runs.
+    watch: Option<PathBuf>,
+    /// The deploy identity's pending successor recorded when the create ran (#324).
+    marker_at_create: RefCell<Option<String>>,
 }
 
 impl World {
@@ -97,6 +101,8 @@ impl World {
             created: format!("{TOKEN}\n"),
             minted: Some(DEPLOY_TOKEN.to_string()),
             calls: RefCell::new(Vec::new()),
+            watch: None,
+            marker_at_create: RefCell::new(None),
         }
     }
 
@@ -200,6 +206,9 @@ impl CommandRunner for World {
         self.record(call);
         match (call.program, call.args) {
             ("op", ["service-account", "create", ..]) => {
+                if let Some(path) = &self.watch {
+                    *self.marker_at_create.borrow_mut() = pending_successor(path);
+                }
                 Ok(Outcome::Done(Output::success(self.created.clone())))
             }
             ("gh", ["secret", "set", ..]) if self.gh_set_unknown => {
@@ -268,10 +277,63 @@ fn access_request(target: Option<&str>) -> crate::app::access_create::Request<'_
 }
 
 fn rotate_access(w: &World, fleet: &Fleet, target: Option<&str>) -> (Result<(), Error>, String) {
+    let (res, out, _) = rotate_access_revoked(w, fleet, target, None);
+    (res, out)
+}
+
+/// [`rotate_access`] with `--revoked`, also giving what the run showed the person.
+fn rotate_access_revoked(
+    w: &World,
+    fleet: &Fleet,
+    target: Option<&str>,
+    revoked: Option<&str>,
+) -> (Result<(), Error>, String, Vec<String>) {
     let mut ui = Answer(true, RefCell::new(Vec::new()));
     let mut out = Vec::new();
-    let res = run_access(fleet, &access_request(target), w, &mut ui, &mut out);
-    (res, String::from_utf8(out).unwrap())
+    let res = run_access(
+        fleet,
+        &access_request(target),
+        revoked,
+        w,
+        &mut ui,
+        &mut out,
+    );
+    (res, String::from_utf8(out).unwrap(), ui.1.into_inner())
+}
+
+/// The deploy identity's successor today: `<project>-<env>-<target>-deploy-YYYYMMDD`.
+fn successor() -> String {
+    format!(
+        "shop-staging-web-deploy-{}",
+        crate::app::retire::today().replace('-', "")
+    )
+}
+
+/// The pending successor of the web target's deploy identity recorded beside `path`.
+fn pending_successor(path: &Path) -> Option<String> {
+    crate::config::bindings::read_sibling(path)
+        .unwrap()
+        .get(&crate::domain::credential::rotation_successor_path(
+            "staging",
+            Some("web"),
+        ))
+        .map(str::to_string)
+}
+
+/// A file project whose web deploy identity has a pending rotation to `name` recorded.
+fn with_pending(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let (dir, path) = file(&fleet_text(None));
+    let mut bindings = crate::config::bindings::read_sibling(&path).unwrap();
+    bindings.insert(
+        crate::domain::credential::rotation_successor_path("staging", Some("web")),
+        name,
+    );
+    bindings.insert(
+        crate::domain::credential::rotation_started_path("staging", Some("web")),
+        "20261112T101500Z",
+    );
+    crate::config::bindings::write_sibling(&path, &bindings).unwrap();
+    (dir, path)
 }
 
 fn rotate_target(w: &World, fleet: &Fleet, path: &Path) -> (Result<(), Error>, String) {
@@ -498,27 +560,147 @@ fn target_rotation_prints_the_providers_cleanup_hint() {
 
 // ── R5: re-running converges ───────────────────────────────────────────────────
 
+// #324: a value-free pending-rotation marker, since 1Password never lists service accounts
+// in `op vault user list` (spike #304, Q3).
+
 #[test]
-fn access_rotation_refuses_to_make_a_second_successor() {
-    let w = World::new();
-    let successor = format!(
-        "shop-staging-web-deploy-{}",
-        crate::app::retire::today().replace('-', "")
-    );
-    let reader = json!([{
-        "type": "SERVICE_ACCOUNT",
-        "state": "ACTIVE",
-        "name": successor,
-        "permissions": ["allow_reading"]
-    }]);
-    w.op.vault_users
-        .borrow_mut()
-        .insert("vweb".into(), reader.clone());
-    w.op.vault_users
-        .borrow_mut()
-        .insert("vstate".into(), reader);
+fn access_rotation_records_the_successor_before_creating_it() {
     let (_d, path) = file(&fleet_text(None));
+    let mut w = World::new();
+    w.watch = Some(path.clone());
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
+    assert_eq!(*w.marker_at_create.borrow(), Some(successor()));
+}
+
+#[test]
+fn access_rotation_records_when_it_started() {
+    let mut w = World::new();
+    w.gh_set_unknown = true;
+    let (_d, path) = file(&fleet_text(None));
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
+    let bindings = crate::config::bindings::read_sibling(&path).unwrap();
+    assert!(
+        bindings
+            .get(&crate::domain::credential::rotation_started_path(
+                "staging",
+                Some("web")
+            ))
+            .is_some_and(|s| s.ends_with('Z') && s.len() == 16)
+    );
+}
+
+#[test]
+fn access_rotation_clears_the_marker_once_the_token_is_stored() {
+    let w = World::new();
+    let (_d, path) = file(&fleet_text(None));
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
+    assert_eq!(pending_successor(&path), None);
+}
+
+#[test]
+fn access_rotation_keeps_the_marker_when_the_secret_write_failed() {
+    let mut w = World::new();
+    w.gh_set_unknown = true;
+    let (_d, path) = file(&fleet_text(None));
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
+    assert_eq!(pending_successor(&path), Some(successor()));
+}
+
+#[test]
+fn access_rotation_keeps_the_marker_when_the_create_gave_no_token() {
+    let mut w = World::new();
+    w.created = "\n".into();
+    let (_d, path) = file(&fleet_text(None));
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
+    assert_eq!(pending_successor(&path), Some(successor()));
+}
+
+#[test]
+fn access_rotation_with_a_pending_marker_never_creates_a_successor() {
+    let w = World::new();
+    let (_d, path) = with_pending("shop-staging-web-deploy-20261101");
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
+    assert!(!w.ran("op", &["service-account", "create"]));
+}
+
+#[test]
+fn access_rotation_with_a_pending_marker_names_the_account_to_revoke() {
+    let w = World::new();
+    let (_d, path) = with_pending("shop-staging-web-deploy-20261101");
     let (res, _) = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
-    assert!(!w.ran("op", &["service-account"]));
-    let _ = res;
+    assert!(matches!(
+        res.unwrap_err(),
+        Error::Catalog(cause, _) if matches!(
+            &*cause,
+            Cause::SecretNotStored { name, .. } if name == "shop-staging-web-deploy-20261101"
+        )
+    ));
+}
+
+#[test]
+fn access_rotation_with_a_pending_marker_shows_the_rotation_with_revoked() {
+    let w = World::new();
+    let (_d, path) = with_pending("shop-staging-web-deploy-20261101");
+    let (_, _, shown) =
+        rotate_access_revoked(&w, &located_at(&fleet(None), &path), Some("web"), None);
+    assert!(
+        shown
+            .iter()
+            .any(|l| l.contains("--revoked shop-staging-web-deploy-20261101")),
+        "{shown:?}"
+    );
+}
+
+#[test]
+fn access_rotation_revoked_for_the_pending_successor_creates_a_new_one() {
+    let w = World::new();
+    let (_d, path) = with_pending("shop-staging-web-deploy-20261101");
+    let _ = rotate_access_revoked(
+        &w,
+        &located_at(&fleet(None), &path),
+        Some("web"),
+        Some("shop-staging-web-deploy-20261101"),
+    );
+    assert!(w.ran("op", &["service-account", "create"]));
+}
+
+#[test]
+fn access_rotation_revoked_for_another_name_still_refuses() {
+    let w = World::new();
+    let (_d, path) = with_pending("shop-staging-web-deploy-20261101");
+    let _ = rotate_access_revoked(
+        &w,
+        &located_at(&fleet(None), &path),
+        Some("web"),
+        Some("shop-staging-web-deploy-20261102"),
+    );
+    assert!(!w.ran("op", &["service-account", "create"]));
+}
+
+#[test]
+fn access_rotation_without_a_local_file_says_it_cannot_detect_an_interrupted_run() {
+    let w = World::new();
+    let (_, _, shown) = rotate_access_revoked(&w, &fleet(None), Some("web"), None);
+    assert!(
+        shown
+            .iter()
+            .any(|l| l.contains("cannot detect an interrupted run") && l.contains(&successor())),
+        "{shown:?}"
+    );
+}
+
+#[test]
+fn access_rotation_of_the_ci_reader_records_its_own_marker() {
+    let mut w = World::new();
+    w.gh_set_unknown = true;
+    let (_d, path) = file(&fleet_text(None));
+    let _ = rotate_access(&w, &located_at(&fleet(None), &path), None);
+    let bindings = crate::config::bindings::read_sibling(&path).unwrap();
+    assert!(
+        bindings
+            .get(&crate::domain::credential::rotation_successor_path(
+                "staging", None
+            ))
+            .is_some()
+    );
 }

@@ -47,10 +47,17 @@ fn check_bindings(file: &Path) -> Result<(), Error> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(unreadable_file(&path, &e)),
     };
+    // A record written by 0.20.0 or earlier digested the file's bytes: an unchanged file
+    // still matches it.
     if config::bindings::digest(&bytes) == record.bindings_digest {
         return Ok(());
     }
+    // #315: only what apply governs counts; a credential expiry recorded since is not a
+    // binding left unapplied.
     let ids = config::bindings::read_sibling(file)?;
+    if config::bindings::applied_digest(&ids) == record.bindings_digest {
+        return Ok(());
+    }
     Err(Cause::BindingsUnapplied {
         environments: environments_of(&ids),
     }
@@ -306,8 +313,13 @@ pub fn check(
         committed.replace("\r\n", "\n"),
     );
     let (a, b) = if contract.trim_end() == committed.trim_end() {
+        // #325: only the ids `opv apply` governs are compared; the value-free expiry
+        // records (#296) live only in the file, so they never make the copies differ.
         let committed_ids = config::bindings::read_sibling(file)?;
-        (ids.render(), committed_ids.render())
+        (
+            ids.applied_part().render(),
+            committed_ids.applied_part().render(),
+        )
     } else {
         (contract, committed)
     };
