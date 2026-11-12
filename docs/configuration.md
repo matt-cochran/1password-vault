@@ -122,7 +122,7 @@ environments.prod.targets.fly.deploy_credentials_expires_on = "2027-02-08"
 
 `opv propose structure --rebind <env>` records fresh ids for an environment (a new 1Password account, say); ids not being rebound are kept.
 
-The **apply record** `secrets.applied.json` remembers the plan last applied and the sha256 of the contract and bindings files it wrote:
+The **apply record** `secrets.applied.json` remembers the plan last applied and the sha256 of the contract and of the bindings it wrote:
 
 ```json
 {
@@ -133,6 +133,8 @@ The **apply record** `secrets.applied.json` remembers the plan last applied and 
 ```
 
 `opv config check` compares the committed `secrets.bindings.toml` with `bindings_digest`. When they differ it exits 2 with `bindings_unapplied`, naming the environments whose ids moved; when they match it passes. A project that has never been applied has no record, and there is nothing to compare.
+
+`bindings_digest` covers only what `opv apply` writes: the credential expiry dates that `opv access --create/--rotate` and `opv target credentials --create/--rotate` record later (`…expires_on`) are left out, so recording or rotating one never makes the bindings look unapplied. (A record from 0.20.0 or earlier still matches; one written while the file already held an expiry date that has since changed reports `bindings_unapplied` once, and `opv apply` rewrites it.)
 
 ### Products and keys
 

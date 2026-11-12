@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Federated Azure setup trusts the subject GitHub actually issues (#323, FR-40).** GitHub now issues immutable OIDC subjects by default (`repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>`), so a credential trusting the classic `repo:<owner>/<repo>:environment:<env>` failed `azure/login` with AADSTS700213. `opv target credentials --create --federated` reads the repository's subject with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` and trusts that one; a customized subject template, or a reply opv cannot read, is refused with one `Next:`. An identity made for the classic subject keeps its app and gains the new credential. In CI, `opv doctor --env` accepts a credential trusting either form and suggests the immutable one.
+- **Recording a credential expiry no longer makes `opv config check` report `bindings_unapplied` (#315).** The apply record's `bindings_digest` now covers only what `opv apply` writes: the expiry dates that `opv access --create/--rotate` and `opv target credentials --create/--rotate` record in `secrets.bindings.toml` are left out. An apply record written by 0.20.0 or earlier keeps matching; one written while the file already held an expiry date that has since changed reports `bindings_unapplied` once, and `opv apply` rewrites it. Grant receipts are saved to their own file (`--grant-receipt FILE`) and never touched the bindings digest.
 
 ## [0.20.0] - 2026-11-11
 

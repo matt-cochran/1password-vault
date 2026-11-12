@@ -25,7 +25,7 @@ use super::{Doc, is_id, toml_invalid};
 pub const FILE: &str = "secrets.bindings.toml";
 
 /// The apply record's path under the project, beside `secrets.bindings.toml` and committed
-/// with it: the plan last applied and the digests of the two files it wrote, so `opv config
+/// with it: the plan last applied and the digests of what it wrote, so `opv config
 /// check` in CI can tell committed bindings that were never applied. (Not under `.opv`, which
 /// is the per-checkout account pointer file.)
 pub const APPLIED: &str = "secrets.applied.json";
@@ -59,6 +59,19 @@ impl Bindings {
     pub fn union(mut self, other: Bindings) -> Bindings {
         self.ids.extend(other.ids);
         self
+    }
+
+    /// The bindings `opv apply` governs: every id, without the value-free bookkeeping
+    /// records later commands write on their own (the credential expiry dates of #296).
+    /// The apply record's digest covers only these (#315).
+    pub fn applied_part(&self) -> Bindings {
+        let ids = self
+            .ids
+            .iter()
+            .filter(|(path, _)| !is_bookkeeping(&path.split('.').collect::<Vec<_>>()))
+            .map(|(path, id)| (path.clone(), id.clone()))
+            .collect();
+        Bindings { ids }
     }
 
     /// The canonical text: one sorted line per id, a dotted key and a quoted id.
@@ -268,8 +281,9 @@ pub fn original_lines(original: &str, merged: &str) -> Vec<Option<usize>> {
     out
 }
 
-/// The apply record: the plan last applied, and the sha256 of the contract and bindings
-/// files it wrote, so a later run can tell whether either changed.
+/// The apply record: the plan last applied, the sha256 of the contract file it wrote, and
+/// the [`applied_digest`] of the bindings it wrote (expiry records left out, #315), so a
+/// later run can tell whether either changed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyRecord {
@@ -281,6 +295,15 @@ pub struct ApplyRecord {
 /// The lowercase hex sha256 of `bytes`, the form both record digests take.
 pub fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// The apply record's `bindings_digest` of `bindings` (#315): the sha256 of the canonical
+/// text of [`Bindings::applied_part`], so an expiry date recorded after an apply (or edited
+/// by hand) never makes the bindings look unapplied. For a file with no expiry record,
+/// written canonically as every opv writer does, it equals the sha256 of the file's bytes,
+/// which is what 0.20.0 and earlier recorded.
+pub fn applied_digest(bindings: &Bindings) -> String {
+    digest(bindings.applied_part().render().as_bytes())
 }
 
 /// Read the apply record at `path`; `None` when it has not been written.
@@ -316,6 +339,25 @@ fn recognized(path: &[&str]) -> bool {
             | ["environments", _, "targets", _, "state_vault_id"]
             | ["environments", _, "targets", _, "delivery_items", _]
             | ["environments", _, "ci_reader", "expires_on"]
+            | [
+                "environments",
+                _,
+                "targets",
+                _,
+                "deploy_credentials_expires_on"
+            ]
+            | ["environments", _, "targets", _, "ci_identity", "expires_on"]
+    )
+}
+
+/// The value-free bookkeeping records among the [`recognized`] families: the credential
+/// expiry dates `opv access --create/--rotate` and `opv target credentials
+/// --create/--rotate` write beside the contract (#296). `opv apply` does not govern them,
+/// so they are left out of the apply record's digest (#315).
+fn is_bookkeeping(path: &[&str]) -> bool {
+    matches!(
+        path,
+        ["environments", _, "ci_reader", "expires_on"]
             | [
                 "environments",
                 _,

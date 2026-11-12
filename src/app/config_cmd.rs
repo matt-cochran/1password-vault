@@ -47,10 +47,17 @@ fn check_bindings(file: &Path) -> Result<(), Error> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(unreadable_file(&path, &e)),
     };
+    // A record written by 0.20.0 or earlier digested the file's bytes: an unchanged file
+    // still matches it.
     if config::bindings::digest(&bytes) == record.bindings_digest {
         return Ok(());
     }
+    // #315: only what apply governs counts; a credential expiry recorded since is not a
+    // binding left unapplied.
     let ids = config::bindings::read_sibling(file)?;
+    if config::bindings::applied_digest(&ids) == record.bindings_digest {
+        return Ok(());
+    }
     Err(Cause::BindingsUnapplied {
         environments: environments_of(&ids),
     }
