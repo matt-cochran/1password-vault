@@ -198,7 +198,9 @@ fn target_section(env: &str, name: &str) -> String {
 /// --github-env <e>` (#297, `docs/design/azure-oidc.md`): a CI deploy identity with no
 /// secret, which the GitHub job signs in as through OIDC. The provider creates or reuses it
 /// in the person's own provider session, with exactly the target's least-privilege roles,
-/// trusting only the subject `repo:<repo>:environment:<e>`; opv prints its non-secret ids.
+/// trusting only the subject the job's OIDC token carries, read from the repository (#323:
+/// GitHub's immutable `repo:<owner>@<id>/<repo>@<id>:environment:<e>` by default, else the
+/// classic `repo:<repo>:environment:<e>`); opv prints its non-secret ids.
 /// Nothing is written to 1Password, and no value exists to show.
 #[allow(clippy::too_many_arguments)]
 pub fn run_federated(
@@ -217,7 +219,8 @@ pub fn run_federated(
         return Err(already_recorded(env, name));
     }
     let provider = target.config.provider();
-    let subject = format!("repo:{repo}:environment:{github_env}");
+    super::access_create::check_repo_and_env(repo, github_env)?;
+    let subject = crate::adapters::ci_secrets::oidc_subject(r, repo, github_env)?;
     let locator = target.config.target_locator();
     ui.show(&format!(
         "Create a federated {} CI identity for {locator}:",
@@ -226,6 +229,7 @@ pub fn run_federated(
     ui.show(&format!("  trusts: {subject}"))?;
     ui.show("  roles: the target's least-privilege deploy roles only")?;
     ui.show("No secret is created: the GitHub job signs in through OIDC.")?;
+    ui.show("New role assignments can take a few minutes to apply: a job run before then may fail to sign in; re-run it.")?;
     if !ui.confirm("Go ahead?")? {
         return Err(Cause::Guard {
             guard: Guard::Declined,

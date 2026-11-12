@@ -92,6 +92,13 @@ pub fn create_environment(
     }
 }
 
+/// The subject GitHub Actions' OIDC tokens carry for a job in `environment` of `repo`
+/// (#323): GitHub's immutable form by default, read from the repository; a customized
+/// subject template is refused. See [`gh::oidc_subject`].
+pub fn oidc_subject(r: &dyn CommandRunner, repo: &str, environment: &str) -> Result<String, Error> {
+    gh::oidc_subject(r, repo, environment)
+}
+
 /// Store `value` as the secret `name` in `repo` (and `environment`), on stdin only.
 pub fn store(
     r: &dyn CommandRunner,

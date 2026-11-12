@@ -449,13 +449,16 @@ fn move_ids(r: &dyn CommandRunner, at: &ConfigAt, p: &StructureProposal) -> Resu
     Ok(())
 }
 
-/// The apply record beside the contract at `contract_path`: `plan_id` and the digests of
-/// the two files as written.
+/// The apply record beside the contract at `contract_path`: `plan_id`, the contract file's
+/// digest, and the digest of the bindings apply governs, without the value-free expiry
+/// records later commands write (#315).
 fn write_record(contract_path: &Path, plan_id: &str) -> Result<(), Error> {
     let record = crate::config::bindings::ApplyRecord {
         plan_id: plan_id.to_string(),
         contract_digest: crate::config::bindings::digest(&read_bytes(contract_path)?),
-        bindings_digest: crate::config::bindings::digest(&bindings_bytes(contract_path)?),
+        bindings_digest: crate::config::bindings::applied_digest(
+            &crate::config::bindings::read_sibling(contract_path)?,
+        ),
     };
     let record_path = contract_path
         .parent()
@@ -598,19 +601,6 @@ fn manifest_fleet(
 /// The bytes of the contract file as written.
 fn read_bytes(path: &Path) -> Result<Vec<u8>, Error> {
     std::fs::read(path).map_err(|e| unreadable(path, &e))
-}
-
-/// The bytes of the contract's sibling bindings file, or none when it does not exist.
-fn bindings_bytes(contract_path: &Path) -> Result<Vec<u8>, Error> {
-    let path = contract_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(crate::config::bindings::FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => Ok(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(unreadable(&path, &e)),
-    }
 }
 
 fn unreadable(path: &Path, e: &std::io::Error) -> Error {

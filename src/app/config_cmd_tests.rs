@@ -257,6 +257,56 @@ fn check_of_a_copy_with_other_ids_is_copies_differ() {
     assert_eq!(e.code_str(), "copies_differ");
 }
 
+/// `<dir>/secrets.bindings.toml` with `line` (one more dotted key) added to its ids.
+fn add_binding(dir: &Path, line: &str) {
+    let path = dir.join(crate::config::bindings::FILE);
+    let now = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{now}{line}\n")).unwrap();
+}
+
+/// #325: an expiry date recorded only in the file is not an id the copies disagree on.
+#[test]
+fn check_of_a_copy_whose_file_alone_records_an_expiry_passes() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    add_binding(
+        dir.path(),
+        "environments.dev.ci_reader.expires_on = \"2027-01-01\"",
+    );
+    let found = manifest_of(dir.path(), &op);
+    let res = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
+/// #325: with an expiry recorded in the file, an id that differs still differs.
+#[test]
+fn check_of_a_copy_with_other_ids_and_a_file_expiry_is_copies_differ() {
+    let (dir, op) = checkout();
+    put(
+        &op,
+        "myapp",
+        &TOML.replace("item_id = \"app\"", "item_id = \"other\""),
+    );
+    add_binding(
+        dir.path(),
+        "environments.dev.ci_reader.expires_on = \"2027-01-01\"",
+    );
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "copies_differ");
+}
+
 /// 03.07: either copy may be the intended one; no step picks the direction for the person.
 #[test]
 fn check_of_a_different_copy_runs_nothing_next() {
@@ -1151,4 +1201,86 @@ fn the_editor_never_inherits_a_1password_session() {
         .map(|(k, _)| k.to_string_lossy().into_owned())
         .collect();
     assert_eq!(removed, ["OP_SESSION", "OP_SESSION_acct"]);
+}
+
+// #315: value-free records written after an apply never make it look unapplied ----------
+
+/// The digest `opv apply` records of the committed bindings file.
+fn applied_bindings_digest(dir: &Path) -> String {
+    let ids = crate::config::bindings::read_sibling(&dir.join("secrets.toml")).unwrap();
+    crate::config::bindings::applied_digest(&ids)
+}
+
+/// Record `date` as dev's CI reader expiry, as `opv access --create/--rotate` does.
+fn record_reader_expiry(dir: &Path, date: &str) {
+    crate::app::target_credentials::record_expiry(
+        &dir.join("secrets.toml"),
+        &crate::domain::credential::ci_reader_expires_path("dev"),
+        date,
+    )
+    .unwrap();
+}
+
+/// The apply-record step of `opv config check` for the checkout at `dir` (the copies are
+/// compared before it; that comparison is not what these tests judge).
+fn check_checkout(dir: &Path) -> Result<(), Error> {
+    check_bindings(&dir.join("secrets.toml"))
+}
+
+#[test]
+fn check_after_an_expiry_recorded_since_the_apply_passes() {
+    let (dir, _op) = checkout();
+    put_record(dir.path(), applied_bindings_digest(dir.path()));
+    record_reader_expiry(dir.path(), "2027-01-01");
+    let res = check_checkout(dir.path());
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn check_after_an_expiry_rotated_since_the_apply_passes() {
+    let (dir, _op) = checkout();
+    record_reader_expiry(dir.path(), "2027-01-01");
+    put_record(dir.path(), applied_bindings_digest(dir.path()));
+    record_reader_expiry(dir.path(), "2027-04-01");
+    let res = check_checkout(dir.path());
+    assert!(res.is_ok(), "{res:?}");
+}
+
+/// A 0.20.0 record digested the file's bytes; an expiry recorded since still passes.
+#[test]
+fn check_after_an_expiry_recorded_since_an_older_apply_record_passes() {
+    let (dir, _op) = checkout();
+    put_record(dir.path(), committed_bindings_digest(dir.path()));
+    record_reader_expiry(dir.path(), "2027-01-01");
+    let res = check_checkout(dir.path());
+    assert!(res.is_ok(), "{res:?}");
+}
+
+/// A grant receipt is its own new file (`--grant-receipt FILE`), never part of the bindings.
+#[test]
+fn check_after_a_grant_receipt_saved_beside_the_contract_passes() {
+    let (dir, _op) = checkout();
+    put_record(dir.path(), applied_bindings_digest(dir.path()));
+    std::fs::write(
+        dir.path().join("dev.reader-grant.json"),
+        "{\"receipt_schema\": 1}",
+    )
+    .unwrap();
+    let res = check_checkout(dir.path());
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn check_after_a_binding_changed_since_the_apply_is_bindings_unapplied() {
+    let (dir, _op) = checkout();
+    put_record(dir.path(), applied_bindings_digest(dir.path()));
+    let path = dir.path().join("secrets.toml");
+    let mut ids = crate::config::bindings::read_sibling(&path).unwrap();
+    ids.insert(
+        "environments.dev.boundaries.app.vault_id",
+        "vdev0000000000000000000002",
+    );
+    crate::config::bindings::write_sibling(&path, &ids).unwrap();
+    let e = check_checkout(dir.path()).unwrap_err();
+    assert_eq!(e.code_str(), "bindings_unapplied");
 }

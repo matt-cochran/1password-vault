@@ -4,7 +4,9 @@
 //!
 //! No secret exists at any step: an app registration and its service principal, the
 //! target's least-privilege grants, and one federated credential that trusts exactly the
-//! subject `repo:<repo>:environment:<e>`. Every step reads first and creates only what is
+//! subject GitHub issues for that environment, which the caller reads from the repository
+//! (#323): `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<e>` by default, or the
+//! classic `repo:<repo>:environment:<e>`. Every step reads first and creates only what is
 //! missing, so a re-run after an interruption converges (NR-1); a create that never answered
 //! is `WriteOutcomeUnknown`, and the re-run's read finds it (NR-2).
 //!
@@ -51,14 +53,34 @@ fn slug(text: &str) -> String {
     out.trim_end_matches('-').chars().take(NAME_LIMIT).collect()
 }
 
-/// The app registration's display name: the container app and the trusted subject, so two
-/// targets or two GitHub environments never share one identity.
-pub fn app_name(t: &AzureTarget, subject: &str) -> String {
+/// `subject` after `repo:`, without the `@<digits>` ids of GitHub's immutable form (#323).
+fn without_ids(subject: &str) -> String {
     let tail = subject.strip_prefix("repo:").unwrap_or(subject);
-    slug(&format!("opv-{}-{tail}", t.container_app))
+    let mut out = String::new();
+    let mut chars = tail.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '@' && chars.peek().is_some_and(char::is_ascii_digit) {
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                chars.next();
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
-/// The federated credential's name, from the subject it trusts.
+/// The app registration's display name: the container app and the trusted subject, so two
+/// targets or two GitHub environments never share one identity. The subject's immutable ids
+/// are left out (#323): the name stays readable, and an identity first made for the classic
+/// subject is the same app, which then gains the immutable subject's credential.
+pub fn app_name(t: &AzureTarget, subject: &str) -> String {
+    slug(&format!("opv-{}-{}", t.container_app, without_ids(subject)))
+}
+
+/// The federated credential's name, from the subject it trusts. The immutable form's ids stay
+/// in it (`@` becomes `-`): one app may hold a classic and an immutable credential, and Entra
+/// ID refuses two credentials with one name.
 pub fn credential_name(subject: &str) -> String {
     slug(&format!(
         "github-{}",

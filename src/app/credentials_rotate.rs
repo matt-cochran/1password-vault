@@ -26,18 +26,14 @@ use super::write_err;
 use crate::adapters::ci_secrets;
 use crate::adapters::onepassword;
 use crate::adapters::onepassword_diagnose::diagnose;
-use crate::adapters::onepassword_init;
 use crate::adapters::onepassword_tidy;
 use crate::cause::{
     Cause, Cmd, CreateKind, DiagnoseContext, EnvName, FieldName, ItemId, Refind, System,
     TargetName, Unusable, Upstream, UsageProblem, VaultId,
 };
-use crate::domain::access::analyse;
-use crate::domain::access_plan::Grant;
 use crate::domain::convention::{Op, TidyPlan};
 use crate::domain::{Boundary, Environment, Fleet, ItemRef, SecretValue};
 use crate::error::Error;
-use crate::host::Host;
 use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome};
 
 /// The lifetime requested from 1Password (or a provider), in days: 90, matching the create
@@ -175,21 +171,118 @@ fn create(
     })
 }
 
-/// Whether a service account already named `successor` reads any of `grants`' vaults
-/// (NR-1): a successor this or an earlier interrupted run made, so rotation must not make a
-/// second one.
-fn successor_exists(r: &dyn CommandRunner, grants: &[Grant], successor: &str) -> bool {
-    grants.iter().any(|g| {
-        onepassword_init::vault_users(r, &g.vault_id, &Host::detect)
-            .ok()
-            .flatten()
-            .is_some_and(|users| {
-                analyse("", &g.vault_id, false, Some(&users))
-                    .service_accounts
-                    .iter()
-                    .any(|s| s.name == successor)
-            })
-    })
+/// The contract whose bindings sibling holds the pending-rotation marker (#324, NR-1), when
+/// the marker can be recorded for `successor`: a file project, and a name the bindings file
+/// can hold. A manifest project records nothing locally (nor does a fleet parsed from no
+/// file), so an interrupted run there cannot be detected.
+fn marker_home<'a>(fleet: &'a Fleet, successor: &str) -> Option<&'a Path> {
+    match &fleet.read_from.0 {
+        crate::cause::ConfigSource::File { path, .. }
+            if path.is_file() && crate::config::is_id(successor) =>
+        {
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+/// Now, in UTC, as `YYYYMMDDTHHMMSSZ` (ISO 8601 basic): when a rotation started.
+fn started_at() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let date = crate::domain::credential::add_days("1970-01-01", days).unwrap_or_default();
+    let s = secs % 86_400;
+    format!(
+        "{}T{:02}{:02}{:02}Z",
+        date.replace('-', ""),
+        s / 3600,
+        s / 60 % 60,
+        s % 60
+    )
+}
+
+/// The pending rotation recorded beside the contract at `config` for the identity of `env`
+/// (and `target`): the successor's name and when it started.
+fn pending_rotation(
+    config: &Path,
+    env: &str,
+    target: Option<&str>,
+) -> Result<Option<(String, Option<String>)>, Error> {
+    use crate::domain::credential::{rotation_started_path, rotation_successor_path};
+    let bindings = crate::config::bindings::read_sibling(config)?;
+    Ok(bindings
+        .get(&rotation_successor_path(env, target))
+        .map(|name| {
+            (
+                name.to_string(),
+                bindings
+                    .get(&rotation_started_path(env, target))
+                    .map(str::to_string),
+            )
+        }))
+}
+
+/// Record, beside the contract at `config`, that a rotation of the identity of `env` (and
+/// `target`) is about to create `successor` (#324, NR-1): its name and UTC start, never a
+/// value. Written before `op service-account create`, so an interrupted run leaves it.
+fn record_pending_rotation(
+    config: &Path,
+    env: &str,
+    target: Option<&str>,
+    successor: &str,
+) -> Result<(), Error> {
+    use crate::domain::credential::{rotation_started_path, rotation_successor_path};
+    let mut bindings = crate::config::bindings::read_sibling(config)?;
+    bindings.insert(rotation_successor_path(env, target), successor);
+    bindings.insert(rotation_started_path(env, target), started_at());
+    crate::config::bindings::write_sibling(config, &bindings)
+}
+
+/// The rotation finished: in one write, forget its pending marker and record the new
+/// service account's expiry, `VALIDITY_DAYS` from today (UTC, #296).
+fn finish_rotation(config: &Path, env: &str, target: Option<&str>) -> Result<(), Error> {
+    use crate::domain::credential::{
+        add_days, ci_identity_expires_path, ci_reader_expires_path, rotation_started_path,
+        rotation_successor_path,
+    };
+    let mut bindings = crate::config::bindings::read_sibling(config)?;
+    bindings.remove(&rotation_successor_path(env, target));
+    bindings.remove(&rotation_started_path(env, target));
+    let key = match target {
+        Some(t) => ci_identity_expires_path(env, t),
+        None => ci_reader_expires_path(env),
+    };
+    if let Some(date) = add_days(&crate::app::retire::today(), VALIDITY_DAYS) {
+        bindings.insert(key, date);
+    }
+    crate::config::bindings::write_sibling(config, &bindings)
+}
+
+/// `opv access <env> [--target <t>] --rotate --github <repo> … --revoked <successor>`: the
+/// rotation again, once the person has revoked the successor an interrupted run left.
+fn rotate_again_cmd(req: &super::access_create::Request<'_>, successor: &str) -> Cmd {
+    let mut args = vec![req.env.to_string()];
+    if let Some(t) = req.target {
+        args.extend(["--target".to_string(), t.to_string()]);
+    }
+    args.extend([
+        "--rotate".to_string(),
+        "--github".to_string(),
+        req.github.repo.clone(),
+    ]);
+    if let Some(e) = &req.github.environment {
+        args.extend(["--github-env".to_string(), e.clone()]);
+    }
+    if req.github.secret != super::access_create::SECRET {
+        args.extend(["--secret-name".to_string(), req.github.secret.clone()]);
+    }
+    args.extend(["--revoked".to_string(), successor.to_string()]);
+    Cmd {
+        command: vec!["access".into()],
+        args,
+    }
 }
 
 /// Verify a freshly stored service-account token with one `op vault list`, the token in
@@ -232,10 +325,13 @@ fn verify_token(
 }
 
 /// Rotate the service account a CI job signs in with (`opv access --rotate`). Same
-/// parameters as [`super::access_create::run`].
+/// parameters as [`super::access_create::run`], plus `revoked`: the successor an
+/// interrupted earlier run left, which the person says they revoked in 1Password
+/// (`--revoked <name>`), so its pending-rotation marker no longer refuses (#324).
 pub fn run_access(
     fleet: &Fleet,
     req: &super::access_create::Request<'_>,
+    revoked: Option<&str>,
     r: &dyn CommandRunner,
     ui: &mut dyn Interaction,
     out: &mut dyn Write,
@@ -246,6 +342,36 @@ pub fn run_access(
     let id = super::access::identity(fleet, env, target, project, r)?;
     if let Some(vault) = id.not_in_account.first() {
         return Err(vault.error());
+    }
+    let successor = format!("{}-{}", id.service_account, date_suffix());
+    let home = marker_home(fleet, &successor);
+    // NR-1: an earlier run that recorded a pending rotation and never finished may have made
+    // its successor; nobody holds that one's token, and making another would leave both. It
+    // is revoked first, and `--revoked <name>` says so (1Password never lists service
+    // accounts in `op vault user list`, spike #304 Q3, so opv cannot look).
+    if let Some(config) = home
+        && let Some((pending, since)) = pending_rotation(config, env, target)?
+        && revoked != Some(pending.as_str())
+    {
+        let since = since.map_or_else(String::new, |s| format!(" (started {s})"));
+        ui.show(&format!(
+            "An earlier opv access --rotate{since} was creating the service account {pending:?} \
+             and did not finish, so its token may be lost."
+        ))?;
+        ui.show(&format!(
+            "Revoke {pending:?} in 1Password (Developer > Service accounts) if it exists, then \
+             rotate again: {}",
+            crate::cause::render::cmd_text(&rotate_again_cmd(req, &pending))
+        ))?;
+        return Err(Cause::SecretNotStored {
+            system: System::OnePassword,
+            kind: CreateKind::ServiceAccount,
+            name: pending,
+            env: EnvName::new(env),
+            target: target.map(TargetName::new),
+            refind: None,
+        }
+        .into());
     }
     // Preflight: everything the token's journey needs, before 1Password shows it once.
     if !ci_secrets::signed_in(r)? {
@@ -261,22 +387,8 @@ pub fn run_access(
         }
         .into());
     }
-    let successor = format!("{}-{}", id.service_account, date_suffix());
     // The account the vaults were checked in, for every `op` call of the rotation.
     let er = crate::app::signin::EnvRunner::with_account(r, id.account.clone());
-    // NR-1: an interrupted earlier run may have made the successor already; making another
-    // would leave two. The one that exists has no token anyone holds, so it is revoked.
-    if successor_exists(&er, &id.grants, &successor) {
-        return Err(Cause::SecretNotStored {
-            system: System::OnePassword,
-            kind: CreateKind::ServiceAccount,
-            name: successor,
-            env: EnvName::new(env),
-            target: target.map(TargetName::new),
-            refind: None,
-        }
-        .into());
-    }
     // The one question.
     let who = match target {
         Some(t) => format!("the deploy identity of {env}/{t}"),
@@ -303,6 +415,14 @@ pub fn run_access(
         "and replace the GitHub secret {} in {place}. The token is never shown.",
         gh.secret
     ))?;
+    if home.is_none() {
+        // #324: nothing local records the rotation, so say so before anything is made.
+        ui.show(&format!(
+            "opv cannot detect an interrupted run here: this project records nothing locally \
+             (its configuration is in 1Password). If this run stops before the token is \
+             stored, revoke {successor:?} in 1Password before running it again."
+        ))?;
+    }
     if !ui.confirm("Go ahead?")? {
         return Err(Cause::Guard {
             guard: crate::cause::Guard::Declined,
@@ -336,6 +456,11 @@ pub fn run_access(
         account: id.account.clone().map(crate::cause::AccountId::new),
         ..DiagnoseContext::default()
     };
+    // NR-1: the marker is on disk before the account can exist, and stays until its token is
+    // stored and verified, so a run interrupted anywhere between is detected (#324).
+    if let Some(config) = home {
+        record_pending_rotation(config, env, target, &successor)?;
+    }
     // In the account the vaults were checked in, never op's default.
     let raw = create(&er, &Call::new("op", &argv), &ctx)?;
     let token = SecretValue::new(String::from_utf8_lossy(&raw).trim().to_string());
@@ -376,16 +501,11 @@ pub fn run_access(
         ));
     }
     drop(token);
-    // #296: the value-free expiry of the service account just created, beside the contract,
-    // once its token has been stored (a manifest project has no bindings sibling).
-    if let crate::cause::ConfigSource::File { path, .. } = &fleet.read_from.0
-        && path.is_file()
-    {
-        let key = match target {
-            Some(t) => crate::domain::credential::ci_identity_expires_path(env, t),
-            None => crate::domain::credential::ci_reader_expires_path(env),
-        };
-        super::target_credentials::record_minted_expiry(path, &key, Some(VALIDITY_DAYS))?;
+    // #296, #324: once its token is stored and verified, the value-free expiry of the
+    // service account just created, and the pending marker cleared, in one write beside the
+    // contract (a manifest project has no bindings sibling).
+    if let Some(config) = home {
+        finish_rotation(config, env, target)?;
     }
     writeln!(
         out,
