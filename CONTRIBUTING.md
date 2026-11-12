@@ -10,7 +10,7 @@ cargo build
 
 ## Prerequisites
 
-- Rust 1.99 or newer (`rust-version` in `Cargo.toml`).
+- Rust 1.99.1 or newer (`rust-version` in `Cargo.toml`).
 - `op` (1Password CLI), `flyctl`, `az` and `kubectl` are only needed for manual testing.
   The test suite uses fakes and recorded CLI output and calls none of them.
 - Node.js, `shellcheck` and `bash` for the packaging and install-script checks.
@@ -116,9 +116,16 @@ job runs while the repository variable `NPM_PUBLISH` is `true`, and npm must lis
 package. A package added later needs its own trusted-publisher entry on npmjs.com before
 its first release.
 
-Only if that job fails, publish from a maintainer's machine (npm login and 2FA) with
-`scripts/npm/publish-manual.sh vX.Y.Z`; it verifies the release checksums and skips
-packages already published at that version.
+When that job is off or fails, publish from a maintainer's machine (npm login and 2FA)
+with `scripts/npm/publish-manual.sh vX.Y.Z` from a clean checkout of the tag. It publishes
+only the retained, qualified npm tarballs, never a rebuild, and refuses unless the tag's
+candidate verifies: the retained staging artifact (or, after its 90-day retention, the
+same evidence from the GitHub release, whose `manifest.json` must carry the release
+workflow's attestation) must pass `release-assets.ts verify` (successful staging run, tree,
+six platform qualifications, every file's digest; a missing file fails). It then publishes
+through `release-assets.ts publish`, as CI does but without `--provenance`: identical
+published bytes are skipped, different bytes refused, and the main package goes out only
+after npm lists every platform package. Re-running is safe.
 
 ## Security
 

@@ -7,7 +7,7 @@
 [![CI](https://github.com/matt-cochran/1password-vault/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/matt-cochran/1password-vault/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/matt-cochran/1password-vault)](https://github.com/matt-cochran/1password-vault/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV 1.99](https://img.shields.io/badge/rust-1.99%2B-orange.svg)](Cargo.toml)
+[![MSRV 1.99.1](https://img.shields.io/badge/rust-1.99.1%2B-orange.svg)](Cargo.toml)
 
 Deliver 1Password-managed secrets to application runtimes and CI, with validation and explicit deployment controls.
 

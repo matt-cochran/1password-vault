@@ -1,0 +1,34 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "opv access already compares `op vault user list` per vault, run in the owner's 1Password session, with the grants opv computes from the configuration, and reports access_not_visible, no_ci_reader and ci_reader_can_write. Per-vault permission levels are only visible this way, in an owner session."
+    },
+    {
+      "id": "E2",
+      "text": "Issue #304 requires trusted CI to verify its own scoped reader identity without using an owner session, and forbids inferring grants from successful item reads or proving denial with destructive test writes."
+    },
+    {
+      "id": "E3",
+      "text": "Under a service account token, `op whoami --format json` returns the identity's user id, account id and type; whether `op vault list` shows exactly the granted vaults is unverified, and it shows vaults, not permission levels (design review F18)."
+    },
+    {
+      "id": "E4",
+      "text": "Whether a 1Password service account's vault access is fixed at creation is stated in design docs but unverified anywhere in the repo (design review F17)."
+    },
+    {
+      "id": "E5",
+      "text": "opv 0.19.0 adds `opv access --rotate`, an owner command in the owner's session that creates a successor service account with the same grants and records its expiry: an owner-run issuance moment already exists."
+    },
+    {
+      "id": "E6",
+      "text": "The result must be names-only JSON (identity IDs, vault IDs, permissions, timestamps, contract identity) with verified, not_verified or not_supported per check; an unknown permission must never be reported as verified, and a stale issuance record must be rejected."
+    }
+  ],
+  "desiredImprovement": "CI can prove, before any fixture is materialized, that its reader token has exactly the grants its committed contract expects (right account and vaults, read only, no extra vault, no write or create).",
+  "element": "the session that verifies the reader's grants",
+  "opposingProperties": [
+    "owner-privileged, to see exact per-vault permissions",
+    "CI-scoped and unprivileged, so CI holds no owner authority"
+  ]
+}

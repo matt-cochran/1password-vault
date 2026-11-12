@@ -23,7 +23,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.19.0  # install exactly this release (default: latest)
+sh install.sh --version v0.20.0  # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -69,7 +69,7 @@ Windows: rename the `.exe` to `opv.exe` and put it on your `PATH`.
 cargo install --git https://github.com/matt-cochran/1password-vault --locked
 ```
 
-The minimum supported Rust version is 1.99.
+The minimum supported Rust version is 1.99.1.
 
 ### npm
 
@@ -79,6 +79,18 @@ npx @matthew-cochran/opv --version
 ```
 
 The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. Through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU. From 0.6.0, a postinstall script also copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place `install.sh` uses. It never replaces a file that is not an opv binary, and never writes into a home directory under `sudo`: run `npm i -g` without sudo. npm 12 and newer run a package's install scripts only when you allow them: `npm i -g --allow-scripts=@matthew-cochran/opv @matthew-cochran/opv`, or once for all global installs `npm config set allow-scripts=@matthew-cochran/opv --location=user`. Without that (or with `--ignore-scripts`) the `opv` command still works; see [When npm skips the install script](#when-npm-skips-the-install-script). If your shell then says `~/.local/bin/opv: No such file or directory`, it remembers an older copy that is gone: run `hash -r` (or open a new terminal).
+
+### Update
+
+With npm (the supported update path):
+
+```sh
+npm i -g @matthew-cochran/opv@latest
+opv --version
+opv skill status
+```
+
+`opv --version` must print the version you just installed; if it prints an older one, your shell runs a stale copy (run `hash -r`, or see [When npm skips the install script](#when-npm-skips-the-install-script)). `opv skill status` says whether an installed AI-assistant skill still matches the new binary. With the install script, re-run it: it replaces `~/.local/bin/opv` with the latest release.
 
 ### One install location
 
