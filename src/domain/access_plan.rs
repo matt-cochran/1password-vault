@@ -71,6 +71,12 @@ pub enum GrantState {
     /// #153: the vault is not in the selected account, or this person cannot open it at
     /// all (`op vault get` fails): no owner command for this principal can succeed here.
     NotInAccount,
+    /// #314, FR-70: a service-account grant (a CI reader or a deploy identity) on a vault
+    /// whose access list was read but names no service account at all. 1Password never
+    /// lists a service account there (spike #304, Q3), so the grant can be neither
+    /// confirmed nor called missing from this view: counted as unclassified, and no owner
+    /// command is printed for it.
+    NotSupported,
 }
 
 /// One required grant and its observed state.
@@ -201,6 +207,30 @@ pub fn compare(required: &[Grant], observed: &[ObservedVault<'_>]) -> AccessRepo
         checked,
         unclassified,
     }
+}
+
+/// #314, FR-70 (spike #304, Q3): 1Password never lists a service account in a vault's
+/// access list, so a grant that reads as [`GrantState::Missing`] on a vault whose list names
+/// no service account at all (`lists_service_accounts` is false for it) is
+/// [`GrantState::NotSupported`] instead, counted as unclassified, never as checked. A list
+/// that does name service accounts shows them, so absence from it stays `Missing`. Returns
+/// the principals so marked, once each, in report order.
+pub fn mark_unlisted_service_accounts(
+    report: &mut AccessReport,
+    lists_service_accounts: impl Fn(&str) -> bool,
+) -> Vec<Principal> {
+    let mut marked: Vec<Principal> = Vec::new();
+    for check in &mut report.checks {
+        if check.state == GrantState::Missing && !lists_service_accounts(&check.grant.vault_id) {
+            check.state = GrantState::NotSupported;
+            report.checked -= 1;
+            report.unclassified += 1;
+            if !marked.contains(&check.grant.principal) {
+                marked.push(check.grant.principal.clone());
+            }
+        }
+    }
+    marked
 }
 
 /// The state of one required grant: a vault not observed or with unknown readers is

@@ -289,3 +289,9 @@ Gates on the fix: fmt, clippy with and without features, nextest 10524/10524, `m
 ## 0.12.0 sign-off
 
 The owner delegated the 0.12.0 snapshot sign-off on 2026-10-18 to a Junior review verified by the manager, as for 0.10.0. Every 0.12.0 box above is ticked on that basis.
+
+## Unreleased: unlisted service-account grants are not_supported in the access audit (#314, FR-70)
+
+Ten `access__…` matrix cells changed (`access__op_vault_user_list_…__not_found` ×7, `access__op_whoami__{applied_but_reply_lost,malformed_output,timeout}`), plus `scenarios/core_access`. Spike #304 (Q3) showed a service account never appears in `op vault user list`, so a CI reader's or deploy identity's grant on a readable vault whose list names no service account is now `not_supported` (text: `not supported (service accounts are never listed)`), counted as unclassified, with no `Owner runs:` command; one `ci_reader_not_visible` finding per environment (`next: opv access <env> --verify-reader --grant-receipt <file> --grant-receipt-sha256 <approved-sha256>`) and one `deploy_identity_not_visible` finding per target (`next: opv delivery verify <env> --target <name>`). `issue_157_access_reports_the_vault_outside_the_account_and_checks_the_others` now expects `not_supported` for every vault but the one outside the account. Each diff was checked to be only this. No value in any diff.
+
+- [ ] Owner sign-off of the #314 access snapshots.
