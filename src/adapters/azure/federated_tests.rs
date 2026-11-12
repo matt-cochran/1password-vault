@@ -273,3 +273,46 @@ fn the_credential_name_uses_only_allowed_characters() {
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
     );
 }
+
+// ---- GitHub's immutable OIDC subject (#323) ----
+
+const IMMUTABLE: &str = "repo:example-org@1000/example-repo@2000:environment:prod";
+
+#[test]
+fn the_new_trust_names_exactly_the_immutable_subject() {
+    let r = FakeRunner::new(replies(&World::default()));
+    mint(&target(), IMMUTABLE, &r).unwrap();
+    let create = r
+        .calls
+        .borrow()
+        .iter()
+        .find(|c| {
+            c.args
+                .join(" ")
+                .starts_with("ad app federated-credential create")
+        })
+        .map(|c| c.args.clone())
+        .unwrap();
+    let at = create.iter().position(|a| a == "--parameters").unwrap();
+    let p: Value = serde_json::from_str(&create[at + 1]).unwrap();
+    assert_eq!(p["subject"], IMMUTABLE);
+}
+
+#[test]
+fn the_app_name_leaves_out_the_immutable_subjects_ids() {
+    assert_eq!(app_name(&target(), IMMUTABLE), app_name(&target(), SUBJECT));
+}
+
+#[test]
+fn the_immutable_credential_name_differs_from_the_classic_one() {
+    assert_ne!(credential_name(IMMUTABLE), credential_name(SUBJECT));
+}
+
+#[test]
+fn the_immutable_credential_name_uses_only_allowed_characters() {
+    assert!(
+        credential_name(IMMUTABLE)
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    );
+}
