@@ -55,6 +55,8 @@ struct World {
     observed: FakeRunner,
     /// The create's outcome comes from `observed` (queued by the test) instead of success.
     scripted_create: bool,
+    /// What `op vault list` answers under the new token (the binding check).
+    token_vaults: String,
     calls: RefCell<Vec<Recorded>>,
 }
 
@@ -77,6 +79,7 @@ impl World {
             created: format!("{TOKEN}\n"),
             observed: FakeRunner::default(),
             scripted_create: false,
+            token_vaults: r#"[{"id":"cccccccccccccccccccccccccc"}]"#.into(),
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -108,9 +111,7 @@ impl CommandRunner for World {
                 .iter()
                 .any(|(name, _)| *name == "OP_SERVICE_ACCOUNT_TOKEN")
         {
-            return Ok(Outcome::Done(Output::success(
-                r#"[{"id":"cccccccccccccccccccccccccc"}]"#,
-            )));
+            return Ok(Outcome::Done(Output::success(self.token_vaults.clone())));
         }
         if call.program == "op"
             && call.args.first() == Some(&"whoami")
@@ -628,4 +629,458 @@ fn a_deploy_identity_cannot_create_a_read_only_grant_receipt() {
         Some(&path),
     );
     assert!(result.is_err() && !w.ran("op", &["service-account", "create"]));
+}
+
+// --- `opv access <env> --create --agent` (#338, design agent-identity.md §4.3, §7.2) -------
+
+use crate::adapters::credential_store::{
+    AgentCredentialSource, AgentKey, FakeCredentialSource, FakeFault, SourceDescription,
+};
+use crate::cause::AgentStore;
+
+/// The two boundary vaults of the agent fleet: 26-character IDs, as 1Password's are.
+const VAULT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+const VAULT_B: &str = "cccccccccccccccccccccccccc";
+/// The fake account's ID (`op whoami`, for the person and under the token).
+const ACCOUNT: &str = "AFAKEOP0000000000000000001";
+
+fn agent_fleet(tier: &str) -> crate::domain::Fleet {
+    crate::config::parse(&format!(
+        r#"[environments.staging]
+tier = "{tier}"
+boundaries.web = {{ vault_id = "{VAULT_A}", item_id = "iweb" }}
+boundaries.api = {{ vault_id = "{VAULT_B}", item_id = "iapi" }}
+
+[products.web.keys.WEB_KEY]
+kind = "secret"
+environments = ["staging"]
+
+[products.api.keys.API_KEY]
+kind = "secret"
+environments = ["staging"]
+"#
+    ))
+    .unwrap()
+}
+
+/// The fake world with both agent vaults in the account, and the new token reading exactly
+/// them.
+fn agent_world() -> World {
+    let mut w = World::new();
+    for v in [VAULT_A, VAULT_B] {
+        w.op.vaults.borrow_mut().push((v.into(), v.into()));
+        w.op.vault_users.borrow_mut().insert(v.into(), json!([]));
+    }
+    w.token_vaults = format!(r#"[{{"id":"{VAULT_A}"}},{{"id":"{VAULT_B}"}}]"#);
+    w
+}
+
+fn agent_key() -> AgentKey {
+    AgentKey::new(AccountId::new(ACCOUNT), "shop", EnvName::new("staging")).unwrap()
+}
+
+/// A store whose availability check passes but whose write fails: the token is lost after
+/// the account exists.
+struct FailingStore(FakeCredentialSource);
+
+impl AgentCredentialSource for FailingStore {
+    fn describe(&self) -> SourceDescription {
+        self.0.describe()
+    }
+    fn preflight(&self) -> Result<SourceDescription, Error> {
+        self.0.preflight()
+    }
+    fn resolve(&self, key: &AgentKey) -> Result<Option<SecretValue>, Error> {
+        self.0.resolve(key)
+    }
+    fn store(&self, _: &AgentKey, _: &SecretValue) -> Result<(), Error> {
+        Err(Cause::AgentStoreLocked {
+            store: self.0.describe().store,
+        }
+        .into())
+    }
+    fn delete(&self, key: &AgentKey) -> Result<bool, Error> {
+        self.0.delete(key)
+    }
+}
+
+struct AgentRun {
+    res: Result<(), Error>,
+    out: String,
+    shown: Vec<String>,
+    index: String,
+}
+
+fn agent_create_with(
+    w: &World,
+    fleet: &crate::domain::Fleet,
+    store: &dyn AgentCredentialSource,
+    index: &std::path::Path,
+    confirm: Option<&str>,
+    json: bool,
+) -> AgentRun {
+    let mut ui = Answer(true, RefCell::new(Vec::new()));
+    let mut out = Vec::new();
+    let req = AgentRequest {
+        env: "staging",
+        project: "shop",
+        machine: Machine {
+            name: "Laptop",
+            confirm,
+            store,
+            index,
+            json,
+        },
+    };
+    let res = run_agent(fleet, &req, w, &mut ui, &mut out);
+    let shown = ui.1.borrow().clone();
+    AgentRun {
+        res,
+        out: String::from_utf8(out).unwrap(),
+        shown,
+        index: std::fs::read_to_string(index).unwrap_or_default(),
+    }
+}
+
+fn agent_create(w: &World, store: &dyn AgentCredentialSource) -> AgentRun {
+    let dir = tempfile::tempdir().unwrap();
+    agent_create_with(
+        w,
+        &agent_fleet("shared"),
+        store,
+        &dir.path().join("agent-identities.toml"),
+        None,
+        false,
+    )
+}
+
+fn service_account_args(w: &World) -> String {
+    w.calls
+        .borrow()
+        .iter()
+        .find(|(p, a, _)| p == "op" && a.first().map(String::as_str) == Some("service-account"))
+        .map(|(_, a, _)| a.join(" "))
+        .unwrap_or_default()
+}
+
+fn creates(w: &World) -> usize {
+    w.calls
+        .borrow()
+        .iter()
+        .filter(|(p, a, _)| p == "op" && a.first().map(String::as_str) == Some("service-account"))
+        .count()
+}
+
+#[test]
+fn the_agent_identity_reads_exactly_the_ci_readers_vaults() {
+    let w = agent_world();
+    let _ = agent_create(&w, &FakeCredentialSource::new(AgentStore::SecretService));
+    assert_eq!(
+        service_account_args(&w),
+        format!(
+            "service-account create shop-staging-agent-laptop --vault {VAULT_A}:read_items \
+             --vault {VAULT_B}:read_items --expires-in 90d --raw"
+        )
+    );
+}
+
+#[test]
+fn the_agent_identity_is_asked_for_90_days() {
+    let w = agent_world();
+    let _ = agent_create(&w, &FakeCredentialSource::new(AgentStore::SecretService));
+    assert!(service_account_args(&w).contains("--expires-in 90d"));
+}
+
+#[test]
+fn the_agent_identity_can_never_create_vaults() {
+    let w = agent_world();
+    let _ = agent_create(&w, &FakeCredentialSource::new(AgentStore::SecretService));
+    assert!(!service_account_args(&w).contains("--can-create-vaults"));
+}
+
+#[test]
+fn the_agent_identitys_token_is_kept_in_the_store() {
+    let w = agent_world();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let _ = agent_create(&w, &store);
+    let kept = store.resolve(&agent_key()).unwrap();
+    assert_eq!(kept.as_ref().map(SecretValue::expose), Some(TOKEN));
+}
+
+#[test]
+fn the_agent_identity_is_recorded_in_the_index() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("agent-identities.toml");
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let _ = agent_create_with(&w, &agent_fleet("shared"), &store, &index, None, false);
+    let loaded = crate::app::agent_identity::load(&index).unwrap();
+    assert_eq!(
+        loaded
+            .find(ACCOUNT, "shop", "staging")
+            .map(|e| e.record.account_name.as_str()),
+        Some("shop-staging-agent-laptop")
+    );
+}
+
+#[test]
+fn a_binding_mismatch_stores_nothing() {
+    let mut w = agent_world();
+    w.token_vaults = format!(r#"[{{"id":"{VAULT_A}"}}]"#);
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let _ = agent_create(&w, &store);
+    assert!(store.resolve(&agent_key()).unwrap().is_none());
+}
+
+#[test]
+fn a_binding_mismatch_records_no_index_entry() {
+    let mut w = agent_world();
+    w.token_vaults = format!(r#"[{{"id":"{VAULT_A}"}}]"#);
+    let run = agent_create(&w, &FakeCredentialSource::new(AgentStore::SecretService));
+    assert_eq!(run.index, "");
+}
+
+#[test]
+fn a_binding_mismatch_names_the_account_to_remove() {
+    let mut w = agent_world();
+    w.token_vaults = format!(r#"[{{"id":"{VAULT_A}"}}]"#);
+    let run = agent_create(&w, &FakeCredentialSource::new(AgentStore::SecretService));
+    assert!(
+        run.shown
+            .iter()
+            .any(|l| l
+                .contains("nothing was stored: remove \"shop-staging-agent-laptop\" in 1Password")),
+        "{:?}",
+        run.shown
+    );
+}
+
+#[test]
+fn a_failed_store_never_creates_the_account_again() {
+    let w = agent_world();
+    let _ = agent_create(
+        &w,
+        &FailingStore(FakeCredentialSource::new(AgentStore::SecretService)),
+    );
+    assert_eq!(creates(&w), 1);
+}
+
+#[test]
+fn a_failed_store_names_the_account_and_says_opv_does_not_try_again() {
+    let w = agent_world();
+    let run = agent_create(
+        &w,
+        &FailingStore(FakeCredentialSource::new(AgentStore::SecretService)),
+    );
+    assert!(
+        run.shown.iter().any(|l| l.contains(
+            "Service account \"shop-staging-agent-laptop\" was created, but its token could not \
+             be kept in login keyring (Secret Service). 1Password shows a token only once, so \
+             opv does not try again: remove \"shop-staging-agent-laptop\" in 1Password"
+        )),
+        "{:?}",
+        run.shown
+    );
+}
+
+#[test]
+fn a_failed_store_is_the_stores_cause() {
+    let w = agent_world();
+    let run = agent_create(
+        &w,
+        &FailingStore(FakeCredentialSource::new(AgentStore::SecretService)),
+    );
+    assert_eq!(code_of(&run.res.unwrap_err()), Some("agent_store_locked"));
+}
+
+#[test]
+fn a_locked_store_is_refused_before_any_create() {
+    let w = agent_world();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    store.set_fault(Some(FakeFault::Locked));
+    let _ = agent_create(&w, &store);
+    assert_eq!(creates(&w), 0);
+}
+
+#[test]
+fn an_unavailable_store_is_agent_store_unavailable() {
+    let w = agent_world();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    store.set_fault(Some(FakeFault::Unavailable));
+    let run = agent_create(&w, &store);
+    assert_eq!(
+        code_of(&run.res.unwrap_err()),
+        Some("agent_store_unavailable")
+    );
+}
+
+#[test]
+fn production_without_confirm_is_confirm_required() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let run = agent_create_with(
+        &w,
+        &agent_fleet("production"),
+        &store,
+        &dir.path().join("i.toml"),
+        None,
+        false,
+    );
+    assert_eq!(code_of(&run.res.unwrap_err()), Some("confirm_required"));
+}
+
+#[test]
+fn production_without_confirm_is_refused_before_the_question() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let run = agent_create_with(
+        &w,
+        &agent_fleet("production"),
+        &store,
+        &dir.path().join("i.toml"),
+        None,
+        false,
+    );
+    assert!(run.shown.is_empty(), "{:?}", run.shown);
+}
+
+#[test]
+fn production_with_its_own_name_confirmed_is_created() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let run = agent_create_with(
+        &w,
+        &agent_fleet("production"),
+        &store,
+        &dir.path().join("i.toml"),
+        Some("staging"),
+        false,
+    );
+    assert!(run.res.is_ok(), "{:?}", run.res);
+}
+
+#[test]
+fn production_confirmed_with_another_name_is_confirm_mismatch() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let run = agent_create_with(
+        &w,
+        &agent_fleet("production"),
+        &store,
+        &dir.path().join("i.toml"),
+        Some("prod"),
+        false,
+    );
+    assert_eq!(code_of(&run.res.unwrap_err()), Some("confirm_mismatch"));
+}
+
+#[test]
+fn an_identity_in_the_index_is_agent_identity_exists() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("agent-identities.toml");
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let _ = agent_create_with(&w, &agent_fleet("shared"), &store, &index, None, false);
+    store.delete(&agent_key()).unwrap();
+    let again = agent_create_with(&w, &agent_fleet("shared"), &store, &index, None, false);
+    assert_eq!(
+        code_of(&again.res.unwrap_err()),
+        Some("agent_identity_exists")
+    );
+}
+
+#[test]
+fn a_token_in_the_store_is_agent_identity_exists() {
+    let w = agent_world();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    store
+        .store(&agent_key(), &SecretValue::new("ops_OLDTOKEN".into()))
+        .unwrap();
+    let run = agent_create(&w, &store);
+    assert_eq!(
+        code_of(&run.res.unwrap_err()),
+        Some("agent_identity_exists")
+    );
+}
+
+#[test]
+fn an_existing_identity_creates_nothing() {
+    let w = agent_world();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    store
+        .store(&agent_key(), &SecretValue::new("ops_OLDTOKEN".into()))
+        .unwrap();
+    let _ = agent_create(&w, &store);
+    assert_eq!(creates(&w), 0);
+}
+
+#[test]
+fn the_output_is_the_designs_text() {
+    let w = agent_world();
+    let run = agent_create(&w, &FakeCredentialSource::new(AgentStore::MacosKeychain));
+    let text = format!("{}\n{}", run.shown.join("\n"), run.out);
+    let expected = format!(
+        "Create 1Password service account \"shop-staging-agent-laptop\" (the read-only agent identity of staging on this machine), valid 90 days, with:
+  vault {VAULT_A}: read
+  vault {VAULT_B}: read
+and keep its token in this machine's macOS Keychain. The token is never shown.
+It reads these vaults' values only to deliver them, and can never change them. An assistant running as you can still reach the token; see opv guide agent, \"Agent identity\".
+created \"shop-staging-agent-laptop\"; checked it reads exactly these 2 vaults; stored its token in macOS Keychain; nothing was printed
+Set OPV_IDENTITY=agent in your assistant's environment to use it.
+Next: opv doctor --env staging
+"
+    );
+    assert_eq!(text, expected);
+}
+
+#[test]
+fn the_json_document_steps_to_doctor() {
+    let w = agent_world();
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let run = agent_create_with(
+        &w,
+        &agent_fleet("shared"),
+        &store,
+        &dir.path().join("i.toml"),
+        None,
+        true,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&run.out).unwrap();
+    assert_eq!(doc["next"], "opv doctor --env staging");
+}
+
+#[test]
+fn no_channel_carries_the_agent_token() {
+    let w = agent_world();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let text = agent_create(&w, &store);
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeCredentialSource::new(AgentStore::SecretService);
+    let json = agent_create_with(
+        &w,
+        &agent_fleet("shared"),
+        &store,
+        &dir.path().join("i.toml"),
+        None,
+        true,
+    );
+    let mut lost = agent_world();
+    lost.token_vaults = "[]".into();
+    let failed = agent_create(&lost, &FakeCredentialSource::new(AgentStore::SecretService));
+    let err = failed.res.as_ref().unwrap_err();
+    let inv = Invocation::default();
+    let all = [&text, &json, &failed]
+        .iter()
+        .map(|r| format!("{}{}{}", r.out, r.shown.join("\n"), r.index))
+        .chain([
+            format!("{err:?}{err}"),
+            crate::error::document(err, &inv, true).to_string(),
+        ])
+        .collect::<String>();
+    assert!(!all.contains("FAKETOKENMARKER"), "{all}");
 }
