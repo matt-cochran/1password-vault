@@ -103,6 +103,15 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
+      - name: Wait for the role assignment to reach the token
+        run: |
+          # A new role assignment takes minutes to take effect; until then the identity sees no subscription.
+          for i in $(seq 1 20); do
+            az account list --refresh --query "[?id=='${{ vars.AZURE_SUBSCRIPTION_ID }}'].id" -o tsv | grep -q . && { echo "visible after $i tries" > rbac-wait.txt; break; }
+            sleep 30
+          done
+          az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
       - name: Record the ambient identity
         run: |
           az account show -o json > account-show.json
@@ -123,6 +132,9 @@ jobs:
             *.txt
             *.stderr
 EOF
+# Role assignments take a few minutes to propagate; give it a head start before the run.
+echo "waiting ${OPV_SPIKE_RBAC_WAIT:-180}s for the role assignment to propagate"
+sleep "${OPV_SPIKE_RBAC_WAIT:-180}"
 wf_sha=$(gh api -X PUT "repos/$REPO/contents/$WF" -f message="opv OIDC spike workflow (temporary)" \
   -f content="$(base64 -w0 workflow.yml)" --jq .content.sha)
 before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -177,6 +189,8 @@ for p in files:
     for n, real in enumerate(re.findall(r"@(\d+)", prefix)):
         t = t.replace(real, ("1000", "2000")[n])
     t = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", t)
+    t = re.sub(r'"publisherDomain": "[^"]*"', '"publisherDomain": "example.onmicrosoft.com"', t)
+    t = re.sub(r'("environmentName": "[^"]*",(?:\s*"[^"]*": [^,]*,)*?\s*"name": )"[^"]*"', r'\1"example-subscription"', t)
     pathlib.Path(p.name + ".scrubbed").write_text(t)
 print(len(others), "other ids replaced")
 EOF

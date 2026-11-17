@@ -1,0 +1,19 @@
+{
+  "condition": null,
+  "conditionVersion": null,
+  "createdBy": null,
+  "createdOn": "2026-11-12T19:42:42.666764+00:00",
+  "delegatedManagedIdentityResourceId": null,
+  "description": null,
+  "id": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.Authorization/roleAssignments/44444444-4444-4444-4444-444444444444",
+  "name": "44444444-4444-4444-4444-444444444444",
+  "principalId": "44444444-4444-4444-4444-444444444445",
+  "principalType": "ServicePrincipal",
+  "resourceGroup": "example-rg",
+  "roleDefinitionId": "/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/44444444-4444-4444-4444-444444444446",
+  "scope": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg",
+  "systemData": null,
+  "type": "Microsoft.Authorization/roleAssignments",
+  "updatedBy": "44444444-4444-4444-4444-444444444447",
+  "updatedOn": "2026-11-12T19:42:43.079767+00:00"
+}

@@ -7,7 +7,7 @@
 [![CI](https://github.com/matt-cochran/1password-vault/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/matt-cochran/1password-vault/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/matt-cochran/1password-vault)](https://github.com/matt-cochran/1password-vault/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV 1.99.1](https://img.shields.io/badge/rust-1.99.1%2B-orange.svg)](Cargo.toml)
+[![MSRV 1.100.0](https://img.shields.io/badge/rust-1.100.0%2B-orange.svg)](Cargo.toml)
 
 Deliver 1Password-managed secrets to application runtimes and CI, with validation and explicit deployment controls.
 
@@ -71,7 +71,7 @@ npm picks the prebuilt binary for your system; the command is `opv`. Without Nod
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
-Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, add its agent skill, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json` and never handles a secret value:
+Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, add its agent skill, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json`. The assistant may run authorized commands, such as your tests, through `opv run`: opv delivers the values to that process, and the model sees only value-free results, never a secret value ([agent setup](docs/agent-setup.md)):
 
 ```sh
 opv skill install --user          # or, with the script: ... | sh -s -- --skill

@@ -24,8 +24,8 @@ layout when run in the user's own session (the schema's `tidies_1password`); whe
 needs tidying, the explicit repair is a signed-in person's `opv config export <env>`
 (writes 1Password: ask first).
 
-Read the rules in `opv guide agent` before anything else. In short: you never see, ask for,
-type or store a secret value; the user signs in and types values only at 1Password's own
+Read the rules in `opv guide agent` before anything else. In short: the model never sees, asks for,
+types or stores a secret value; the user signs in and types values only at 1Password's own
 prompts or in the 1Password app; ask before anything that writes (the schema's
 `ask_user_first`); prefer `--json` and act on `error.code`, `next` and `human_required`, not
 on message text.
@@ -41,6 +41,35 @@ name with exact line breaks (including terminal CRLF), not as a mounted file or 
 variable. `explain --target <target> --env <env> --json` advertises
 `file_delivery.channel = "secret_api"` and `utf8_verbatim = true` when supported. Do not
 compact or encode a PEM key to bypass an unsupported installed version; upgrade first.
+
+## Orchestrate processes without exposing values to the model
+
+An assistant may run an authorized command through `opv run <env> -- <command>`.
+OPV and the child process consume the real declared values; the model receives
+only the command's safe results. That is the intended execution boundary, not
+secret exposure by itself. Do not hand a command back to the user merely because
+its child needs credentials. This applies to tests, builds, provider clients and
+bounded diagnostics; each command still needs authorization for its actual effects.
+
+Prefer native value-free OPV metadata first. When a diagnostic must inspect a
+declared value, run a bounded child through OPV and return only a fixed result
+such as `json_object`, `not_valid_json` or an allowlisted error code. Never dump
+the environment, print a value or exception containing it, copy a secret into
+model-visible output, or transform/encode a value to evade masking. OPV-managed
+file delivery is allowed; the model must not read the delivered file and the child
+must not retain copies. Masking is defense in depth, not permission to print secrets.
+
+Use the existing authorization and least-privilege scope. Do not add a new approval
+for an already authorized read/test just because OPV supplies its credentials.
+New external effects still require appropriate authorization; human-only sign-in,
+secret entry, plan application, native confirmations and project-specific gates
+remain human steps. CLI `opv run` is distinct from the metadata-only MCP tools.
+
+If `opv ready <env> --json` reports `op_not_signed_in`, request only the necessary
+authentication step, then resume the agent-run command. An unrelated terminal's
+sign-in does not reach this process. Never request a session token or password
+in chat, steal another process's session, or clear agent markers to bypass a
+native refusal. See the guide's sign-in/readiness instructions.
 
 ## The assistant proposes; a person applies; CI delivers
 
@@ -258,3 +287,4 @@ workflow its `next` names (`opv ci workflow <env> --target <name>`).
 
 Resume after any interruption by running `opv ready --json` again: every step is safe to
 repeat, and the receipt says what is left.
+

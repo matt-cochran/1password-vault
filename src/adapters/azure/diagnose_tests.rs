@@ -271,3 +271,20 @@ fn federated_doctor_outside_github_actions_is_ci_only() {
         Ok(Verdict::Ok(ref m)) if m.contains("CI only")
     ));
 }
+
+/// #297 live spike: the recorded `az ad app federated-credential list` of the app a real job
+/// signed in through trusts the job's immutable subject.
+#[test]
+fn federated_doctor_accepts_the_recorded_credential_list() {
+    let r = FakeRunner::new(vec![Output::success(
+        include_bytes!("../../../tests/fixtures/azure/oidc/federated-credential-list.json")
+            .to_vec(),
+    )]);
+    let ctx = in_actions_with_ids("example-org/example-repo", "spike");
+    let checks = with_github_context(ctx, || federated_checks(&federated_target(), &r, true));
+    let c = checks
+        .into_iter()
+        .find(|c| c.name == "federated credential")
+        .expect("missing check");
+    assert!(matches!(c.outcome, Ok(Verdict::Ok(_))));
+}

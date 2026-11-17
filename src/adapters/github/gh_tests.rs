@@ -721,3 +721,15 @@ fn malformed_api_public_keys_refuse_before_any_secret_mutation() {
         assert!(r.calls.borrow()[0].stdin.is_none());
     }
 }
+
+/// #297 live spike: GitHub's recorded reply for a repository on its default settings.
+#[test]
+fn oidc_subject_from_the_recorded_reply_is_the_immutable_form() {
+    let got = subject_from(include_str!(
+        "../../../tests/fixtures/azure/oidc/oidc-sub-customization.json"
+    ));
+    assert_eq!(
+        got.unwrap(),
+        "repo:example-org@1000/example-repo@2000:environment:prod"
+    );
+}
