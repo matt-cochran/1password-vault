@@ -348,6 +348,17 @@ fn detect_backend() -> Backend {
     if let Some(vault) = wsl::WslVault::detect() {
         return Backend::Wsl(vault);
     }
+    // `Store::new()` succeeds without reaching a daemon, so probe for one: no Secret Service
+    // answering (no bus, or nothing on it) falls back to the volatile kernel keyring. A locked
+    // collection or a probe that times out keeps the Secret Service, so its reads fail as
+    // agent_store_locked (vet R6) rather than the token landing in a volatile store.
+    let probe = bounded::on_worker(READ_TIMEOUT, || match linux::secret_service_unlocked() {
+        Ok(()) | Err(StoreFailure::Locked) => Ok(()),
+        Err(other) => Err(other),
+    });
+    if probe == Err(StoreFailure::Unavailable) {
+        return Backend::KernelKeyring;
+    }
     match native::NativeStore::secret_service(READ_TIMEOUT) {
         Ok(n) => Backend::Native(n),
         Err(_) => Backend::KernelKeyring,
