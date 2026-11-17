@@ -14,6 +14,11 @@ use zeroize::Zeroizing;
 use crate::domain::SecretValue;
 use crate::error::Error;
 
+// rpassword is the fallback prompt of a build without the terminal UI; with `ui` on it is
+// unused, and Rust 1.100's `cargo::unused_dependencies` lint would flag the manifest.
+#[cfg(feature = "ui")]
+use rpassword as _;
+
 /// What the prompt shows once anything is entered: fixed, whatever the length.
 pub const MASK: &str = "********";
 
