@@ -1571,7 +1571,15 @@ fn state_doc<R: Accounted>(
         Section::History => crate::app::history::run(&fleet, required, target, r, true, &mut *out),
         Section::Accounts => {
             return match crate::app::account::document(&crate::app::account::gather(r, None)) {
-                Ok(doc) => call.document(doc.to_string().as_bytes(), Ok(())),
+                Ok(mut doc) => {
+                    // #338 (design §7.4, D7): the same per-environment `identity` objects
+                    // `ready` carries, beside the account report; no new section.
+                    let probe = crate::app::ready::IdentityProbe::process(r);
+                    let today = crate::app::ready::expiry_today(generated_at.unwrap_or(""));
+                    doc["identity"] =
+                        crate::app::ready::identities(&fleet, env, r, &probe, &today).into();
+                    call.document(doc.to_string().as_bytes(), Ok(()))
+                }
                 Err(e) => call.failed(&e),
             };
         }

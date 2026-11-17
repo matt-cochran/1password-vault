@@ -280,7 +280,7 @@ pub fn after(
 /// The environment's vaults (its bound boundaries) the token lists, from one token-scoped
 /// `op vault list` (matched by ID or name). `None` when it cannot be read or the
 /// environment binds no vault.
-fn reach(fleet: &Fleet, env: &str, r: &dyn CommandRunner) -> Option<Reach> {
+pub(crate) fn reach(fleet: &Fleet, env: &str, r: &dyn CommandRunner) -> Option<Reach> {
     #[derive(serde::Deserialize)]
     struct Vault {
         id: String,
