@@ -680,39 +680,6 @@
       }
     },
     {
-      "id": "s19-volatile-store-install",
-      "owned_files": [
-        "src/app/agent_identity_install.rs",
-        "src/app/agent_identity.rs"
-      ],
-      "prerequisites": [
-        "s15-gate-mvp",
-        "s1-spike-stores"
-      ],
-      "estimate": {
-        "optimistic": 3.0,
-        "likely": 4.0,
-        "pessimistic": 7.0
-      },
-      "earning_rule": "zero_hundred",
-      "metadata": {
-        "artifact": "Only if S1 finds the WSL store volatile: Private-vault durable copy and --install --agent",
-        "owner": "junior",
-        "kind": "agent",
-        "track": "338",
-        "issue": 338,
-        "junior": {
-          "acceptance": [
-            "Create also writes the token to the person's Private vault on op item create stdin",
-            "--install reloads the working copy with one person approval and checks it"
-          ],
-          "checks": [
-            "cargo test --lib -- app::agent_identity_install"
-          ]
-        }
-      }
-    },
-    {
       "id": "s20-site-pages",
       "owned_files": [
         "opv-site:src/pages/assistants/index.astro",
@@ -760,7 +727,6 @@
         "s16-owner-wsl-check",
         "s17-auto-select",
         "s18-remove-agent",
-        "s19-volatile-store-install",
         "s20-site-pages"
       ],
       "estimate": {
