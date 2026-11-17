@@ -181,8 +181,9 @@ jobs:
         mkdir -p live
         cp "$exe" live/credential_store_live
     - name: Kernel keyring fallback, no session bus
-      # Advisory for now: a CI job's session keyring may not link the user keyring @u, so a
-      # write can be refused there (agent_store_unavailable, never a file). Logins link it.
+      # Advisory: a CI job's (or systemd service's) session keyring does not link the user
+      # keyring @u, so the write is refused there (agent_store_unavailable, never a file).
+      # Logins (pam_keyinit) link it; the next step proves that case.
       continue-on-error: true
       shell: bash
       run: |
@@ -190,7 +191,6 @@ jobs:
         keyctl show @u || true
         env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live
     - name: Kernel keyring fallback inside a login-like session (@u linked into @s)
-      continue-on-error: true
       shell: bash
       run: |
         keyctl session - bash -c 'keyctl link @u @s && env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live'
@@ -256,4 +256,7 @@ jobs:
       run: |
         set -eu
         chmod +x ./credential_store_live
+        # Warm up interop: a fresh runner's first powershell.exe from WSL can take longer than
+        # opv's 15 s store bound, which the test would report as agent_store_locked.
+        for i in 1 2; do (cd /mnt/c && timeout 120 powershell.exe -NoProfile -NonInteractive -Command '[void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]; "warm"') || true; done
         OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=windows_credential_manager ./credential_store_live
