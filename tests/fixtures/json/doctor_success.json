@@ -38,6 +38,29 @@
       "reason": "headless"
     },
     {
+      "name": "op identity",
+      "target": null,
+      "status": "ok",
+      "detail": "you (your own 1Password session)",
+      "next": null,
+      "do": null,
+      "state": "person",
+      "reason": null,
+      "identity": {
+        "kind": "person",
+        "name": null,
+        "environment": "prod",
+        "source": null,
+        "read_only": false,
+        "expires_on": null,
+        "days_left": null,
+        "reach": null,
+        "rate_limit": null,
+        "store": null,
+        "state": "person"
+      }
+    },
+    {
       "name": "item",
       "target": null,
       "status": "ok",
