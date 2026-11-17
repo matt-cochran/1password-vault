@@ -45,13 +45,14 @@ jobs:
         trap 'sudo rm -rf -- "$ci_apt_dir"' EXIT
         chmod 0755 "$ci_apt_dir"
         mkdir "$ci_apt_dir/lists" "$ci_apt_dir/sourceparts"
-        # Mirror reachability and Ubuntu signatures observed in run 43057961543.
+        # Mirror reachability and Ubuntu signatures observed in run 43057961543. Three HTTPS
+        # mirrors, tried in order: kernel.org alone was unreachable from runners on 2026-11-17.
         # Preserve Ubuntu Signed-By and apt's normal TLS/signature/time checks.
         # Observed InRelease files omit Valid-Until: a valid signature is not
         # proof of a signed expiry or mirror freshness. Do not override checks.
         cat > "$ci_apt_dir/ubuntu.sources" <<EOF
         Types: deb
-        URIs: https://mirrors.edge.kernel.org/ubuntu/
+        URIs: https://azure.archive.ubuntu.com/ubuntu/ https://archive.ubuntu.com/ubuntu/ https://mirrors.edge.kernel.org/ubuntu/
         Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-security $VERSION_CODENAME-backports
         Components: main restricted universe multiverse
         Architectures: $ci_apt_arch
