@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod access_plan;
+pub mod agent_identity;
 pub mod capability;
 pub mod catalog;
 pub mod convention;
