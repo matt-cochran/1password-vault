@@ -1,7 +1,7 @@
 ---
 id: ADR-0001
 title: Never emit a secret value through any output
-status: proposed
+status: accepted
 date: 2026-11-17
 supersedes: []
 applies_to:
