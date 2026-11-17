@@ -105,6 +105,9 @@ impl Project {
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),
             )
             .env("HOME", self.path("home"))
+            // The index location is per platform (macOS uses ~/Library/Application Support);
+            // pin it so the index written above is the one opv reads everywhere.
+            .env("XDG_CONFIG_HOME", self.path("home/.config"))
             .env("OPV_NO_SKILL", "1")
             .env("OPV_SIM_WORLD", self.path("world"))
             .env("OPV_TEST_SUID_DUMPABLE", "0")
