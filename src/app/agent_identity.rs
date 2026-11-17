@@ -217,7 +217,11 @@ mod tests {
     #[test]
     fn the_index_lives_under_xdg_config_home() {
         // An absolute path on this platform (`/home/...` has no drive on Windows).
-        let base = if cfg!(windows) { "C:\\cfg" } else { "/home/u/.cfg" };
+        let base = if cfg!(windows) {
+            "C:\\cfg"
+        } else {
+            "/home/u/.cfg"
+        };
         let dir = config_dir_from(&|name| {
             (name == "XDG_CONFIG_HOME").then(|| std::ffi::OsString::from(base))
         });
