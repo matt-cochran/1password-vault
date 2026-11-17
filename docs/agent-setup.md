@@ -37,6 +37,66 @@ sign-in does not reach this process. Never request a session token or password
 in chat, steal another process's session, or clear agent markers to bypass a
 native refusal. See the guide's sign-in/readiness instructions.
 
+## Agent identity (read-only)
+
+The agent identity is a 1Password service account that can only **read** the vaults of one environment, kept in this machine's OS credential store (macOS Keychain, Windows Credential Manager, or a Secret Service keyring on Linux and WSL). With it you run `opv run`, `plan`, `ready`, `status` and `doctor` unattended, without the person's write-capable session. It is the CI reader's model on a laptop: same grants, same 90 days, and the token never passes through you, the chat, argv, a file or your environment.
+
+Every identity delivers through the same path, and none of them sees a value. Only a person changes values. 1Password vault access is the only permission. Deploys belong to CI or a person.
+
+| Identity | Created with | Token lives | Lifetime | 1Password access | Runs | Writes 1Password |
+|---|---|---|---|---|---|---|
+| Person | `opv login` or the 1Password app | the app or the shell | session | what the person can open | everything | yes: the only identity that changes values |
+| CI reader | `opv access <env> --create --github <repo>` | GitHub secret | 90 days | read, boundary vaults | inventory, plan, ready | never |
+| CI deploy identity | `… --target <t> --create --github <repo>` | GitHub secret | 90 days | read boundary, read and write its state vault | sync, deploy | value-free delivery evidence only |
+| Agent identity | `opv access <env> --create --agent` | this machine's OS store | 90 days | read, boundary vaults (the CI reader's grants) | run, plan, ready, status, doctor | never |
+
+**1. The person creates it, once per environment, in their own terminal.** Never run it yourself (it refuses an assistant); hand them exactly:
+
+```sh
+opv access <env> --create --agent
+```
+
+It shows the grants, asks once, creates `<project>-<env>-agent-<machine>`, checks it reads exactly those vaults and stores the token. A production-tier environment also needs `--confirm <env>`; `--name <machine>` overrides the hostname. It ends with `Set OPV_IDENTITY=agent in your assistant's environment to use it.`
+
+**2. You use it** when `OPV_IDENTITY=agent` is in your environment (the person sets it where they start you). Then run commands as usual:
+
+```sh
+opv ready --json
+opv run <env> -- <command>
+```
+
+opv reads the token itself, hands it only to its own `op` calls, and never to your shell or to the child of `opv run`. An environment with no agent identity stops with `agent_identity_not_installed`; opv never falls back to the person's session.
+
+**3. Check it** without changing anything:
+
+```sh
+opv doctor --env <env>
+```
+
+The `op identity` row reads, for example, `agent shop-dev-agent-laptop for dev (read-only by grant; token from macOS Keychain, durable; reads 2 of 2 vaults; expires 2027-02-15, in 90 days)`. In `opv ready --json` (and MCP `opv_state`, sections `ready` and `accounts`), the `identity` array has one object per environment: `kind`, `name`, `source`, `read_only`, `expires_on`, `days_left`, `reach`, `state`. `state: "assistant_on_person_session"` means you are on the person's own session, which can write: tell the person, and hand them the create command.
+
+**4. What it cannot do.** It never writes 1Password and never deploys. 1Password never grants a service account a Private vault, so personal values do not reach it. Each refusal is a person's step; hand over its `Next:` and wait:
+
+| `error.code` | Exit | Meaning |
+|---|---|---|
+| `own_session_required` | 7 | a write (`set`, `import`, `apply`, `provision`, `config import`, `access`, `target credentials`) or a `sync`: the person runs it in their own terminal, or CI's deploy job runs the sync |
+| `agent_identity_not_installed` | 7 | no agent identity for this environment on this machine: the person runs `opv access <env> --create --agent` |
+| `agent_rejected` | 7 | 1Password no longer accepts the token (revoked, deleted or expired): the person rotates it |
+| `agent_store_locked` | 7 | the OS store is locked or would prompt; opv never waits: the person unlocks it |
+| `agent_store_unavailable` | 3 | no usable OS store; opv never falls back to a file |
+
+Never suggest `OPV_IDENTITY=person` or unsetting `OPV_IDENTITY` to get past a refusal.
+
+**5. Expiry and rotation are the person's.** When the row warns `agent_expiring` (14 days) or `ready` reports `credential_expiring`/`credential_expired`, hand them:
+
+```sh
+opv access <env> --rotate --agent
+```
+
+Without `<env>` it rotates every agent identity on this machine (production-tier ones only with `--confirm <env>`); `--revoked <name>` resumes an interrupted rotation. Afterwards they revoke the old accounts in 1Password (Developer > Service accounts), as its `Do:` line says.
+
+**What it does not defend.** An assistant with a shell that runs as the same OS user can reach the token: it can read the OS store, read the environment of the `op run` process, or make an authorized child print a value. opv's guarantee is its own outputs: no opv output carries the token or a value. What limits the damage: read-only, one environment, 90 days. Optional hardening: run the assistant as a separate OS user or in a container that cannot reach the person's store, and start it where no person session reaches it (no desktop-app CLI integration in its terminal, not inside `opv login --`).
+
 ## Rules
 
 1. **Never expose a secret value to the model.** Do not ask the user to paste a secret into the chat, a file or a command. Values go into 1Password by the user, in the 1Password app or website. The model works with names, kinds, rules and safe results; authorized OPV-managed children may consume values as described above.
@@ -260,7 +320,7 @@ opv account use <ID>        # record the user's chosen account in .opv (ask the 
 - If the environments use different 1Password accounts, add `account = "<account ID>"` (from `opv account list --json`, never a sign-in address, which several accounts can share) to each environment; ask the user which account holds which vault. The user then signs in with `opv login <env>`; every opv command uses that environment's account.
 - Which account a command uses, in one order everywhere: `OP_ACCOUNT` (which `opv login --account <ID> -- <command>` sets for its command), else the nearest `.opv`, else the only account op knows. A value that is not an account ID is resolved to one; an ambiguous one is refused with the candidates. A service account or Connect credential decides its own account.
 - A vault opv cannot find (`opv access` reports `vault_not_in_account`; it prints no service-account command that could not succeed): run `opv vault locate <vault ID>`. It asks each account and says `found`, `not found` or `unknown` (not signed in); for an unknown one the user runs its `next`, `opv login --account <ID> --no-record -- opv vault locate <vault ID>`, which signs in to that account for this check only and leaves `.opv` as it is. Then fix the configured `vault_id`, or select the account that holds it with `opv account use <ID>`.
-- Your own commands only see a 1Password session that your process inherits. A sign-in the user makes in another terminal, or inside an earlier opv command, does not reach you. Either the user starts you inside `opv login --account <ID> -- <your agent>`, or they use the 1Password desktop app integration (Settings > Developer > Integrate with 1Password CLI, plus "Use 1Password CLI with WSL" on WSL), which needs no session variable. If every command you run fails with `op_not_signed_in`, say this to the user instead of retrying.
+- Your own commands only see a 1Password session that your process inherits. A sign-in the user makes in another terminal, or inside an earlier opv command, does not reach you. Either the user starts you inside `opv login --account <ID> -- <your agent>`, or they use the 1Password desktop app integration (Settings > Developer > Integrate with 1Password CLI, plus "Use 1Password CLI with WSL" on WSL), which needs no session variable. If every command you run fails with `op_not_signed_in`, say this to the user instead of retrying. For unattended read-only runs without the person's session, the person creates an [agent identity](#agent-identity-read-only).
 - To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that target's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Kubernetes uses the user's kubeconfig instead (Azure fields only when its secrets are in a Key Vault through `secrets_in`); Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
 
 - An app that reads secrets from files through a secret-store port, or a Cloudflare Worker whose bindings come from the environment, never gets a `.env`, `.dev.vars` or exported file. Declare `[products.<p>.local]` (`environment = "declared_only"`, `secrets_dir_env`, and `file` on the keys the app reads as files) and run it with `opv run`; see [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal). Never write a wrapper that copies values into files or variables yourself.
