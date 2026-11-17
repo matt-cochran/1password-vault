@@ -144,6 +144,7 @@ export function main(): void {
     output('build-required', 'true');
     return;
   }
+  let downloadFailures = 0;
   // Include the full tree, including workflow files and lockfiles. A merge commit
   // changes the commit id even when every source byte is unchanged.
   for (let page = 1; page <= 10; page++) {
@@ -154,12 +155,28 @@ export function main(): void {
           || (run.event === 'pull_request'
             ? run.pull_requests.length > 0 && !run.pull_requests.some(pr => pr.base.ref === 'staging')
             : run.head_branch !== 'staging')) continue;
+      // A push run built its own head commit, so its tree is known without downloading
+      // anything: skip a run whose tree differs. This keeps artifact egress to the one
+      // candidate that can match (artifact downloads count against the account's egress).
+      if (run.event !== 'pull_request') {
+        let headTree: string;
+        try { headTree = api(`repos/${repository}/git/commits/${run.head_sha}`).tree.sha; } catch { continue; }
+        if (headTree !== tree) continue;
+      }
       const artifacts = api(`repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`).artifacts;
       const name = `retained-build-${workflow}-${run.run_attempt}`;
       if (!artifacts.some((a: any) => a.name === name && !a.expired)) continue;
       const dir = mkdtempSync(join(env.RUNNER_TEMP!, 'retained-source-'));
       try {
-        text(['gh', 'run', 'download', String(run.id), '--repo', repository, '--name', name, '--dir', dir]);
+        try {
+          text(['gh', 'run', 'download', String(run.id), '--repo', repository, '--name', name, '--dir', dir]);
+        } catch (error) {
+          // Production must reuse the staging build, so it fails loudly. Elsewhere an
+          // unreadable artifact (e.g. HTTP 503 egress limit) only means no reuse: build.
+          if (required) throw error;
+          downloadFailures++;
+          continue;
+        }
         const evidence: Evidence = JSON.parse(readFileSync(join(dir, 'build-result.json'), 'utf8'));
         try { validate(evidence, run, repository, workflow, tree); } catch { continue; }
         if (run.event === 'pull_request') {
@@ -182,6 +199,9 @@ export function main(): void {
     if (runs.length < 100) break;
   }
   if (!required) {
+    if (downloadFailures > 0) {
+      appendFileSync(env.GITHUB_STEP_SUMMARY!, `${downloadFailures} retained build artifact(s) could not be downloaded; running the full build instead.\n`);
+    }
     output('build-required', 'true');
     return;
   }
