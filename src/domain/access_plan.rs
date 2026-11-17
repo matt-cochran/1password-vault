@@ -16,9 +16,17 @@ use crate::domain::access::Reader;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Principal {
-    Deploy { environment: String, target: String },
-    CiReader { environment: String },
-    Agent { environment: String, machine: String },
+    Deploy {
+        environment: String,
+        target: String,
+    },
+    CiReader {
+        environment: String,
+    },
+    Agent {
+        environment: String,
+        machine: String,
+    },
 }
 
 /// The access a principal needs on one vault (FR-59).

@@ -5883,7 +5883,10 @@ fn no_usable_credential_store_is_a_dependency_failure() {
     let c = Cause::AgentStoreUnavailable {
         store: AgentStore::SecretService,
     };
-    assert_eq!(document(&c, None, &agent_run(), false)["category"], "dependency");
+    assert_eq!(
+        document(&c, None, &agent_run(), false)["category"],
+        "dependency"
+    );
 }
 
 #[test]

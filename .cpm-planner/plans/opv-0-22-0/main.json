@@ -19,7 +19,10 @@
         "owner": "agent",
         "kind": "agent",
         "track": "338",
-        "issue": 338
+        "issue": 338,
+        "junior": {
+          "acceptance": []
+        }
       }
     },
     {
@@ -126,20 +129,22 @@
     {
       "id": "s4-credential-source",
       "owned_files": [
+        ".github/workflows/ci-checks.yml",
+        "Cargo.lock",
+        "Cargo.toml",
         "src/adapters/credential_store.rs",
         "src/adapters/credential_store_tests.rs",
         "src/adapters/mod.rs",
-        "Cargo.toml",
-        "Cargo.lock"
+        "tests/credential_store_live.rs"
       ],
       "prerequisites": [
         "s1-spike-stores",
         "s3-agent-causes"
       ],
       "estimate": {
-        "optimistic": 3.0,
-        "likely": 4.0,
-        "pessimistic": 7.0
+        "optimistic": 4,
+        "likely": 6,
+        "pessimistic": 9
       },
       "earning_rule": "zero_hundred",
       "metadata": {
@@ -153,7 +158,9 @@
             "The trait has resolve, describe and preflight; resolve returns a SecretValue registered with the scrubber",
             "A read never prompts: a locked store or one that would prompt gives agent_store_locked within 5 s",
             "No usable store gives agent_store_unavailable; there is no file fallback",
-            "A volatile backend is reported as volatile in describe()"
+            "A volatile backend is reported as volatile in describe()",
+            "CI matrix round-trips a fixed dummy (never a token) through the real store: macos-latest Keychain, windows-latest Credential Manager, ubuntu-latest Secret Service under dbus-run-session (plus a locked collection failing as agent_store_locked within 5 s), and the WSL interop path via Credential Manager on a WSL1 distro on windows-latest (Vampire/setup-wsl)",
+            "WSL store is Windows Credential Manager via interop (spike s1: fresh-process read present, 656 ms); S19 is dropped unless interop is off"
           ],
           "checks": [
             "cargo test --lib -- adapters::credential_store",
@@ -373,7 +380,8 @@
             "Every state in design \u00a77.4 renders as text and JSON (check op_identity)",
             "reads N of M vaults from a token-scoped op vault list; never claims writes none",
             "An unreadable ratelimit omits the figure and never fails the row",
-            "agent_store_volatile and agent_store_locked are FAIL rows"
+            "agent_store_volatile and agent_store_locked are FAIL rows",
+            "opv doctor runs a dummy store/read/delete round-trip on the user's machine and reports the store state; never the token"
           ],
           "checks": [
             "cargo test --lib -- app::doctor",
@@ -763,7 +771,10 @@
         "owner": "agent",
         "kind": "agent",
         "track": "338",
-        "issue": 338
+        "issue": 338,
+        "junior": {
+          "acceptance": []
+        }
       }
     }
   ]

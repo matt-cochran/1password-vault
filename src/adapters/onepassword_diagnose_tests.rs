@@ -875,7 +875,13 @@ fn in_dev() -> DiagnoseContext {
 }
 
 fn agent_case(case: &str) -> Cause {
-    diagnosed(case, "whoami", service_account_token(), &in_dev(), &as_agent())
+    diagnosed(
+        case,
+        "whoami",
+        service_account_token(),
+        &in_dev(),
+        &as_agent(),
+    )
 }
 
 #[test]

@@ -972,10 +972,15 @@ pub enum Cause {
     // agent identity (#338, design `agent-identity.md` §5, §7)
     /// `OPV_IDENTITY=agent` (or agent mode) selected the agent identity, but this environment
     /// has none on this machine: the run stops and never falls back to the person's session.
-    AgentIdentityNotInstalled { env: EnvName },
+    AgentIdentityNotInstalled {
+        env: EnvName,
+    },
     /// `opv access <env> --create --agent` found an agent identity for the environment
     /// already installed on this machine.
-    AgentIdentityExists { env: EnvName, name: String },
+    AgentIdentityExists {
+        env: EnvName,
+        name: String,
+    },
     /// 1Password rejected the agent identity's token: revoked, deleted or expired.
     AgentRejected {
         name: String,
@@ -983,9 +988,13 @@ pub enum Cause {
         seen: Observed,
     },
     /// No OS credential store opv can use is on this machine; opv never falls back to a file.
-    AgentStoreUnavailable { store: AgentStore },
+    AgentStoreUnavailable {
+        store: AgentStore,
+    },
     /// The credential store is locked, or reading it would prompt: opv never waits on it.
-    AgentStoreLocked { store: AgentStore },
+    AgentStoreLocked {
+        store: AgentStore,
+    },
     /// The token is in a store that does not survive a WSL stop, so unattended runs break.
     AgentStoreVolatile {
         store: AgentStore,

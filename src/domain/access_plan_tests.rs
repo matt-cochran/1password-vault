@@ -169,7 +169,11 @@ fn an_agent_never_gets_a_read_write_grant() {
         &[],
         &[agent_needs("prod", "laptop", &["shared", "web"])],
     );
-    assert!(grants.iter().all(|grant| grant.permission == Permission::Read));
+    assert!(
+        grants
+            .iter()
+            .all(|grant| grant.permission == Permission::Read)
+    );
 }
 
 // --- required ----------------------------------------------------------------------
