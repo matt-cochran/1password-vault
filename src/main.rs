@@ -1117,19 +1117,21 @@ enum Cmd {
         #[arg(long, requires_all = ["env", "token_destination"], conflicts_with = "rotate")]
         create: bool,
         /// With --create: the environment's read-only agent identity on this machine, its
-        /// token kept in this machine's OS credential store (#338).
+        /// token kept in this machine's OS credential store. With --rotate: replace that
+        /// identity, or with no environment every one recorded on this machine (#338).
         #[arg(
             long,
-            requires = "create",
-            conflicts_with_all = ["github", "github_env", "target", "grant_receipt", "rotate"]
+            requires = "identity_write",
+            conflicts_with_all = ["github", "github_env", "target", "grant_receipt"]
         )]
         agent: bool,
-        /// With --agent: this machine's part of the account name (default: the host name).
+        /// With --create --agent: this machine's part of the account name (default: the
+        /// host name).
         #[arg(
             long,
             value_name = "MACHINE",
             requires = "agent",
-            conflicts_with = "github"
+            conflicts_with_all = ["github", "rotate"]
         )]
         name: Option<String>,
         /// With --agent: the environment's name again, which a production-tier
@@ -1143,8 +1145,10 @@ enum Cmd {
         confirm: Option<String>,
         /// Replace the identity with a fresh service account (named with today's date) and
         /// put its token in the existing GitHub secret; then revoke the old account in
-        /// 1Password. Your own terminal only; the token is never shown (#296).
-        #[arg(long, requires_all = ["env", "github"])]
+        /// 1Password. With --agent: the same for this machine's agent identities, the token
+        /// replaced in the OS credential store. Your own terminal only; the token is never
+        /// shown (#296, #338).
+        #[arg(long, requires = "token_destination")]
         rotate: bool,
         /// With --rotate: the successor an interrupted rotation left (named in its refusal),
         /// which you revoked in 1Password; rotation then goes ahead (#324).
@@ -1152,7 +1156,7 @@ enum Cmd {
         revoked: Option<String>,
         /// With --create or --rotate: the GitHub repository (owner/repo) whose secret
         /// receives the token.
-        #[arg(long, value_name = "OWNER/REPO", requires = "identity_write")]
+        #[arg(long, value_name = "OWNER/REPO", requires_all = ["identity_write", "env"])]
         github: Option<String>,
         /// With --create or --rotate: the GitHub environment the CI job declares (created
         /// if missing); without it, a repository secret.
@@ -4105,6 +4109,19 @@ fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
             vec!["access"],
             vec![env.clone(), "--create".into(), "--agent".into()],
         ),
+        // #338: and so is rotating one, or every one on this machine.
+        Cmd::Access {
+            env,
+            rotate: true,
+            agent: true,
+            ..
+        } => (
+            vec!["access"],
+            env.iter()
+                .cloned()
+                .chain(["--rotate".into(), "--agent".into()])
+                .collect(),
+        ),
         _ => return None,
     };
     Some(opv::cause::Cmd {
@@ -5543,6 +5560,53 @@ fn run_other(
                 )
             } else {
                 opv::app::access_create::run_agent(
+                    &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::Console,
+                    out,
+                )
+            }
+        }
+        Cmd::Access {
+            env,
+            project,
+            rotate: true,
+            agent: true,
+            revoked,
+            confirm,
+            json,
+            ..
+        } => {
+            opv::app::setup_runtime::Console::require_terminal("access --rotate")?;
+            let dir = std::env::current_dir().unwrap_or_default();
+            let project = match project.as_deref() {
+                Some(name) => config_store::default_project(Some(name), None, &dir)?,
+                None => opv::app::personal::project_name(r, &dir),
+            };
+            let index = opv::app::agent_identity::index_path()
+                .ok_or_else(opv::app::agent_identity::no_config_dir)?;
+            let store = opv::adapters::credential_store::OsCredentialStore::detect();
+            let req = opv::app::agent_identity_rotate::Request {
+                env: env.as_deref(),
+                project: &project,
+                revoked: revoked.as_deref(),
+                confirm: confirm.as_deref(),
+                store: &store,
+                index: &index,
+                json,
+            };
+            // With --json, stdout is the one document: the question goes to stderr.
+            if json {
+                opv::app::agent_identity_rotate::run(
+                    &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::LoginConsole,
+                    out,
+                )
+            } else {
+                opv::app::agent_identity_rotate::run(
                     &loaded?,
                     &req,
                     r,
@@ -7374,6 +7438,80 @@ members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
         assert_eq!(
             person_only(&cli.cmd).map(|c| opv::cause::render::cmd_text(&c)),
             Some("opv access dev --create --agent".to_string())
+        );
+    }
+
+    // --- `opv access [<env>] --rotate --agent` (#338) ---------------------------------
+
+    #[test]
+    fn rotate_agent_needs_no_environment() {
+        assert!(Cli::try_parse_from(["opv", "access", "--rotate", "--agent"]).is_ok());
+    }
+
+    #[test]
+    fn rotate_agent_takes_revoked_and_confirm() {
+        let argv = [
+            "opv",
+            "access",
+            "prod",
+            "--rotate",
+            "--agent",
+            "--revoked",
+            "shop-prod-agent-laptop-20261117",
+            "--confirm",
+            "prod",
+        ];
+        assert!(Cli::try_parse_from(argv).is_ok());
+    }
+
+    #[test]
+    fn rotate_agent_conflicts_with_github() {
+        let e = Cli::try_parse_from([
+            "opv", "access", "dev", "--rotate", "--agent", "--github", "a/b",
+        ])
+        .err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn rotate_agent_conflicts_with_name() {
+        let e = Cli::try_parse_from([
+            "opv", "access", "dev", "--rotate", "--agent", "--name", "laptop",
+        ])
+        .err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn rotate_without_a_destination_is_refused() {
+        let e = Cli::try_parse_from(["opv", "access", "dev", "--rotate"]).err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+    }
+
+    #[test]
+    fn rotate_github_still_needs_an_environment() {
+        let e = Cli::try_parse_from(["opv", "access", "--rotate", "--github", "a/b"]).err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+    }
+
+    #[test]
+    fn rotate_agent_hands_the_assistant_the_persons_command() {
+        let cli = Cli::try_parse_from(["opv", "access", "--rotate", "--agent"]).unwrap();
+        assert_eq!(
+            person_only(&cli.cmd).map(|c| opv::cause::render::cmd_text(&c)),
+            Some("opv access --rotate --agent".to_string())
         );
     }
 }

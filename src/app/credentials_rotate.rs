@@ -41,7 +41,7 @@ use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome};
 const VALIDITY_DAYS: i64 = 90;
 
 /// The successor's date suffix, `YYYYMMDD`.
-fn date_suffix() -> String {
+pub(super) fn date_suffix() -> String {
     crate::app::retire::today().replace('-', "")
 }
 
@@ -123,8 +123,9 @@ fn cannot_mint() -> Error {
 
 /// Run `op service-account create` once, through the runner's create effect (07.12, X5):
 /// its stdout (the token), or the diagnosed cause. An unknown outcome is
-/// `CreateOutcomeUnknown` with a check first, never a re-run (see `access_create`).
-fn create(
+/// `CreateOutcomeUnknown` with a check first, never a re-run (see `access_create`). Shared
+/// with the agent identity's rotation ([`super::agent_identity_rotate`]).
+pub(super) fn create(
     r: &dyn CommandRunner,
     call: &Call,
     ctx: &DiagnoseContext,
