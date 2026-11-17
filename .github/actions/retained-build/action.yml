@@ -30,7 +30,7 @@ runs:
       with:
         mode: ${{ inputs.runner-mode }}
         runner-label: ${{ inputs.runner-label }}
-    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: '24'
     - id: evidence
@@ -41,7 +41,7 @@ runs:
         RETAINED_BUILD_WORKFLOW: ${{ inputs.workflow }}
         RETAINED_BUILD_SCRIPT: ${{ github.action_path }}/retained-build.ts
       run: node "$RETAINED_BUILD_SCRIPT"
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: inputs.mode == 'record'
       with:
         name: retained-build-${{ inputs.workflow }}-${{ github.run_attempt }}

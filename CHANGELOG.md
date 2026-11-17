@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-11-17
+
+0.21.0 (#337) tells assistants they may run authorized commands through `opv run` without seeing a value, moves to Rust 1.100.0 and brings every dependency and CI action up to date.
+
+### Changed
+
+- **The built-in agent guide and installed skill say agents may orchestrate credentialed processes (#334, #335, #336).** `docs/agent-setup.md` and `docs/agent-skill.md` separate the model's context from an authorized child process: tests, builds, provider clients and bounded classifiers may run through `opv run`, values reach only the child, and model-visible output stays value-free. Masking is defense in depth, not a sandbox. Environment dumps, encoded exfiltration, raw exceptions, retained copies and literal secret arguments stay prohibited. Human-only sign-in, secret entry, plan application and approval gates are unchanged. `opv run` on the CLI is distinguished from the metadata-only MCP tools, and the guide says that a sign-in in another terminal does not reach the agent's process. `README.md` and `llms.txt` match. Reinstall the skill (or update opv) to pick up the new guide.
+- **Rust 1.100.0 is pinned** (`rust-toolchain.toml`, `rust-version`, every CI and release build). Lockfile dependencies were refreshed (rmcp 3.10.0 among them). Every direct dependency remains on its latest major version.
+- **CI actions are on their latest releases:** actions/setup-node v7.1.0 and actions/upload-artifact v7.0.2 (both from v4), Swatinem/rust-cache v2.9.3 (#261), taiki-e/install-action v2.90.5 (#306), EmbarkStudios/cargo-deny-action v2.1.2 and the current dtolnay/rust-toolchain, all pinned by commit.
+- **`deny.toml` carries a dated ignore for RUSTSEC-2026-0543** (chrono unmaintained, no known vulnerability), reached only through rmcp and schemars; review it by 2027-02-01.
+
 ## [0.20.1] - 2026-11-12
 
 0.20.1 fixes Azure federated deploys for repositories with GitHub's immutable OIDC subjects, and four bugs in credential bookkeeping and the access audit.
