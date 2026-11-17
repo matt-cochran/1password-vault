@@ -23,9 +23,7 @@ use sha2::{Digest, Sha256};
 
 use super::bootstrap::{self, BoundaryStep, EnvPlan, Recorded, StateStep};
 use crate::adapters::onepassword;
-use crate::cause::{
-    Cause, CommandId, PlanId, PlanScope, Principal, SessionState, StoreObject, System, VarName,
-};
+use crate::cause::{Cause, CommandId, PlanId, PlanScope, SessionState, StoreObject, System};
 use crate::domain::{Fleet, naming};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -175,9 +173,7 @@ fn no_account(command: &str) -> Error {
     match crate::host::Host::detect().op_credential {
         Some(c) => Cause::NeedsOwnSession {
             command: CommandId(command.into()),
-            identity: Principal::ShellToken {
-                var: VarName::new(c.var()),
-            },
+            identity: super::tidy::credential_principal(c),
         }
         .into(),
         None => Cause::NotSignedIn {

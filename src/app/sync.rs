@@ -263,6 +263,7 @@ pub fn run_supplying(
     opts: &SyncOpts,
     raw: super::deliver_only::RawSupply,
 ) -> Result<(), Error> {
+    super::tidy::refuse_agent(&format!("opv sync {env_name}"))?;
     if opts.retire {
         return Err(Cause::Usage {
             problem: UsageProblem::ConflictsWith {
@@ -282,6 +283,9 @@ pub fn run(
     out: &mut dyn Write,
     opts: &SyncOpts,
 ) -> Result<(), Error> {
+    // #338 (D12): agents never deploy. Under the agent identity the sync is refused before
+    // any call; it is a person's, in their own terminal, or CI's deploy job's.
+    super::tidy::refuse_agent(&format!("opv sync {env_name}"))?;
     // `--retire` runs the retirement's checks first (#179): the needs check at `HEAD` and
     // the tier order, then this same sync with every `retiring` key released to the prune.
     if opts.retire {

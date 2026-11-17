@@ -481,6 +481,8 @@ pub fn apply(
     // (1) Refusals first, before anything is read or prompted.
     crate::host::refuse_if_agent(host_env, handoff)?;
     let host = crate::host::Host::from_env(host_env);
+    // #338 (D4): the agent identity is read-only, with or without a terminal.
+    super::tidy::refuse_agent_on("opv apply", host)?;
     if host.ci {
         return Err(Cause::NeedsTerminal {
             why: NoTerminal::Ci,
