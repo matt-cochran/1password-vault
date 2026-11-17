@@ -42,7 +42,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | runtime | `opv unseal <bundle> --env <e> --product <p> --signers <file> [--identity-file <path> \| --identity-env <VAR>] [--project <name>] [--min-revision <N>] [--verify-only] [--json] [--exec -- <cmd>]` | the runtime, CI; an assistant: `--verify-only` and inspect | verify a [sealed bundle](sealed-delivery.md), then inspect its names or run the command with its values; no configuration, `op` or network ([below](#sealed-bundles-opv-unseal)) |
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>`, `opv ci workflow --expiry-check` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests; `--expiry-check` prints the daily [credential expiry](#ci-credential-expiry-and-rotation) check |
 | admin | `opv access <env> [--target <t>] --create\|--rotate --github <owner/repo> [--github-env <e>] [--secret-name <n>] [--revoked <name>]`, `opv target credentials <env> --target <t> [--create\|--rotate]`, `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <e>` | person | CI and deploy identities, their [rotation](#ci-credential-expiry-and-rotation), and an Azure federated (OIDC) identity |
-| admin | `opv access <env> --create --agent [--name <machine>] [--confirm <env>] [--json]`, `opv access [<env>] --rotate --agent [--revoked <name>] [--confirm <env>] [--json]` | person | this machine's read-only [agent identity](#agent-identities-read-only) and its rotation |
+| admin | `opv access <env> --create --agent [--name <machine>] [--confirm <env>] [--json]`, `opv access [<env>] --rotate --agent [--revoked <name>] [--confirm <env>] [--json]`, `opv access [<env>] --remove --agent [--json]` | person | this machine's read-only [agent identity](#agent-identities-read-only), its rotation and its removal |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
@@ -905,11 +905,23 @@ Next: opv doctor
 
 ### Remove it
 
-`opv access --remove --agent` is coming in a later release; it is not available yet. Until then, remove an identity by hand:
+```sh
+opv access dev --remove --agent     # this environment's identity
+opv access --remove --agent         # every agent identity of this project on this machine
+```
 
-1. In the 1Password web app, open Developer > Service accounts and delete `{project}-{env}-agent-{machine}`. This alone ends its access.
-2. In this machine's credential store, delete the entry with service `opv` and name `<account ID>/<project>/<env>`: in Keychain Access on macOS, in Credential Manager on Windows (under Web Credentials if it was created from WSL), or in your keyring app on Linux.
-3. Delete its `[[identity]]` table from `agent-identities.toml`. While that entry is there, `--create` for the environment is refused with `agent_identity_exists`.
+```text
+Remove 1 agent identity from this machine: its token in macOS Keychain and its entry:
+  shop-dev-agent-laptop  (dev)
+Go ahead? [y/N] y
+removed "shop-dev-agent-laptop" (dev): deleted its token from macOS Keychain and its entry; nothing was printed
+Do: delete these in the 1Password web app (Developer > Service accounts); opv cannot: shop-dev-agent-laptop
+Next: opv doctor --env dev
+```
+
+- Per identity, opv deletes the token from this machine's credential store, then its `[[identity]]` entry from `agent-identities.toml`. One question covers the batch. It is a person's command: under the agent identity or an assistant it is refused.
+- A token that cannot be deleted (the store is locked, say) keeps the entry, and the line says so; run it again once the store is unlocked. An entry whose token is already gone from the store is removed, and the line notes it.
+- op cannot delete a service account, and removing the token here only ends this machine's use of it. The `Do:` line names every account to delete in the 1Password web app, which alone ends its access (with the successor an interrupted rotation may have left).
 
 ### Production: `--confirm <env>`
 
