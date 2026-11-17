@@ -1,4 +1,4 @@
-//! Identity selection, rules 1-3 (#338; design `agent-identity.md` §5, vet R4).
+//! Identity selection, rules 1-5 (#338; design `agent-identity.md` §5, vet R4).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -241,4 +241,116 @@ fn the_agent_token_is_never_put_into_the_process_environment() {
         !std::env::vars_os().any(|(_, v)| v.to_string_lossy().contains(CANARY)),
         "the token is in opv's environment"
     );
+}
+
+// --- rule 4: agent mode with an agent identity installed for the project (S17) ---
+
+/// An assistant's shell (`CLAUDECODE=1`), no `OPV_IDENTITY`, with an identity installed.
+fn auto_env() -> FakeEnv {
+    FakeEnv::new("linux")
+        .shell("/bin/bash")
+        .var_val("CLAUDECODE", "1")
+        .agent_installed()
+}
+
+fn index_of(projects: &[&str]) -> crate::app::agent_identity::Index {
+    use crate::app::agent_identity::{Index, IndexEntry};
+    use crate::domain::agent_identity::AgentRecord;
+    Index {
+        identities: projects
+            .iter()
+            .map(|p| IndexEntry {
+                project: (*p).into(),
+                account_id: "ACCT123".into(),
+                record: AgentRecord {
+                    account_name: format!("{p}-dev-agent-laptop"),
+                    environment: "dev".into(),
+                    machine: "laptop".into(),
+                    store: "secret_service".into(),
+                    created_on: "2026-11-17".into(),
+                    expires_on: "2027-02-15".into(),
+                    rotation_successor: None,
+                },
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn rule_4_a_marker_with_an_installed_identity_chooses_the_agent() {
+    assert_eq!(choose(&auto_env()).unwrap(), Choice::Agent);
+}
+
+#[test]
+fn rule_4_uses_the_installed_agent_identity_of_the_environment() {
+    let (env, resolver) = (auto_env(), Resolver::new());
+    let resolved = resolver
+        .resolve(&env, &installed(), || target("dev"))
+        .unwrap();
+    assert_eq!(resolved.agent().map(|a| a.token().expose()), Some(CANARY));
+}
+
+#[test]
+fn rule_4_an_environment_without_its_own_identity_stops_with_agent_identity_not_installed() {
+    let err = Resolver::new()
+        .resolve(&auto_env(), &installed(), || target("prod"))
+        .unwrap_err();
+    assert_eq!(err.code_str(), "agent_identity_not_installed");
+}
+
+#[test]
+fn rule_4_never_falls_back_to_the_persons_session() {
+    let resolver = Resolver::new();
+    let _ = resolver.resolve(&auto_env(), &installed(), || target("prod"));
+    assert!(resolver.get().is_none(), "{:?}", resolver.get());
+}
+
+#[test]
+fn a_marker_with_nothing_installed_is_the_persons_session() {
+    let env = FakeEnv::new("linux").var_val("CLAUDECODE", "1");
+    assert_eq!(choose(&env).unwrap(), Choice::Person);
+}
+
+#[test]
+fn an_installed_identity_without_a_marker_is_the_persons_session() {
+    let env = FakeEnv::new("linux").agent_installed();
+    assert_eq!(choose(&env).unwrap(), Choice::Person);
+}
+
+#[test]
+fn opv_identity_person_overrides_rule_4() {
+    let env = auto_env().var_val(VAR, "person");
+    assert_eq!(choose(&env).unwrap(), Choice::Person);
+}
+
+#[test]
+fn an_env_token_wins_over_rule_4() {
+    let env = auto_env().var_val("OP_SERVICE_ACCOUNT_TOKEN", "dummy");
+    assert_eq!(
+        choose(&env).unwrap(),
+        Choice::EnvToken(OpCredential::ServiceAccount)
+    );
+}
+
+#[test]
+fn the_host_reports_the_agent_credential_under_rule_4() {
+    let host = Host::from_env(&auto_env());
+    assert_eq!(host.op_credential, Some(OpCredential::Agent));
+}
+
+#[test]
+fn a_person_only_command_is_refused_under_rule_4() {
+    let host = Host::from_env(&auto_env());
+    let err = crate::app::tidy::refuse_agent_on("opv set", host).unwrap_err();
+    assert_eq!(err.code_str(), "own_session_required");
+}
+
+#[test]
+fn the_index_installs_rule_4_for_a_project_it_records() {
+    assert!(installed_for(&index_of(&["other", "shop"]), "shop"));
+}
+
+#[test]
+fn the_index_leaves_rule_4_off_for_a_project_it_does_not_record() {
+    assert!(!installed_for(&index_of(&["other"]), "shop"));
 }

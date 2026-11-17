@@ -276,8 +276,9 @@ fn open_at<'a>(
 }
 
 /// Resolve this process's identity for `env_name` (#338, design §5) before the
-/// environment's first `op` call. Only rule 3 (`OPV_IDENTITY=agent`) reads anything: the
-/// agent identity of (account, project, `env_name`) from this machine's credential store,
+/// environment's first `op` call. Only rules 3 and 4 (`OPV_IDENTITY=agent`, or agent mode
+/// with an agent identity installed for the project) read anything: the agent identity of
+/// (account, project, `env_name`) from this machine's credential store,
 /// once per process; the runner then hands its token to `op` alone. Rules 1 and 2 (a token
 /// in the environment, the person) are unchanged.
 fn resolve_identity(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Result<(), Error> {

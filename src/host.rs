@@ -132,6 +132,11 @@ pub trait HostEnv {
     fn desktop_app_running(&self) -> bool {
         false
     }
+    /// Rule 4 (#338, design `agent-identity.md` §5): this machine's value-free index records
+    /// an agent identity for this project. Asked only in agent mode. Default false.
+    fn agent_identity_installed(&self) -> bool {
+        false
+    }
     /// The marker that puts this caller in agent mode, if any.
     ///
     /// Agent mode is presentation only, never a security control (R1, review M2): the
@@ -220,6 +225,10 @@ impl HostEnv for ProcessEnv {
     fn desktop_app_running(&self) -> bool {
         desktop_app_in_proc(std::path::Path::new("/proc"))
     }
+
+    fn agent_identity_installed(&self) -> bool {
+        crate::identity::installed_here()
+    }
 }
 
 /// Go's `strconv.ParseBool`, which op uses for its boolean variables (FMECA L1).
@@ -266,6 +275,8 @@ pub struct FakeEnv {
     pub mcp: bool,
     /// The 1Password desktop app is running (FMECA M2).
     pub desktop_app: bool,
+    /// This machine's index records an agent identity for the project (#338 rule 4).
+    pub agent_installed: bool,
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -321,6 +332,12 @@ impl FakeEnv {
         self.desktop_app = true;
         self
     }
+
+    /// This machine's index records an agent identity for the project (#338 rule 4).
+    pub fn agent_installed(mut self) -> Self {
+        self.agent_installed = true;
+        self
+    }
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -365,6 +382,9 @@ impl HostEnv for FakeEnv {
     }
     fn desktop_app_running(&self) -> bool {
         self.desktop_app
+    }
+    fn agent_identity_installed(&self) -> bool {
+        self.agent_installed
     }
 }
 
@@ -811,16 +831,12 @@ impl Host {
             Platform::Windows => Shell::PowerShell,
             _ => Shell::Posix,
         });
-        // Rule 1, then rule 3 (#338, design `agent-identity.md` §5): `OPV_IDENTITY=agent`,
-        // or a value `identity::choose` refuses, is the agent identity here, so no reader ever
-        // takes such a run for a person's session (vet R4).
-        let op_credential = crate::identity::env_token(env).or_else(|| {
-            matches!(
-                crate::identity::asked(env),
-                crate::identity::Asked::Agent | crate::identity::Asked::Unknown
-            )
-            .then_some(OpCredential::Agent)
-        });
+        // Rule 1, then rules 3 and 4 (#338, design `agent-identity.md` §5): `OPV_IDENTITY=agent`,
+        // agent mode with an agent identity installed for the project, or a value
+        // `identity::choose` refuses, is the agent identity here, so no reader ever takes
+        // such a run for a person's session (vet R4).
+        let op_credential = crate::identity::env_token(env)
+            .or_else(|| crate::identity::agent_chosen(env).then_some(OpCredential::Agent));
         let tokens = registry::credential_vars()
             .iter()
             .enumerate()
