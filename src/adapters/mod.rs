@@ -5,6 +5,8 @@
 
 pub mod azure;
 pub mod ci_secrets;
+/// The agent identity's token in the OS credential store (#338, design agent-identity §4.4).
+pub mod credential_store;
 /// Stateful fake `op` for manifest tests.
 #[cfg(any(test, feature = "fake"))]
 pub mod fake_op;
