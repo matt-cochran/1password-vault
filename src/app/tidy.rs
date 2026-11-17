@@ -143,6 +143,44 @@ fn own_command(what: &str) -> crate::cause::CommandId {
     crate::cause::CommandId(words)
 }
 
+/// The principal a refusal names for `c`: a credential in the environment by its variable
+/// (the step says to run without it), the agent identity (#338) by its service-account name
+/// once resolved. The agent's token is never in the environment, so its refusal names no
+/// variable to unset and never suggests another `OPV_IDENTITY` (design R10).
+pub(crate) fn credential_principal(c: crate::host::OpCredential) -> crate::cause::Principal {
+    use crate::cause::Principal;
+    match c {
+        crate::host::OpCredential::Agent => Principal::ServiceAccount {
+            name: crate::identity::agent_name()
+                .unwrap_or("of this run's agent identity")
+                .to_string(),
+        },
+        crate::host::OpCredential::ServiceAccount | crate::host::OpCredential::Connect => {
+            Principal::ShellToken {
+                var: crate::cause::VarName::new(c.var()),
+            }
+        }
+    }
+}
+
+/// Refuse `what` under the agent identity (#338, D4/D12) before any call: the agent is
+/// read-only, so a write (or a deploy) is a person's own, in their own terminal.
+pub(crate) fn refuse_agent(what: &str) -> Result<(), Error> {
+    refuse_agent_on(what, Host::detect())
+}
+
+/// [`refuse_agent`] judged by `host`.
+pub(crate) fn refuse_agent_on(what: &str, host: Host) -> Result<(), Error> {
+    match host.op_credential {
+        Some(c @ crate::host::OpCredential::Agent) => Err(crate::cause::Cause::NeedsOwnSession {
+            command: own_command(what),
+            identity: credential_principal(c),
+        }
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 /// Refuse a write to the project manifest (FR-44: `init` creating one, `add`, `init
 /// --add-env`, `config import`, `config edit`) unless a person signed in with their own
 /// session runs opv: under a service account, Connect, CI or deploy credentials, or when
@@ -174,9 +212,7 @@ pub(crate) fn require_person_on(
         Identity::ReadOnly => Err(Cause::NeedsOwnSession {
             command: own_command(what),
             identity: match host.op_credential {
-                Some(c) => Principal::ShellToken {
-                    var: crate::cause::VarName::new(c.var()),
-                },
+                Some(c) => credential_principal(c),
                 None => Principal::ServiceAccount {
                     name: "of this run".into(),
                 },

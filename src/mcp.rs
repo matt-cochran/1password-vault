@@ -1053,6 +1053,11 @@ fn import_local_doc<R: Accounted>(
     if !one_line(&args.file) {
         return call.refused(usage("file", "the path of a .env file, on one line"));
     }
+    // #338 (D4, FM4): the selected identity first. The agent identity's token is never in
+    // the environment, so the variables alone would let it through.
+    if let Err(e) = crate::app::tidy::refuse_agent("opv import") {
+        return call.failed(&e);
+    }
     if let Some(var) = crate::host::credential_in_environment(vars) {
         return call.refused(own_session("import", var));
     }

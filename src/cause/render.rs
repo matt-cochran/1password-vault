@@ -4092,17 +4092,20 @@ impl Cause {
                 }),
             ),
             // end agent identity
-            NeedsOwnSession {
-                command: _,
-                identity,
-            } => {
+            NeedsOwnSession { command, identity } => {
                 let without = match principal_var(identity) {
                     Some(v) => format!(", without {v}"),
                     None => String::new(),
                 };
+                // #338 (D12): a deploy is also CI's deploy job's.
+                let or_ci = if command.0 == "sync" || command.0.starts_with("sync ") {
+                    ", or let CI's deploy job run it"
+                } else {
+                    ""
+                };
                 plan(
                     inspect(format!(
-                        "run it in your own terminal, signed in as yourself{without}"
+                        "run it in your own terminal, signed in as yourself{without}{or_ci}"
                     )),
                     Next::Handoff(inv_cmd(inv)),
                 )

@@ -116,6 +116,8 @@ pub fn apply_at(
     // before a value-free plan is even computed; so is a run with no terminal.
     let cmd = apply_cmd(plan_id);
     crate::host::refuse_if_agent(env, cmd.clone())?;
+    // #338 (D4): the agent identity is read-only, with or without a terminal.
+    super::tidy::refuse_agent_on("opv apply", crate::host::Host::from_env(env))?;
     if !env.interactive() {
         return Err(Cause::NeedsTerminal {
             why: NoTerminal::NoTty,
@@ -244,6 +246,8 @@ pub fn apply_retire(
     use crate::app::retire;
     use crate::cause::{EnvName, Guard, KeyName, PlanScope, ProductName};
     crate::host::refuse_if_agent(env, apply_cmd(Some(plan_id)))?;
+    // #338 (D4): the agent identity is read-only, with or without a terminal.
+    super::tidy::refuse_agent_on("opv apply", crate::host::Host::from_env(env))?;
     if !env.interactive() {
         return Err(Cause::NeedsTerminal {
             why: NoTerminal::NoTty,

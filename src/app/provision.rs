@@ -1520,6 +1520,9 @@ fn who_is_running(
 ) -> Result<(), Error> {
     refuse_if_agent(host_env, command(req))?;
     let host = Host::from_env(host_env);
+    // #338 (D4, FM4): the selected identity, not the environment's variables alone. The
+    // agent identity's token is never in the environment; it is read-only everywhere.
+    super::tidy::refuse_agent_on("opv provision", host)?;
     if host.ci {
         return Err(Cause::NeedsTerminal {
             why: NoTerminal::Ci,

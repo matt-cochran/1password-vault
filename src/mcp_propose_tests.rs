@@ -747,3 +747,30 @@ fn a_proposal_on_a_generated_config_never_offers_write_next() {
         json!({"kind": "run", "actor": "assistant", "command": "opv propose structure"})
     );
 }
+
+// --- #338: the agent identity is read-only (D4, FM4) ---
+
+/// The host under `OPV_IDENTITY=agent`: the token is never in the environment, so only the
+/// selected identity can refuse the import.
+fn agent_host() -> crate::host::Host {
+    crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux").var_val("OPV_IDENTITY", "agent"),
+    )
+}
+
+#[test]
+fn opv_import_local_under_the_agent_identity_is_refused_without_an_op_write() {
+    let w = World::new();
+    let doc = crate::host::with_test_host(agent_host(), || w.import("dev"));
+    assert_eq!(
+        (doc["error"]["code"].clone(), w.r.writes.get()),
+        (json!("own_session_required"), 0)
+    );
+}
+
+#[test]
+fn opv_import_local_under_the_agent_identity_never_suggests_another_identity() {
+    let w = World::new();
+    let doc = crate::host::with_test_host(agent_host(), || w.import("dev"));
+    assert!(!doc.to_string().contains("OPV_IDENTITY"), "{doc}");
+}
