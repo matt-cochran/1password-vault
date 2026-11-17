@@ -170,7 +170,7 @@ jobs:
     - name: Install a headless Secret Service
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends dbus gnome-keyring
+        sudo apt-get install -y --no-install-recommends dbus gnome-keyring keyutils
     - name: Build the live store test
       shell: bash
       run: |
@@ -181,8 +181,19 @@ jobs:
         mkdir -p live
         cp "$exe" live/credential_store_live
     - name: Kernel keyring fallback, no session bus
+      # Advisory for now: a CI job's session keyring may not link the user keyring @u, so a
+      # write can be refused there (agent_store_unavailable, never a file). Logins link it.
+      continue-on-error: true
       shell: bash
-      run: env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live
+      run: |
+        keyctl show @s || true
+        keyctl show @u || true
+        env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live
+    - name: Kernel keyring fallback inside a login-like session (@u linked into @s)
+      continue-on-error: true
+      shell: bash
+      run: |
+        keyctl session - bash -c 'keyctl link @u @s && env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live'
     - name: Secret Service, unlocked with a dummy keyring password
       shell: bash
       run: |
