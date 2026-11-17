@@ -13,6 +13,22 @@ use serde_json::{Value, json};
 /// The environment variable naming the scenario directory.
 pub const WORLD_VAR: &str = "OPV_SIM_WORLD";
 
+/// A file holding the scenario directory's path, in the directory the simulator is installed
+/// in. A call whose environment was cleared (opv's token-only `op` calls keep only `PATH`,
+/// `HOME` and the like, #338) finds its world through it on `PATH`.
+pub const WORLD_FILE: &str = ".opv-sim-world";
+
+/// The scenario directory: [`WORLD_VAR`], else the first [`WORLD_FILE`] on `PATH`.
+fn world_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(WORLD_VAR) {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|d| {
+        let text = std::fs::read_to_string(d.join(WORLD_FILE)).ok()?;
+        Some(PathBuf::from(text.trim_end()))
+    })
+}
+
 /// The scenario directory and its loaded state.
 pub struct World {
     pub dir: PathBuf,
@@ -25,9 +41,11 @@ pub struct World {
 impl World {
     /// Lock and load the scenario directory named by [`WORLD_VAR`].
     pub fn open() -> Result<Self, String> {
-        let dir = std::env::var_os(WORLD_VAR)
-            .map(PathBuf::from)
-            .ok_or_else(|| format!("{WORLD_VAR} is not set (the scenario directory)"))?;
+        let dir = world_dir().ok_or_else(|| {
+            format!(
+                "{WORLD_VAR} is not set and no {WORLD_FILE} is on PATH (the scenario directory)"
+            )
+        })?;
         let lock = Lock::take(&dir.join(".lock"))?;
         let path = dir.join("world.json");
         let doc = match std::fs::read(&path) {

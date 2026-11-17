@@ -5,6 +5,7 @@
 mod coverage;
 
 mod scenarios {
+    pub mod agent_identity;
     pub mod agent_signin;
     pub mod assistant;
     pub mod changed;
