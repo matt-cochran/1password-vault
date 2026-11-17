@@ -5982,3 +5982,37 @@ fn no_agent_cause_document_holds_a_token_shaped_word() {
         .collect();
     assert_eq!(bad, Vec::<&str>::new());
 }
+
+// --- #338 (D12): a deploy step under the agent identity ------------------------------------
+
+fn plans_sync_step() -> Cmd {
+    cmd(
+        &["sync"],
+        &["prod", "--deploy", "--prune", "--expect-plan", "5b864552"],
+    )
+}
+
+#[test]
+fn under_the_agent_a_sync_step_reads_as_ci_or_the_persons_own_terminal() {
+    assert_eq!(
+        deploy_step_text_on(&plans_sync_step(), true),
+        "deploy through CI's deploy job, or the person runs opv sync prod --deploy --prune \
+         --expect-plan 5b864552 in their own terminal"
+    );
+}
+
+#[test]
+fn under_the_agent_a_sync_step_is_the_persons_apply() {
+    assert_eq!(
+        deploy_step_value_on(&plans_sync_step(), true)["actor"],
+        "person"
+    );
+}
+
+#[test]
+fn outside_the_agent_a_sync_step_is_the_command_itself() {
+    assert_eq!(
+        deploy_step_text_on(&plans_sync_step(), false),
+        "opv sync prod --deploy --prune --expect-plan 5b864552"
+    );
+}

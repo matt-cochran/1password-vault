@@ -301,12 +301,9 @@ fn rotate_access_revoked(
     (res, String::from_utf8(out).unwrap(), ui.1.into_inner())
 }
 
-/// The deploy identity's successor today: `<project>-<env>-<target>-deploy-YYYYMMDD`.
+/// The deploy identity's successor now: `<project>-<env>-<target>-deploy-YYYYMMDD-HHMM`.
 fn successor() -> String {
-    format!(
-        "shop-staging-web-deploy-{}",
-        crate::app::retire::today().replace('-', "")
-    )
+    format!("shop-staging-web-deploy-{}", date_suffix())
 }
 
 /// The pending successor of the web target's deploy identity recorded beside `path`.
@@ -394,7 +391,7 @@ fn access_rotation_creates_the_successor_with_the_identitys_grants() {
         args,
         format!(
             "service-account create shop-staging-web-deploy-{} --vault vstate:read_items,write_items --vault vweb:read_items --expires-in 90d --raw",
-            crate::app::retire::today().replace('-', "")
+            date_suffix()
         )
     );
 }
@@ -441,10 +438,7 @@ fn access_rotation_names_the_successor() {
     let w = World::new();
     let (_d, path) = file(&fleet_text(None));
     let (_, out) = rotate_access(&w, &located_at(&fleet(None), &path), Some("web"));
-    let successor = format!(
-        "shop-staging-web-deploy-{}",
-        crate::app::retire::today().replace('-', "")
-    );
+    let successor = format!("shop-staging-web-deploy-{}", date_suffix());
     assert!(out.contains(&successor), "{out}");
 }
 
@@ -702,5 +696,22 @@ fn access_rotation_of_the_ci_reader_records_its_own_marker() {
                 "staging", None
             ))
             .is_some()
+    );
+}
+
+// --- #338: the successor's name is unique within a day ---------------------------------------
+
+#[test]
+fn the_successor_suffix_carries_the_hour_and_minute() {
+    // 2026-11-17T11:06:00Z
+    assert_eq!(suffix_at(1_794_913_560), "20261117-1106");
+}
+
+#[test]
+fn a_second_rotation_in_the_same_minute_gets_a_counter() {
+    let taken = ["shop-dev-agent-laptop-20261117-1106"];
+    assert_eq!(
+        successor_name("shop-dev-agent-laptop", "20261117-1106", &taken),
+        "shop-dev-agent-laptop-20261117-1106-2"
     );
 }

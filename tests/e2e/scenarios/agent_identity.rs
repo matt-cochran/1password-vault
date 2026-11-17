@@ -23,7 +23,9 @@
 //!   exists, rejected, store unavailable, store locked. It is normalized so no host state
 //!   reaches it: the machine name, the store's kind and dates are placeholders.
 //!
-//! `opv access --rotate --agent` is not built yet (S9): its run is checked for leaks only.
+//! The app's personal key stays in the world: under the agent `opv run` leaves it out with
+//! one note naming it and goes on (#338). `opv access --rotate --agent` is checked for leaks
+//! only.
 //! The doctor `identity` row (S10) is not merged, so nothing here asserts it.
 
 use std::path::Path;
@@ -83,19 +85,13 @@ fn world() -> Scenario {
         }
         std::fs::write(&p, text).expect("app file");
     }
-    // A service account can never be granted a Personal or Private vault (design §3.1), so
-    // the app's personal key is left out: under the agent it could never be read (with it,
-    // `opv run` stops at `personal vault e2e-dev-private was not found`).
+    // The app's personal key stays: a service account can never be granted a Personal or
+    // Private vault (design §3.1), so under the agent `opv run` leaves it out with one note
+    // and goes on with the shared keys. The TLS keys are delivered as variables, not files:
+    // file delivery needs a RAM-backed runtime folder, which only Linux runners give
+    // (sealed.rs `ram`).
     let s = s.config(|text| {
-        let personal = regex::Regex::new(
-            r"(?ms)^personal_(vault|item) *=[^\n]*\n|^\[products\.web\.keys\.PERSONAL_LLM_KEY\]\n.*?\n\n",
-        )
-        .expect("regex");
-        // The TLS keys are delivered as variables, not files: file delivery needs a
-        // RAM-backed runtime folder, which only Linux runners give (sealed.rs `ram`).
-        personal
-            .replace_all(&text, "")
-            .replace("file = \"tls/certificate\"\n", "")
+        text.replace("file = \"tls/certificate\"\n", "")
             .replace("file = \"tls/private-key\"\n", "")
     });
     let store = s.path("store").display().to_string();
@@ -436,6 +432,37 @@ fn the_app_sees_no_op_variable() {
         .filter(|n| n.starts_with("OP_"))
         .collect();
     assert!(op.is_empty(), "{op:?}");
+}
+
+/// #338: the personal key is one a service account can never read, so the app never gets it.
+#[test]
+fn the_app_gets_no_personal_key() {
+    assert!(
+        !names(&shared().app_env)
+            .iter()
+            .any(|n| n.contains("PERSONAL_LLM_KEY")),
+        "{:?}",
+        names(&shared().app_env)
+    );
+}
+
+/// #338: the run names the personal key it leaves out, once, by name only.
+#[test]
+fn the_run_names_the_personal_key_it_leaves_out() {
+    let run = &shared()
+        .raw
+        .iter()
+        .find(|(l, _)| l == "run dev text")
+        .expect("run dev")
+        .1;
+    assert_eq!(
+        run.stderr
+            .matches("web/PERSONAL_LLM_KEY is not injected: personal")
+            .count(),
+        1,
+        "{}",
+        run.stderr
+    );
 }
 
 /// The positive partner: the app ran and got its value through the agent's `op run`.

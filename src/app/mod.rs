@@ -519,8 +519,9 @@ pub(crate) struct JsonExtra<'a> {
     pub plan_id: Option<&'a str>,
     /// `status --json` on a pinned target: opv's latest provenance stamp (FR-42).
     pub provenance: Option<&'a crate::domain::Stamp>,
-    /// The command to run next on success (`plan`: the sync); `null` otherwise.
-    pub next: Option<&'a str>,
+    /// The step to take next on success (`plan`: the sync, as
+    /// [`crate::cause::render::deploy_step_value`]); `null` otherwise.
+    pub next: Option<serde_json::Value>,
     /// The 1Password item link, set as `open_url` on each blocking row (H1); IDs only.
     pub link: Option<&'a str>,
 }
@@ -664,7 +665,7 @@ pub(crate) fn write_json(
             written: s.written.clone(),
             plan_id: s.plan.clone(),
         }),
-        next: extra.next.map(str::to_string),
+        next: extra.next.clone(),
     };
     // The document is plain strings and numbers: serializing it cannot fail.
     let text = serde_json::to_string(&doc).map_err(|_| -> Error {
@@ -866,8 +867,8 @@ struct JsonDoc {
     /// `status --json` on a pinned target that opv stamped: the latest stamp (FR-42).
     #[serde(skip_serializing_if = "Option::is_none")]
     provenance: Option<JsonStamp>,
-    /// The command to run next on success (`plan`: the sync); `null` otherwise.
-    next: Option<String>,
+    /// The step to take next on success (`plan`: the sync); `null` otherwise.
+    next: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
