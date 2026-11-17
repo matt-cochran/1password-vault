@@ -854,3 +854,64 @@ fn an_unknown_account_where_the_app_holds_accounts_is_in_the_app() {
         Cause::AccountNotOnMachine { in_app: true, .. }
     ));
 }
+
+// --- agent identity (#338) -------------------------------------------------------------------
+
+/// A canary standing in for a service-account token: no cause may carry it (ADR-0001 R1).
+const TOKEN_CANARY: &str = "ops_CANARYTOKEN338";
+
+fn as_agent() -> Facts {
+    Facts {
+        agent: Some("shop-dev-agent-laptop".into()),
+        ..Facts::default()
+    }
+}
+
+fn in_dev() -> DiagnoseContext {
+    DiagnoseContext {
+        env: Some(EnvName::new("dev")),
+        ..DiagnoseContext::default()
+    }
+}
+
+fn agent_case(case: &str) -> Cause {
+    diagnosed(case, "whoami", service_account_token(), &in_dev(), &as_agent())
+}
+
+#[test]
+fn a_rejected_token_under_the_agent_identity_is_agent_rejected() {
+    assert_eq!(
+        agent_case("03-service-account-token-rejected").code(),
+        "agent_rejected"
+    );
+}
+
+#[test]
+fn a_deleted_service_account_under_the_agent_identity_is_agent_rejected() {
+    assert_eq!(
+        agent_case("17-service-account-deleted").code(),
+        "agent_rejected"
+    );
+}
+
+#[test]
+fn a_rejected_agent_identity_names_its_service_account() {
+    assert!(matches!(
+        agent_case("03-service-account-token-rejected"),
+        Cause::AgentRejected { name, .. } if name == "shop-dev-agent-laptop"
+    ));
+}
+
+#[test]
+fn a_rejected_agent_token_never_reaches_the_error_document() {
+    let (stderr, exit) = recorded("03-service-account-token-rejected");
+    let cause = diagnose_with(
+        observed("whoami", exit, service_account_token()),
+        &format!("{stderr}\n{TOKEN_CANARY}"),
+        &in_dev(),
+        &as_agent(),
+    );
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "run".into(), "dev".into()]);
+    let doc = crate::cause::render::document(&cause, None, &inv, true);
+    assert!(!doc.to_string().contains(TOKEN_CANARY), "{doc}");
+}

@@ -989,6 +989,8 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `unknown_target` | 2 | never | no | the target is not declared for the environment |
 | `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument, a removed form) |
 | `value_in_text_field` | 2 | after_fix | no | free text in an intent document looks like a secret value and is refused before anything is written |
+| `agent_store_unavailable` | 3 | after_fix | yes | no OS credential store on this machine can hold the agent identity's token; opv never falls back to a file |
+| `agent_store_volatile` | 3 | after_fix | yes | the agent identity's token is in a store WSL clears when it stops, so unattended runs will break |
 | `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
 | `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
 | `producer_failed` | 3 | after_fix | no | a producer ended with a non-zero exit, a signal, its timeout or its own error code; nothing was written |
@@ -1011,6 +1013,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `target_changed` | 5 | safe | no | the target's object changed while opv was writing it; nothing was written and re-running is safe |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
+| `agent_identity_exists` | 6 | never | yes | this environment already has an agent identity on this machine; a person replaces it with opv access <env> --rotate --agent |
 | `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
 | `federated_outside_ci` | 6 | never | no | the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one |
@@ -1036,6 +1039,9 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
 | `account_ambiguous` | 7 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
 | `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
+| `agent_identity_not_installed` | 7 | after_fix | yes | OPV_IDENTITY=agent selected the agent identity, but this environment has none on this machine; opv never falls back to the person's session, and a person creates one with opv access <env> --create --agent |
+| `agent_rejected` | 7 | after_fix | yes | 1Password rejected the agent identity's token (revoked, deleted or expired); a person rotates it with opv access <env> --rotate --agent |
+| `agent_store_locked` | 7 | after_fix | yes | the OS credential store is locked or would prompt, and opv never waits on a prompt; a person unlocks it |
 | `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
 | `federated_identity_mismatch` | 7 | after_fix | no | the CI job's ambient sign-in is not the federated identity configured for the target |
