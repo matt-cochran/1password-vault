@@ -19,6 +19,10 @@ pub enum CredentialKind {
     /// A federated deploy identity: non-secret ids a CI sign-in presents. It holds no
     /// secret, so it has no expiry of its own.
     Federated,
+    /// This machine's read-only agent identity for an environment (#338): a 1Password service
+    /// account whose expiry the machine's value-free index records (design
+    /// `agent-identity.md` §7.5), never `secrets.bindings.toml`. Same FR-69 window.
+    Agent,
 }
 
 /// One credential, as recorded beside the contract: who it is, what it is for, and when it
@@ -161,6 +165,18 @@ pub fn records(bindings: &Bindings, env: &str, targets: &[String]) -> Vec<Creden
         }
     }
     out
+}
+
+/// The record of `env`'s agent identity `name` on this machine (#338), expiring on
+/// `expires_on` as the value-free index records it. Names and a date only.
+pub fn agent_record(env: &str, name: &str, expires_on: Option<&str>) -> CredentialRecord {
+    CredentialRecord {
+        env: env.to_string(),
+        target: None,
+        kind: CredentialKind::Agent,
+        identity: name.to_string(),
+        expires_on: expires_on.map(str::to_string),
+    }
 }
 
 /// The `(year, month, day)` at the front of `text`, validated as a real calendar date.

@@ -397,7 +397,31 @@ fn the_accounts_section_is_opv_account_list_json() {
     let want = w.cli(&["account", "list"], |_, r, out| {
         crate::app::account::list(r, None, true, out)
     });
-    assert_eq!(w.tool(json!({"section": "accounts"})), want);
+    let mut got = w.tool(json!({"section": "accounts"}));
+    // #338: `identity` rides beside the account report (design §7.4, D7).
+    got.as_object_mut().unwrap().remove("identity");
+    assert_eq!(got, want);
+}
+
+/// #338 (design §7.4, D7): the `ready` section carries one `identity` object per
+/// environment, as `opv ready --json` does.
+#[test]
+fn the_ready_section_carries_each_environments_identity() {
+    let w = World::new();
+    let envs: Vec<Value> = w.tool(json!({"section": "ready"}))["identity"]
+        .as_array()
+        .map(|ids| ids.iter().map(|i| i["environment"].clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(envs, [json!("dev"), json!("prod")]);
+}
+
+/// #338 (design §7.4, D7): the `accounts` section carries the same `identity` objects as
+/// the `ready` section, with no new tool or section.
+#[test]
+fn the_accounts_section_carries_the_ready_sections_identity() {
+    let w = World::new();
+    let ready = w.tool(json!({"section": "ready"}))["identity"].clone();
+    assert_eq!(w.tool(json!({"section": "accounts"}))["identity"], ready);
 }
 
 #[test]
