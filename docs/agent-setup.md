@@ -39,7 +39,7 @@ native refusal. See the guide's sign-in/readiness instructions.
 
 ## Agent identity (read-only)
 
-The agent identity is a 1Password service account that can only **read** the vaults of one environment, kept in this machine's OS credential store (macOS Keychain, Windows Credential Manager, or a Secret Service keyring on Linux and WSL). With it you run `opv run`, `plan`, `ready`, `status` and `doctor` unattended, without the person's write-capable session. It is the CI reader's model on a laptop: same grants, same 90 days, and the token never passes through you, the chat, argv, a file or your environment.
+The agent identity is a 1Password service account that can only **read** the vaults of one environment, kept in this machine's OS credential store (macOS Keychain, Windows Credential Manager, a Secret Service keyring on Linux, and on WSL the Windows Credential Manager of the Windows user). With it you run `opv run`, `plan`, `ready`, `status` and `doctor` unattended, without the person's write-capable session. It is the CI reader's model on a laptop: same grants, same 90 days, and the token never passes through you, the chat, argv, a file or your environment.
 
 Every identity delivers through the same path, and none of them sees a value. Only a person changes values. 1Password vault access is the only permission. Deploys belong to CI or a person.
 

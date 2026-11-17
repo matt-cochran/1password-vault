@@ -320,8 +320,10 @@
     {
       "id": "s9-rotate-agent",
       "owned_files": [
+        "src/app/agent_identity.rs",
         "src/app/agent_identity_rotate.rs",
-        "src/app/credentials_rotate.rs"
+        "src/app/credentials_rotate.rs",
+        "src/main.rs"
       ],
       "prerequisites": [
         "s8-create-agent"
@@ -548,6 +550,12 @@
       "id": "s15-gate-mvp",
       "owned_files": [],
       "prerequisites": [
+        "s10-doctor-identity",
+        "s11-ready-identity",
+        "s12-sim-e2e-canaries",
+        "s12b-agent-polish",
+        "s13-agent-docs",
+        "s14-people-docs",
         "s2-domain-agent-principal",
         "s3-agent-causes",
         "s4-credential-source",
@@ -555,12 +563,7 @@
         "s6-runner-token",
         "s7-write-refusals",
         "s8-create-agent",
-        "s9-rotate-agent",
-        "s10-doctor-identity",
-        "s11-ready-identity",
-        "s12-sim-e2e-canaries",
-        "s13-agent-docs",
-        "s14-people-docs"
+        "s9-rotate-agent"
       ],
       "estimate": {
         "optimistic": 1.12,
@@ -774,6 +777,42 @@
         "issue": 338,
         "junior": {
           "acceptance": []
+        }
+      }
+    },
+    {
+      "id": "s12b-agent-polish",
+      "owned_files": [
+        "src/app/run.rs",
+        "src/app/personal.rs",
+        "src/app/credentials_rotate.rs",
+        "src/app/agent_identity_rotate.rs",
+        "src/app/plan.rs",
+        "src/cause/render.rs"
+      ],
+      "prerequisites": [
+        "s12-sim-e2e-canaries",
+        "s9-rotate-agent"
+      ],
+      "estimate": {
+        "optimistic": 1,
+        "likely": 2,
+        "pessimistic": 4
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Fixes found by s12/s9: personal key under the agent gives a clear cause; plan/status Next under the agent never suggests opv sync; rotate successor name unique within a day",
+        "owner": "agent",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Under the agent, an environment with a personal key reports a clear cause naming that agent identities cannot read a Private vault (or skips the key with a note, per design), never 'personal vault was not found'",
+            "Under the agent, plan/status Next never says opv sync; it names CI's deploy job or the person's own terminal",
+            "Rotating the same identity twice in one day gives two distinct successor names"
+          ],
+          "checks": []
         }
       }
     }
