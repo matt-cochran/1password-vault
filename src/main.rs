@@ -3174,6 +3174,18 @@ fn run(
             },
         )?;
     }
+    // #338 (D4, D12): a write or a deploy under the agent identity is refused before any
+    // sign-in, identity resolution or terminal check (`own_session_required`).
+    if person_only(&cli.cmd).is_some()
+        || matches!(
+            &cli.cmd,
+            Cmd::Sync(_)
+                | Cmd::Import { dry_run: false, .. }
+                | Cmd::Provision { dry_run: false, .. }
+        )
+    {
+        opv::app::refuse_agent("opv")?;
+    }
     if let Some(cmd) = person_only(&cli.cmd) {
         opv::host::refuse_if_agent(&opv::host::ProcessEnv, cmd)?;
         if !opv::host::HostEnv::interactive(&opv::host::ProcessEnv) {

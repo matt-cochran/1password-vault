@@ -165,7 +165,7 @@ pub(crate) fn credential_principal(c: crate::host::OpCredential) -> crate::cause
 
 /// Refuse `what` under the agent identity (#338, D4/D12) before any call: the agent is
 /// read-only, so a write (or a deploy) is a person's own, in their own terminal.
-pub(crate) fn refuse_agent(what: &str) -> Result<(), Error> {
+pub fn refuse_agent(what: &str) -> Result<(), Error> {
     refuse_agent_on(what, Host::detect())
 }
 

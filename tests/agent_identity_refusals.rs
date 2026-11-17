@@ -359,6 +359,13 @@ fn config_import_under_the_agent_is_refused_without_an_op_write() {
     assert_eq!(p.agent(Io::Terminal, &args), refused());
 }
 
+#[test]
+fn set_in_an_agents_shell_is_refused_as_the_agent_not_for_the_terminal() {
+    let p = Project::new();
+    let args = ["set", "web/API_KEY", "--env", "dev", "--json"];
+    assert_eq!(p.agent(Io::Headless, &args), refused());
+}
+
 // --- the commands an agent's shell reaches (pipes, no terminal) ---
 
 #[test]

@@ -115,6 +115,8 @@ pub mod sync;
 pub mod target_cmd;
 pub mod target_credentials;
 pub(crate) mod tidy;
+/// #338: the agent identity's refusal of a write or a deploy, for the CLI to run first.
+pub use tidy::refuse_agent;
 pub mod unseal;
 pub mod unseal_exec;
 #[cfg(test)]
