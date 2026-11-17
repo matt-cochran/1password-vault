@@ -636,6 +636,7 @@ fn build(
                 target,
             } => deploy_identity_not_visible(environment, target),
             Principal::CiReader { environment } => ci_reader_not_visible(environment),
+            Principal::Agent { environment, .. } => ci_reader_not_visible(environment),
         });
     }
     env_findings.extend(no_writer);
@@ -807,6 +808,10 @@ fn principal_label(principal: &Principal) -> String {
             target,
         } => format!("deploy {environment}/{target}"),
         Principal::CiReader { environment } => format!("ci reader {environment}"),
+        Principal::Agent {
+            environment,
+            machine,
+        } => format!("agent {environment} on {machine}"),
     }
 }
 
