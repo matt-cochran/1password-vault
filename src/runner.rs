@@ -1852,12 +1852,21 @@ pub(crate) fn strip_session_vars(
 /// [`isolated_env`]), stdin `/dev/null` unless the call
 /// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
 fn command_for(call: &Call) -> Command {
+    command_as(call, op_as())
+}
+
+/// [`command_for`] for `op` children that authenticate as `op_as`. Under the agent identity
+/// (#338, design §4.3 step 2) an `op` call whose env carries no token of its own takes the
+/// token-only path with the agent's token, set on that child alone: never in opv's own
+/// environment, never in argv.
+fn command_as(call: &Call, op_as: OpAs) -> Command {
     let mut cmd = Command::new(call.program);
-    let token_only = call.program == "op"
-        && call
-            .env
-            .iter()
-            .any(|(k, _)| *k == "OP_SERVICE_ACCOUNT_TOKEN");
+    let explicit = call
+        .env
+        .iter()
+        .any(|(k, _)| *k == "OP_SERVICE_ACCOUNT_TOKEN");
+    let agent = op_as.agent_for(call.program, explicit);
+    let token_only = call.program == "op" && (explicit || agent.is_some());
     if token_only {
         // An explicitly supplied service-account token selects one identity (#304).
         // No owner session, Connect credential or desktop integration may override it.
@@ -1877,6 +1886,9 @@ fn command_for(call: &Call) -> Command {
             !token_only || !k.starts_with("OP_") || *k == "OP_SERVICE_ACCOUNT_TOKEN"
         }),
     );
+    if let Some(Some(token)) = agent {
+        cmd.env(AGENT_TOKEN_VAR, token.expose());
+    }
     if token_only {
         cmd.env("OP_BIOMETRIC_UNLOCK_ENABLED", "false");
         cmd.env("OP_CACHE", "false");
@@ -2169,17 +2181,8 @@ impl ProcessRunner {
     ) -> io::Result<i32> {
         let held = lock(&self.account).clone();
         let env = &self.with_default_account(program, env, &held);
-        let mut cmd = Command::new(program);
-        isolate(&mut cmd, program);
-        for key in remove {
-            cmd.env_remove(key);
-        }
-        add_op_session(&mut cmd, program);
-        cmd.args(with_account(program, args, env))
-            .envs(env.iter().copied());
-        if session == ChildSession::Strip {
-            strip_op_session(&mut cmd, program);
-        }
+        let inherited = std::env::vars_os().filter_map(|(k, _)| k.into_string().ok());
+        let mut cmd = inherited_command(program, args, env, remove, session, op_as(), inherited);
         let status = cmd
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -2188,6 +2191,127 @@ impl ProcessRunner {
         observe_inherited(&Call::new(program, args), env, &status);
         Ok(exit_code(status?))
     }
+}
+
+/// The process for one inherited child (see [`ProcessRunner::inherited`]); `inherited` names
+/// the variables opv's own environment holds (tests give them, so no test sets one).
+///
+/// An `op` child under a token (the agent identity's, or one in `env`) is design §4.3 step 3
+/// (vet R1): every inherited and given `OP_SESSION*`, `OP_CONNECT_*` and `OP_ACCOUNT` is
+/// removed, opv's own session is not added, biometric unlock and op's cache are off, and the
+/// token is set on this child alone. The rest of the environment stays: `op run` passes it
+/// on to the app.
+fn inherited_command(
+    program: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+    remove: &[String],
+    session: ChildSession,
+    op_as: OpAs,
+    inherited: impl Iterator<Item = String>,
+) -> Command {
+    let mut cmd = Command::new(program);
+    isolate(&mut cmd, program);
+    for key in remove {
+        cmd.env_remove(key);
+    }
+    let explicit = env.iter().any(|(k, _)| *k == AGENT_TOKEN_VAR);
+    let agent = op_as.agent_for(program, explicit);
+    if program == "op" && (explicit || agent.is_some()) {
+        let names: std::collections::BTreeSet<String> =
+            inherited.filter(|k| other_op_identity(k)).collect();
+        for name in names {
+            cmd.env_remove(name);
+        }
+        cmd.args(args).envs(env.iter().copied().filter(|(k, _)| {
+            !other_op_identity(k) && !matches!(*k, "OP_BIOMETRIC_UNLOCK_ENABLED" | "OP_CACHE")
+        }));
+        if let Some(Some(token)) = agent {
+            cmd.env(AGENT_TOKEN_VAR, token.expose());
+        }
+        cmd.env("OP_BIOMETRIC_UNLOCK_ENABLED", "false");
+        cmd.env("OP_CACHE", "false");
+    } else {
+        add_op_session(&mut cmd, program);
+        cmd.args(with_account(program, args, env))
+            .envs(env.iter().copied());
+    }
+    if session == ChildSession::Strip {
+        strip_op_session(&mut cmd, program);
+    }
+    cmd
+}
+
+/// A variable that would make an `op` child act as someone other than its token: a person's
+/// session, a Connect server, or an account choice (vet R1).
+fn other_op_identity(name: &str) -> bool {
+    name.starts_with("OP_SESSION") || name.starts_with("OP_CONNECT_") || name == "OP_ACCOUNT"
+}
+
+/// The variable `op` reads a service-account token from.
+const AGENT_TOKEN_VAR: &str = "OP_SERVICE_ACCOUNT_TOKEN";
+
+/// How this process's `op` children authenticate (#338, design §5). Holds a reference to the
+/// token, never a copy; it has no `Debug`, so nothing can print it.
+#[derive(Clone, Copy)]
+enum OpAs<'a> {
+    /// Rules 1, 2 and 5: as before the agent identity.
+    Default,
+    /// Rule 3 (`OPV_IDENTITY=agent`, or a value opv does not know): the agent identity's
+    /// token, or `None` before it is resolved. With `None` an `op` child still gets no person
+    /// session, Connect credential or desktop unlock, so it fails signed out and never acts
+    /// as the person (vet R4).
+    Agent(Option<&'a crate::domain::SecretValue>),
+}
+
+impl<'a> OpAs<'a> {
+    /// The agent token decision for a `program` child: `Some` (holding the token, or `None`
+    /// before the resolve) for an `op` child under rule 3 whose env names no token of its own;
+    /// `None` for every other child, which never gets the agent's token.
+    fn agent_for(
+        self,
+        program: &str,
+        explicit: bool,
+    ) -> Option<Option<&'a crate::domain::SecretValue>> {
+        match self {
+            OpAs::Agent(token) if program == "op" && !explicit => Some(token),
+            _ => None,
+        }
+    }
+}
+
+/// This process's [`OpAs`]: the agent under rule 3 ([`crate::identity`]), else the default.
+fn op_as() -> OpAs<'static> {
+    #[cfg(test)]
+    if let Some(forced) = TEST_OP_AS.with(std::cell::Cell::get) {
+        return forced;
+    }
+    if let Some(token) = crate::identity::agent_token() {
+        return OpAs::Agent(Some(token));
+    }
+    match crate::identity::choose(&crate::host::ProcessEnv) {
+        Ok(crate::identity::Choice::Agent) | Err(_) => OpAs::Agent(None),
+        Ok(_) => OpAs::Default,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`op_as`] for this test thread, so no test sets a process-wide variable or identity.
+    static TEST_OP_AS: std::cell::Cell<Option<OpAs<'static>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with this thread's `op` children authenticating as `op_as` (tests).
+#[cfg(test)]
+fn with_op_as<T>(op_as: OpAs<'static>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<OpAs<'static>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_OP_AS.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(TEST_OP_AS.with(|c| c.replace(Some(op_as))));
+    f()
 }
 
 /// SIGINT/SIGTERM/SIGHUP/SIGQUIT handling (NR-12, I2): the signal is forwarded to the
@@ -4215,6 +4339,10 @@ mod observed_tests;
 #[cfg(test)]
 #[path = "runner_isolation_tests.rs"]
 mod isolation_tests;
+
+#[cfg(test)]
+#[path = "runner_agent_tests.rs"]
+mod agent_tests;
 
 #[cfg(test)]
 mod tests {
