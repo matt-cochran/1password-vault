@@ -7,7 +7,13 @@
 //! 3. `OPV_IDENTITY=agent`: the agent identity of the environment being operated on, read
 //!    through an [`AgentCredentialSource`]. With none installed the run stops with
 //!    `agent_identity_not_installed`; it **never** falls back to the person's session (R4).
-//! 4. (an agent marker with any agent identity installed: slice S17, not here)
+//! 4. No `OPV_IDENTITY`, an agent marker ([`crate::host::HostEnv::agent_mode`]), and this
+//!    machine's value-free index records an agent identity for this project
+//!    ([`crate::host::HostEnv::agent_identity_installed`]): as rule 3, automatically (slice
+//!    S17). An environment with none of its own then stops with
+//!    `agent_identity_not_installed`, never the person's session (R4). The marker only
+//!    selects; it is UX, never a control (R9): 1Password's grant is what keeps the agent
+//!    read-only.
 //! 5. Otherwise: the person's session (as today).
 //!
 //! Any other `OPV_IDENTITY` value is refused (`usage`). Until then [`crate::host::Host`]
@@ -72,17 +78,21 @@ pub enum Choice {
     EnvToken(OpCredential),
     /// Rules 2 and 5: the person's session.
     Person,
-    /// Rule 3: the agent identity of the environment.
+    /// Rules 3 and 4: the agent identity of the environment.
     Agent,
 }
 
-/// Rules 1-3 and 5, from `env` alone (no I/O). An unknown [`VAR`] value is refused with
-/// `usage` (`OPV_IDENTITY expects person or agent`); the value is not repeated.
+/// Rules 1-5, from `env` alone (rule 4 asks [`HostEnv::agent_identity_installed`] only in
+/// agent mode). An unknown [`VAR`] value is refused with `usage` (`OPV_IDENTITY expects
+/// person or agent`); the value is not repeated.
 pub fn choose(env: &dyn HostEnv) -> Result<Choice, Error> {
     if let Some(c) = env_token(env) {
         return Ok(Choice::EnvToken(c));
     }
     match asked(env) {
+        Asked::Nothing if env.agent_mode().is_some() && env.agent_identity_installed() => {
+            Ok(Choice::Agent)
+        }
         Asked::Nothing | Asked::Person => Ok(Choice::Person),
         Asked::Agent => Ok(Choice::Agent),
         Asked::Unknown => Err(Cause::Usage {
@@ -95,7 +105,64 @@ pub fn choose(env: &dyn HostEnv) -> Result<Choice, Error> {
     }
 }
 
-/// The agent identity to read when rule 3 applies: its store key (account/project/env) and
+/// Whether the agent identity is chosen on `env` (rules 3 and 4, or an `OPV_IDENTITY` value
+/// [`choose`] refuses): what [`crate::host::Host::op_credential`] reports as
+/// [`OpCredential::Agent`] when no token is in the environment.
+pub(crate) fn agent_chosen(env: &dyn HostEnv) -> bool {
+    matches!(choose(env), Ok(Choice::Agent) | Err(_))
+}
+
+/// Rule 4's index check: any identity recorded for `project`, in any account. Matching the
+/// project alone errs toward the agent, so toward a stop, never toward the person (R4).
+pub(crate) fn installed_for(index: &crate::app::agent_identity::Index, project: &str) -> bool {
+    index.identities.iter().any(|e| e.project == project)
+}
+
+static INSTALLED: OnceLock<bool> = OnceLock::new();
+
+thread_local! {
+    /// Set while [`installed_here`] names the project: its `git` probe runs through the
+    /// runner, which asks [`choose`] again; that inner question is answered `false`.
+    static NAMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Rule 4 for this process (its working directory and the user's index), once: whether this
+/// machine records an agent identity for this project. No index is `false`; an index that
+/// exists but cannot be read is `true`, so the run stops rather than use the person (R4).
+/// Value-free: the index holds names and dates only. Always `false` in this crate's unit
+/// tests, so none depends on the developer's machine.
+pub(crate) fn installed_here() -> bool {
+    if cfg!(test) || NAMING.with(std::cell::Cell::get) {
+        return false;
+    }
+    *INSTALLED.get_or_init(|| {
+        let Some(path) = crate::app::agent_identity::index_path() else {
+            return false;
+        };
+        let index = match crate::app::agent_identity::load(&path) {
+            Ok(i) => i,
+            Err(_) => return true,
+        };
+        if index.identities.is_empty() {
+            return false;
+        }
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                NAMING.with(|n| n.set(false));
+            }
+        }
+        NAMING.with(|n| n.set(true));
+        let _done = Done;
+        let project = crate::app::personal::project_name(
+            &crate::runner::ProcessRunner::default(),
+            &std::env::current_dir().unwrap_or_default(),
+        );
+        installed_for(&index, &project)
+    })
+}
+
+/// The agent identity to read when rule 3 or 4 applies: its store key (account/project/env) and
 /// its 1Password service-account name (from the value-free index, design §7.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTarget {
@@ -149,7 +216,7 @@ pub enum Resolved {
     EnvToken(OpCredential),
     /// Rules 2 and 5.
     Person,
-    /// Rule 3.
+    /// Rules 3 and 4.
     Agent(AgentIdentity),
 }
 
@@ -163,7 +230,7 @@ impl Resolved {
         }
     }
 
-    /// The agent identity, under rule 3.
+    /// The agent identity, under rules 3 and 4.
     pub fn agent(&self) -> Option<&AgentIdentity> {
         match self {
             Resolved::Agent(a) => Some(a),
@@ -191,11 +258,11 @@ impl Resolver {
         self.cell.get()
     }
 
-    /// Apply the rules to `env` and, under rule 3, read the token for `target()` from
+    /// Apply the rules to `env` and, under rules 3 and 4, read the token for `target()` from
     /// `source`. The first success is kept: every later call returns it without another
-    /// read. `target` is called only under rule 3.
+    /// read. `target` is called only under rules 3 and 4.
     ///
-    /// Under rule 3: no entry is `agent_identity_not_installed`, never the person's session
+    /// Under rules 3 and 4: no entry is `agent_identity_not_installed`, never the person's session
     /// (R4); a store failure is its own cause (`agent_store_*`). Neither is kept, so a later
     /// call reads again. Once an agent identity is kept, a call whose target is another
     /// identity is refused (`internal_error`): one process never acts as two identities.
@@ -258,7 +325,7 @@ pub fn resolved() -> Option<&'static Resolved> {
 }
 
 /// The agent identity's token, for the runner to hand to `op` (slice S6); `None` unless this
-/// process resolved rule 3.
+/// process resolved rule 3 or 4.
 pub fn agent_token() -> Option<&'static SecretValue> {
     resolved()
         .and_then(Resolved::agent)
@@ -266,7 +333,7 @@ pub fn agent_token() -> Option<&'static SecretValue> {
 }
 
 /// The agent identity's service-account name, for diagnosis (`Facts::agent`, so a rejected
-/// token is `agent_rejected`); `None` unless this process resolved rule 3.
+/// token is `agent_rejected`); `None` unless this process resolved rule 3 or 4.
 pub fn agent_name() -> Option<&'static str> {
     resolved()
         .and_then(Resolved::agent)
