@@ -1,0 +1,5 @@
+# Test threads get 2 MiB of stack by default. Building opv's whole clap definition in a
+# debug build needs more than that on Windows since Rust 1.100 (the binary itself reserves
+# 8 MiB through build.rs). Give `cargo test` threads the same 8 MiB on every platform.
+[env]
+RUST_MIN_STACK = "8388608"
