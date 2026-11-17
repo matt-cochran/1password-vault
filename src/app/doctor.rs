@@ -57,6 +57,10 @@ use crate::host::{Host, OP_CLI};
 use crate::provider::{Check as ProviderCheck, TargetConfig, Verdict as Check};
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
+/// The `op identity` row (#338, design `agent-identity.md` §7.4).
+#[path = "doctor_identity.rs"]
+pub(crate) mod identity;
+
 /// Oldest `op` release opv is tested with.
 pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
 
@@ -172,6 +176,7 @@ fn run_request_on(
         source,
         targets,
         settings,
+        identity: None,
     };
     run_on_with(config, r, host, scope, out)
 }
@@ -209,6 +214,9 @@ struct Scope<'a> {
     targets: &'a [String],
     /// `--settings` (#92).
     settings: bool,
+    /// How the `op identity` row reaches the store, the index and the clock (tests); `None`
+    /// is this machine's ([`identity::Seams::process`]).
+    identity: Option<&'a identity::Seams<'a>>,
 }
 
 /// The state of one check line.
@@ -260,6 +268,8 @@ struct Row {
     excerpt: Option<String>,
     /// The session rows' JSON `state` and `reason` (#203, design §3.3); `None` elsewhere.
     session: Option<(&'static str, Option<&'static str>)>,
+    /// The `op identity` row's value-free identity object (#338, §7.4); `None` elsewhere.
+    identity: Option<serde_json::Value>,
 }
 
 impl Row {
@@ -350,7 +360,32 @@ impl Report {
             fix,
             excerpt: None,
             session: None,
+            identity: None,
         });
+    }
+
+    /// The `op identity` row (#338, design §7.4): a FAIL with a cause is a failure of the
+    /// run, with the cause's own Do and Next; its JSON carries `state` and `identity`.
+    fn identity(&mut self, row: identity::IdentityRow) {
+        let identity::IdentityRow {
+            level,
+            text,
+            fix,
+            state,
+            error,
+            identity,
+        } = row;
+        match (level, error) {
+            (_, Some(e)) => self.fail(identity::ROW, text, e),
+            (identity::Level::Ok, None) => self.row(identity::ROW, State::Ok, text, fix),
+            (identity::Level::Warn, None) => self.row(identity::ROW, State::Warn, text, fix),
+            (identity::Level::Fail, None) => self.row(identity::ROW, State::Fail, text, fix),
+            (identity::Level::Skip, None) => self.row(identity::ROW, State::Skip, text, fix),
+        }
+        if let Some(last) = self.rows.last_mut() {
+            last.session = Some((state, None));
+            last.identity = Some(identity);
+        }
     }
 
     /// The desktop-integration and shell-session rows (#203, design §3.3): never a failure.
@@ -426,10 +461,41 @@ fn run_on_with(
             "not checked (choose the project's account first, see the config line above)".into(),
         );
     } else if op_present {
-        report.push("op auth", op_auth(r, host, scope.env).map(Check::Ok));
+        let process;
+        let seams = match scope.identity {
+            Some(s) => s,
+            None => {
+                process = identity::Seams::process(r);
+                &process
+            }
+        };
+        // #338: rule 3 resolves before `op auth`, so its calls carry the agent's token.
+        let who = identity::before(&host(), fleet.as_ref(), scope.env, seams);
+        let auth = if who.signs_in() {
+            let auth = op_auth(r, host, scope.env);
+            let cause = auth.as_ref().err().map(|e| e.parts().0.clone());
+            report.push("op auth", auth.map(Check::Ok));
+            cause
+        } else {
+            report.skip(
+                "op auth",
+                format!(
+                    "not checked (no agent identity token; see the {} line below)",
+                    identity::ROW
+                ),
+            );
+            None
+        };
         let account = (fleet.as_ref().zip(scope.env))
             .and_then(|(f, e)| f.environment(e).ok()?.account.as_deref());
         report.session(super::doctor_session::doctor_rows(&host(), r, account));
+        let facts = identity::after(who, auth.as_ref(), fleet.as_ref(), scope.env, r, seams);
+        let ctx = identity::Context {
+            env: scope.env.map(str::to_string),
+            marker: host().agent_mode().is_some(),
+            today: (seams.today)(),
+        };
+        report.identity(identity::row(facts, &ctx));
     } else {
         // One failure per cause: the op line already says why (review #12).
         report.skip("op auth", "op not available (see the op line above)".into());
@@ -620,6 +686,9 @@ fn print_json(report: &Report, source: Option<&str>, out: &mut dyn Write) -> Res
             if let Some((state, reason)) = row.session {
                 check["state"] = state.into();
                 check["reason"] = reason.into();
+            }
+            if let Some(identity) = &row.identity {
+                check["identity"] = identity.clone();
             }
             check
         })
@@ -1455,8 +1524,9 @@ mod tests {
     const CHECK_LINES: usize = if cfg!(windows) { 7 } else { 8 };
 
     /// #203: the `op app integration` row after `op auth` whenever op is present (on these
-    /// headless Linux hosts, `unavailable`, with no op call; no shell session is set).
-    const SESSION_ROWS: usize = 1;
+    /// headless Linux hosts, `unavailable`, with no op call; no shell session is set), and
+    /// #338's `op identity` row after it (here the person's own session, with no op call).
+    const SESSION_ROWS: usize = 2;
 
     /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
     #[cfg(not(windows))]
@@ -1535,11 +1605,11 @@ mod tests {
         );
         assert!(lines[2].contains("SERVICE_ACCOUNT"), "{out}");
         assert!(
-            lines[4].contains("flyctl") && lines[4].contains("v0.4.112"),
+            lines[5].contains("flyctl") && lines[5].contains("v0.4.112"),
             "{out}"
         );
         assert!(
-            lines[5].starts_with("ok") && lines[5].contains("fly auth"),
+            lines[6].starts_with("ok") && lines[6].contains("fly auth"),
             "{out}"
         );
         assert_eq!(
@@ -1650,7 +1720,7 @@ mod tests {
             matches!(&res, Err(e) if e.code_str() == "dependency_missing"),
             "{res:?}"
         );
-        assert!(out.lines().nth(4).unwrap().starts_with("FAIL"), "{out}");
+        assert!(out.lines().nth(5).unwrap().starts_with("FAIL"), "{out}");
     }
 
     /// A configuration that breaks a field rule (`bogus` is no environment field).
@@ -1696,7 +1766,7 @@ mod tests {
         let e = res.unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(
-            out.lines().nth(5).unwrap().starts_with("FAIL  fly auth"),
+            out.lines().nth(6).unwrap().starts_with("FAIL  fly auth"),
             "{out}"
         );
         assert_no_values(&out);
@@ -1752,12 +1822,12 @@ mod tests {
             res.unwrap();
             let lines = checks(&out);
             assert_eq!(lines[1].starts_with("warn  op:"), warn_op, "{out}");
-            assert_eq!(lines[4].starts_with("warn  flyctl:"), warn_fly, "{out}");
+            assert_eq!(lines[5].starts_with("warn  flyctl:"), warn_fly, "{out}");
             if warn_op {
                 assert!(lines[1].contains("2.40.0"), "{out}");
             }
             if warn_fly {
-                assert!(lines[4].contains("0.4.112"), "{out}");
+                assert!(lines[5].contains("0.4.112"), "{out}");
             }
         }
     }
@@ -1769,7 +1839,7 @@ mod tests {
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        assert!(checks(&out)[4].starts_with("ok    flyctl:"), "{out}");
+        assert!(checks(&out)[5].starts_with("ok    flyctl:"), "{out}");
     }
 
     #[test]
@@ -1779,7 +1849,7 @@ mod tests {
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        assert!(checks(&out)[4].starts_with("warn  flyctl:"), "{out}");
+        assert!(checks(&out)[5].starts_with("warn  flyctl:"), "{out}");
     }
 
     #[test]
@@ -2579,7 +2649,7 @@ mod tests {
                     c["status"].as_str().unwrap().to_string(),
                 )
             })
-            .take(5)
+            .take(6)
             .collect();
         assert_eq!(
             (doc["schema_version"].as_u64(), checks),
@@ -2590,6 +2660,7 @@ mod tests {
                     ("op", "ok"),
                     ("op auth", "ok"),
                     ("op app integration", "ok"),
+                    ("op identity", "ok"),
                     ("item", "ok")
                 ]
                 .map(|(a, b)| (a.to_string(), b.to_string()))

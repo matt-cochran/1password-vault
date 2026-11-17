@@ -25,6 +25,8 @@ pub mod onepassword_diagnose_items;
 pub(crate) mod onepassword_init;
 /// The project manifest (configuration in 1Password, FR-44).
 pub mod onepassword_manifest;
+/// `op service-account ratelimit` under the agent identity (#338, design agent-identity §7.4).
+pub mod onepassword_ratelimit;
 /// Tolerant item parse and the tidy write (FR-43).
 pub mod onepassword_tidy;
 pub(crate) mod probe;
