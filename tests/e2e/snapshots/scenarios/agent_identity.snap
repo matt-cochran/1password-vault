@@ -1,0 +1,252 @@
+# agent_identity: the read-only agent identity through the real binary (#338)
+
+## create dev text exit: 0
+## create dev text stdout
+Create 1Password service account "project-dev-agent-<machine>" (the read-only agent identity of dev on this machine), valid 90 days, with:
+  vault vE2ESHAREDDEV0000000000001: read
+  vault vE2EWEBDEV0000000000000001: read
+and keep its token in this machine's <store>. The token is never shown.
+It reads these vaults' values only to deliver them, and can never change them. An assistant running as you can still reach the token; see opv guide agent, "Agent identity".
+Go ahead? [y/N] created "project-dev-agent-<machine>"; checked it reads exactly these 2 vaults; stored its token in <store>; nothing was printed
+Set OPV_IDENTITY=agent in your assistant's environment to use it.
+Next: opv doctor --env dev
+
+## create dev text stderr
+using <SCENARIO>/project/secrets.toml
+
+## create again text exit: 6
+## create again text stdout
+
+## create again text stderr
+using <SCENARIO>/project/secrets.toml
+opv: agent identity project-dev-agent-<machine> for dev is already installed on this machine
+Next: opv access dev --rotate --agent
+
+## create dev --json exit: 0
+## create dev --json stdout
+{"schema_version":4,"ok":true,"created":"project-dev-agent-<machine>","kind":"agent","environment":"dev","machine":"e2e","store":"<store>","read_only":true,"vaults":2,"expires_on":"<date>","use":"OPV_IDENTITY=agent","next":{"kind":"run","actor":"assistant","command":"opv doctor --env dev"},"do":null}
+
+## create dev --json stderr
+using <SCENARIO>/project/secrets.toml
+Create 1Password service account "project-dev-agent-<machine>" (the read-only agent identity of dev on this machine), valid 90 days, with:
+  vault vE2ESHAREDDEV0000000000001: read
+  vault vE2EWEBDEV0000000000000001: read
+and keep its token in this machine's <store>. The token is never shown.
+It reads these vaults' values only to deliver them, and can never change them. An assistant running as you can still reach the token; see opv guide agent, "Agent identity".
+Go ahead? [y/N] created "project-dev-agent-<machine>"; checked it reads exactly these 2 vaults; stored its token in <store>; nothing was printed
+Set OPV_IDENTITY=agent in your assistant's environment to use it.
+
+## create again --json exit: 6
+## create again --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv access dev --rotate --agent"},"do":null,"error":{"code":"agent_identity_exists","category":"policy","message":"agent identity project-dev-agent-<machine> for dev is already installed on this machine","subject":{"name":"project-dev-agent-<machine>","env":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":null,"next":{"kind":"apply","actor":"person","command":"opv access dev --rotate --agent"}}}
+
+## create again --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: agent identity project-dev-agent-<machine> for dev is already installed on this machine
+Next: opv access dev --rotate --agent
+
+## plan prod text exit: 0
+## plan prod text stdout
+prod/fly: 10 keys · 0 findings · 5 to stage · 0 held (immutable) · 1 to prune · 0 unmanaged on Fly (never touched)
+prod/gh: 10 keys · 0 findings · 7 to write · 0 held (immutable) · 0 to prune · 0 unmanaged on GitHub (never touched)
+prod/k8s: 10 keys · 0 findings · 7 to write · 0 held (immutable) · 0 to prune · 0 unmanaged on Kubernetes (never touched)
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+fly     shared   DATABASE_URL     secret  saved    n/a
+fly     shared   FEATURE_FLAGS    config  saved    not delivered (no config channel)
+fly     web      API_KEY          secret  saved    unknown
+fly     web      DATABASE_URL     secret  saved    unknown
+    shared from shared/DATABASE_URL
+fly     web      LOG_LEVEL        config  saved    not delivered (no config channel)
+fly     web      MIGRATION_TOKEN  secret  skipped  extra
+fly     web      OTEL_RESOURCE    config  saved    not delivered (no config channel) · env
+fly     web      SESSION_SECRET   secret  saved    unknown
+fly     web      TLS_CERTIFICATE  secret  saved    new
+fly     web      TLS_PRIVATE_KEY  secret  saved    new
+gh      shared   DATABASE_URL     secret  saved    n/a
+gh      shared   FEATURE_FLAGS    config  saved    via GitHub variable
+gh      web      API_KEY          secret  saved    new
+gh      web      DATABASE_URL     secret  saved    new
+    shared from shared/DATABASE_URL
+gh      web      LOG_LEVEL        config  saved    new, via GitHub variable
+gh      web      MIGRATION_TOKEN  secret  skipped  n/a
+gh      web      OTEL_RESOURCE    config  saved    new, via GitHub variable · env
+gh      web      SESSION_SECRET   secret  saved    new
+gh      web      TLS_CERTIFICATE  secret  saved    new
+gh      web      TLS_PRIVATE_KEY  secret  saved    new
+k8s     shared   DATABASE_URL     secret  saved    n/a
+k8s     shared   FEATURE_FLAGS    config  saved    via ConfigMap
+k8s     web      API_KEY          secret  saved    new
+k8s     web      DATABASE_URL     secret  saved    new
+    shared from shared/DATABASE_URL
+k8s     web      LOG_LEVEL        config  saved    via ConfigMap
+k8s     web      MIGRATION_TOKEN  secret  skipped  n/a
+k8s     web      OTEL_RESOURCE    config  saved    via ConfigMap · file (verbatim)
+k8s     web      SESSION_SECRET   secret  saved    new
+k8s     web      TLS_CERTIFICATE  secret  saved    new
+k8s     web      TLS_PRIVATE_KEY  secret  saved    new
+unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
+prod/fly: note: web/OTEL_RESOURCE file via the app (env at boot, written to files by the app's shim)
+prod/gh: warning: web/OTEL_RESOURCE file destination not honoured on gh
+prod/fly: would stage: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/fly: would prune (needs --prune): web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN)
+prod/gh: would write: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE)
+prod/k8s: would write: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/k8s: would write: web/LOG_LEVEL (E2E__WEB__LOG_LEVEL → ConfigMap, env)
+prod/k8s: would write: web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE → file /run/secrets/web/otel/resource)
+prod/k8s: would deploy: volume opv-files-web, read-only at /run/secrets/web (1 file)
+plan 5b864552 (1Password item v2): sync --expect-plan 5b864552 applies exactly this plan and refuses if the item, the target or secrets.toml changed
+Next: deploy through CI's deploy job, or the person runs opv sync prod --deploy --prune --expect-plan 5b864552 in their own terminal
+
+## plan prod text stderr
+using <SCENARIO>/project/secrets.toml
+
+## plan prod --json exit: 0
+## plan prod --json stdout
+{"schema_version":4,"ok":true,"environment":"prod","product":null,"changes":"some","rows":[{"target":"fly","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"fly","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"fly","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"unknown","action":"would_stage"},{"target":"fly","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"unknown","action":"would_stage","shared_from":"shared/DATABASE_URL"},{"target":"fly","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null},{"target":"fly","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"unknown","action":"would_prune"},{"target":"fly","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null},{"target":"fly","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"unknown","action":"would_stage"},{"target":"fly","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage"},{"target":"fly","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage"},{"target":"gh","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"gh","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","via":"GitHub variable","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"gh","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"absent","action":"would_stage","shared_from":"shared/DATABASE_URL"},{"target":"gh","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","via":"GitHub variable","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"absent","action":null},{"target":"gh","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","via":"GitHub variable","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage"},{"target":"k8s","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"k8s","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"k8s","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"absent","action":"would_stage"},{"target":"k8s","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"absent","action":"would_stage","shared_from":"shared/DATABASE_URL"},{"target":"k8s","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null},{"target":"k8s","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"absent","action":null},{"target":"k8s","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"file","form":"verbatim","path":"otel/resource","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null},{"target":"k8s","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"absent","action":"would_stage"},{"target":"k8s","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage"},{"target":"k8s","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage"}],"extras":[],"unreferenced_sources":[{"product":"shared","key":"FEATURE_FLAGS"}],"stage":["E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY","E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY","E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY"],"held":[],"prune":["E2E__WEB__MIGRATION_TOKEN"],"totals":{"rows":30,"findings":0,"extras":0,"to_stage":15,"held":0,"to_prune":1},"plan_id":"5b864552","next":{"kind":"apply","actor":"person","command":"opv sync prod --deploy --prune --expect-plan 5b864552"},"do":null}
+
+## plan prod --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## status prod text exit: 0
+## status prod text stdout
+prod/fly: 10 keys · 9 saved · 1 skipped · 0 findings · 2 not yet on Fly
+prod/gh: 10 keys · 9 saved · 1 skipped · 0 findings · 5 not yet on GitHub
+prod/k8s: 10 keys · 9 saved · 1 skipped · 0 findings · 5 not yet on Kubernetes
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+fly     shared   DATABASE_URL     secret  saved    n/a
+fly     shared   FEATURE_FLAGS    config  saved    not delivered (no config channel)
+fly     web      API_KEY          secret  saved    unknown
+fly     web      DATABASE_URL     secret  saved    unknown
+    shared from shared/DATABASE_URL
+fly     web      LOG_LEVEL        config  saved    not delivered (no config channel)
+fly     web      MIGRATION_TOKEN  secret  skipped  extra
+fly     web      OTEL_RESOURCE    config  saved    not delivered (no config channel) · env
+fly     web      SESSION_SECRET   secret  saved    unknown
+fly     web      TLS_CERTIFICATE  secret  saved    new
+fly     web      TLS_PRIVATE_KEY  secret  saved    new
+gh      shared   DATABASE_URL     secret  saved    n/a
+gh      shared   FEATURE_FLAGS    config  saved    via GitHub variable
+gh      web      API_KEY          secret  saved    new
+gh      web      DATABASE_URL     secret  saved    new
+    shared from shared/DATABASE_URL
+gh      web      LOG_LEVEL        config  saved    new, via GitHub variable
+gh      web      MIGRATION_TOKEN  secret  skipped  n/a
+gh      web      OTEL_RESOURCE    config  saved    new, via GitHub variable · env
+gh      web      SESSION_SECRET   secret  saved    new
+gh      web      TLS_CERTIFICATE  secret  saved    new
+gh      web      TLS_PRIVATE_KEY  secret  saved    new
+k8s     shared   DATABASE_URL     secret  saved    n/a
+k8s     shared   FEATURE_FLAGS    config  saved    via ConfigMap
+k8s     web      API_KEY          secret  saved    new
+k8s     web      DATABASE_URL     secret  saved    new
+    shared from shared/DATABASE_URL
+k8s     web      LOG_LEVEL        config  saved    via ConfigMap
+k8s     web      MIGRATION_TOKEN  secret  skipped  n/a
+k8s     web      OTEL_RESOURCE    config  saved    via ConfigMap · file (verbatim)
+k8s     web      SESSION_SECRET   secret  saved    new
+k8s     web      TLS_CERTIFICATE  secret  saved    new
+k8s     web      TLS_PRIVATE_KEY  secret  saved    new
+unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
+prod/fly: note: web/OTEL_RESOURCE file via the app (env at boot, written to files by the app's shim)
+prod/gh: warning: web/OTEL_RESOURCE file destination not honoured on gh
+prod/k8s: pending deploy (deploy through CI's deploy job, or the person runs opv sync prod --deploy --target k8s in their own terminal): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+
+## status prod text stderr
+using <SCENARIO>/project/secrets.toml
+
+## status prod --json exit: 0
+## status prod --json stdout
+{"schema_version":4,"ok":true,"environment":"prod","product":null,"changes":"some","rows":[{"target":"fly","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"fly","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"fly","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"unknown","action":"would_stage"},{"target":"fly","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"unknown","action":"would_stage","shared_from":"shared/DATABASE_URL"},{"target":"fly","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null},{"target":"fly","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"unknown","action":"would_prune"},{"target":"fly","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null},{"target":"fly","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"unknown","action":"would_stage"},{"target":"fly","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage"},{"target":"fly","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage"},{"target":"gh","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"gh","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","via":"GitHub variable","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"gh","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"absent","action":"would_stage","shared_from":"shared/DATABASE_URL"},{"target":"gh","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","via":"GitHub variable","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":"absent","action":null},{"target":"gh","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"absent","action":null},{"target":"gh","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","via":"GitHub variable","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":"absent","action":null},{"target":"gh","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage"},{"target":"gh","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"GitHub secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage"},{"target":"k8s","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"k8s","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"k8s","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false,"shared_from":"shared/DATABASE_URL"},{"target":"k8s","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null,"binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"absent","action":null},{"target":"k8s","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"file","form":"verbatim","path":"otel/resource","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null,"binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false}],"extras":[],"unreferenced_sources":[{"product":"shared","key":"FEATURE_FLAGS"}],"stage":["E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY","E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY","E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY"],"held":[],"prune":["E2E__WEB__MIGRATION_TOKEN"],"totals":{"rows":30,"findings":0,"extras":0,"to_stage":15,"held":0,"to_prune":1},"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## status prod --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## not installed text exit: 7
+## not installed text stdout
+
+## not installed text stderr
+using <SCENARIO>/project/secrets.toml
+opv: no agent identity for prod on this machine
+Do: ask the person to create it in their own terminal; opv never falls back to their session
+Next: opv access prod --create --agent
+
+## not installed --json exit: 7
+## not installed --json stdout
+{"schema_version":4,"ok":false,"exit_code":7,"next":{"kind":"apply","actor":"person","command":"opv access prod --create --agent"},"do":"ask the person to create it in their own terminal; opv never falls back to their session","error":{"code":"agent_identity_not_installed","category":"auth","message":"no agent identity for prod on this machine","subject":{"env":"prod"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"ask the person to create it in their own terminal; opv never falls back to their session","next":{"kind":"apply","actor":"person","command":"opv access prod --create --agent"}}}
+
+## not installed --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: no agent identity for prod on this machine
+Do: ask the person to create it in their own terminal; opv never falls back to their session
+Next: opv access prod --create --agent
+
+## rejected text exit: 7
+## rejected text stdout
+
+## rejected text stderr
+using <SCENARIO>/project/secrets.toml
+opv: agent identity project-prod-agent-<machine> for prod was rejected by 1Password
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD000000000001 --format json (exit 9)
+--- 1Password CLI replied, exit 9 ---
+| [ERROR] 2026/10/16 00:04:42 failed to DecodeSACredentials: invalid character '¢' looking for beginning of value
+--- (scrubbed) ---
+Do: 1Password no longer accepts project-prod-agent-<machine> (revoked, deleted or expired): ask the person to rotate it in their own terminal
+Next: opv access prod --rotate --agent
+
+## rejected --json exit: 7
+## rejected --json stdout
+{"schema_version":4,"ok":false,"exit_code":7,"next":{"kind":"apply","actor":"person","command":"opv access prod --rotate --agent"},"do":"1Password no longer accepts project-prod-agent-<machine> (revoked, deleted or expired): ask the person to rotate it in their own terminal","error":{"code":"agent_rejected","category":"auth","message":"agent identity project-prod-agent-<machine> for prod was rejected by 1Password","subject":{"env":"prod","name":"project-prod-agent-<machine>"},"evidence":{"checked":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD000000000001 --format json","account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":9},"said":["[ERROR] 2026/10/16 00:04:42 failed to DecodeSACredentials: invalid character '¢' looking for beginning of value"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"1Password no longer accepts project-prod-agent-<machine> (revoked, deleted or expired): ask the person to rotate it in their own terminal","next":{"kind":"apply","actor":"person","command":"opv access prod --rotate --agent"}}}
+
+## rejected --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: agent identity project-prod-agent-<machine> for prod was rejected by 1Password
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD000000000001 --format json (exit 9)
+--- 1Password CLI replied, exit 9 ---
+| [ERROR] 2026/10/16 00:04:42 failed to DecodeSACredentials: invalid character '¢' looking for beginning of value
+--- (scrubbed) ---
+Do: 1Password no longer accepts project-prod-agent-<machine> (revoked, deleted or expired): ask the person to rotate it in their own terminal
+Next: opv access prod --rotate --agent
+
+## store unavailable text exit: 3
+## store unavailable text stdout
+
+## store unavailable text stderr
+using <SCENARIO>/project/secrets.toml
+opv: no credential store on this machine can hold the agent identity's token: <store> is not usable
+Do: start a Secret Service for your user (such as gnome-keyring); opv never keeps the token in a file
+Next: opv plan prod
+
+## store unavailable --json exit: 3
+## store unavailable --json stdout
+{"schema_version":4,"ok":false,"exit_code":3,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"},"do":"start a Secret Service for your user (such as gnome-keyring); opv never keeps the token in a file","error":{"code":"agent_store_unavailable","category":"dependency","message":"no credential store on this machine can hold the agent identity's token: <store> is not usable","subject":{"store":"<store>"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"start a Secret Service for your user (such as gnome-keyring); opv never keeps the token in a file","next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"}}}
+
+## store unavailable --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: no credential store on this machine can hold the agent identity's token: <store> is not usable
+Do: start a Secret Service for your user (such as gnome-keyring); opv never keeps the token in a file
+Next: opv plan prod --json
+
+## store locked text exit: 7
+## store locked text stdout
+
+## store locked text stderr
+using <SCENARIO>/project/secrets.toml
+opv: <store> is locked or would prompt, and opv never waits on its prompt
+Do: unlock <store>, then run again
+Next: opv plan prod
+
+## store locked --json exit: 7
+## store locked --json stdout
+{"schema_version":4,"ok":false,"exit_code":7,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"},"do":"unlock <store>, then run again","error":{"code":"agent_store_locked","category":"auth","message":"<store> is locked or would prompt, and opv never waits on its prompt","subject":{"store":"<store>"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"unlock <store>, then run again","next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"}}}
+
+## store locked --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: <store> is locked or would prompt, and opv never waits on its prompt
+Do: unlock <store>, then run again
+Next: opv plan prod --json

@@ -118,6 +118,12 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `InOtherAccount` | vault: VaultId; item: Option<ItemId>; selected: Account; owning: Option<Account>; unasked: Vec<Account>; searched: bool, the other accounts were listed and asked (§12.4, #153a); env | ids_not_in_account | after_fix | "select the owning account (opv account use <id>), or fix vault_id for <env>"; with no owner found, "sign in to <unasked> to look for vault <vault> there, or fix vault_id for <env>"; searched with every account asked, "no 1Password account on this machine holds vault <vault>: fix vault_id for <env> with a vault of account <selected>"; not searched (op listed no accounts), "find the account that holds vault <vault>, or fix vault_id for <env>" | `opv account use <owning>`; with accounts not asked, `opv login --account <first unasked> --no-record -- opv vault locate <vault>` (handoff); searched with every account asked, `op vault list --account <selected>`; not searched, `opv vault locate <vault>` [R32] |
 | `NeedsOwnSession` | command: Invocation; identity: ServiceAccount / Connect / Ci / DeployCredentials / Unconfirmed | **own_session_required** | never (in this run) | "run it in your own terminal, signed in as yourself, without <variable>" | the exact command, as a person-only handoff [R33] |
 | `CredentialRejected` | system; credential: CredentialRef (ServiceAccountToken{var} / Connect{vars} / DeployCredentials{item, env, target} / ShellToken{var} / StoreAuth{store}); problem: Rejected / Incomplete{missing_fields} / Unreadable{cause}; needs: Vec<Permission> | deploy_credentials_failed / **credential_rejected** | after_fix | "replace <credential> with one that has <needs>"; ShellToken: "unset <var> in this shell" | `opv doctor --env E --target T`, which checks this credential [R36–R38] |
+| `AgentIdentityNotInstalled` (#338) | env | **agent_identity_not_installed** (exit 7) | after_fix | "ask the person to create it in their own terminal; opv never falls back to their session" | `opv access <env> --create --agent`, as a person's handoff |
+| `AgentIdentityExists` (#338) | env; name | **agent_identity_exists** (exit 6) | never | none | `opv access <env> --rotate --agent`, as a person's handoff |
+| `AgentRejected` (#338) | name; env: Option; seen | **agent_rejected** (exit 7) | after_fix | "1Password no longer accepts <name> (revoked, deleted or expired): ask the person to rotate it in their own terminal" | `opv access [<env>] --rotate --agent`, as a person's handoff |
+| `AgentStoreUnavailable` (#338) | store: AgentStore | **agent_store_unavailable** (exit 3) | after_fix | StoreSetup: "make <store> usable for your user; opv never keeps the token in a file" | rerun |
+| `AgentStoreLocked` (#338) | store: AgentStore | **agent_store_locked** (exit 7) | after_fix | StoreSetup: "unlock <store>, then run again" | rerun |
+| `AgentStoreVolatile` (#338) | store: AgentStore; env: Option | **agent_store_volatile** (exit 3) | after_fix | StoreSetup: "keep the token in a store that survives a WSL stop, such as a Secret Service login keyring, not <store>" | `opv doctor [--env <env>]` |
 
 ### 4.4 Access and resources (exit 5 for targets, 4 for 1Password)
 
@@ -213,7 +219,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, shell_eval_required and shell_mismatch (0.14.0, #203), producer_failed, producer_changed and platform_unsupported (0.18.0, #253), config_outside_repository (0.18.2, #288), internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, shell_eval_required and shell_mismatch (0.14.0, #203), producer_failed, producer_changed and platform_unsupported (0.18.0, #253), config_outside_repository (0.18.2, #288), agent_identity_not_installed, agent_identity_exists, agent_rejected, agent_store_unavailable, agent_store_locked and agent_store_volatile (0.22.0, #338), internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 
@@ -329,7 +335,7 @@ pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, U
 
 `human_required` is true exactly when the step needs a person:
 - a `Handoff`;
-- an `Action` marked person-only: Grant, FillValue, Approve, AddAccountInApp, OwnerSetup, Revoke, PickBetween, Confirm;
+- an `Action` marked person-only: Grant, FillValue, Approve, AddAccountInApp, OwnerSetup, Revoke, PickBetween, Confirm, StoreSetup (unlock or set up the machine's credential store, #338);
 - or one of the variants `NeedsTerminal`, `NeedsOwnSession`, `NeedsConfirm`, `ApprovalMissing`.
 
 It can't disagree with the step, and the CLI and MCP can't disagree with each other. A `Choose` is a person's step too.
@@ -353,6 +359,8 @@ It can't disagree with the step, and the CLI and MCP can't disagree with each ot
 | `input_invalid` | edit the input file (it holds values) | the same command | keep: the re-run checks the edited file |
 | `deploy_credentials_failed`, `credential_rejected` | replace or unset the credential | `opv doctor …` | keep: doctor shows whether the credential works |
 | `target_not_signed_in` | the vendor sign-in (`flyctl auth login`, …) | the same command | keep: the vendor's sign-in is stored for the user, so the re-run sees it |
+| `agent_store_unavailable`, `agent_store_locked` | the person makes usable or unlocks the machine's credential store (#338) | the same command | keep: the re-run reads the store again and never waits on a prompt |
+| `agent_store_volatile` | the person moves the agent identity to a store that survives a WSL stop (#338) | `opv doctor --env …` | keep: doctor's `op identity` row shows the store in use |
 
 It is **guidance, not enforcement**. An agent with a shell can run anything the person can; §9 says what actually stops an agent.
 

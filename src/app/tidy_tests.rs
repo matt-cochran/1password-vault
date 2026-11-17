@@ -1778,3 +1778,22 @@ fn an_unscoped_read_is_unchanged() {
     read_for(&two_boundary_fleet(), &ReadScope::Whole, "dev", &whole).unwrap();
     assert_eq!(*whole.calls.borrow(), *today.calls.borrow());
 }
+
+// --- #338: the agent identity is read-only (D4) ---
+
+#[test]
+fn the_agent_identity_never_tidies() {
+    let op = FakeOp::person(messy_item());
+    with_host(
+        FakeEnv::new("linux").var_val("OPV_IDENTITY", "agent"),
+        || tidied(&op),
+    );
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn a_write_under_the_agent_identity_names_the_agent_not_a_token_variable() {
+    let host = Host::from_env(&FakeEnv::new("linux").var_val("OPV_IDENTITY", "agent"));
+    let e = require_person_on(&FakeOp::person(messy_item()), "opv import", host).unwrap_err();
+    assert!(e.to_string().contains("agent identity"), "{e}");
+}

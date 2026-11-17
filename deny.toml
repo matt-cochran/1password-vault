@@ -25,6 +25,12 @@ targets = [
 ignore = [
     { id = "RUSTSEC-2026-0374", reason = "expires 2027-02-01: basic-toml is unmaintained; it is reached only through the i18n-embed-fl proc macro of age 0.12.1 and runs at build time, never in the opv binary" },
     { id = "RUSTSEC-2026-0387", reason = "expires 2027-02-01: crypto-bigint 0.5.5 timing variability, reached only through elliptic-curve/p256 for age's p256-tag and hybrid stanzas, which opv never parses or offers (X25519 recipients only, parsed with age::x25519::Recipient::from_str); fenced by the p256 [bans] wrapper" },
+    # zbus 5's split crates (unmaintained, no known vulnerability): merged into zbus 6. They
+    # come only through secret-service 5.2.0 and zbus-secret-service-keyring-store 1.0.1, the
+    # Linux agent-identity store pinned by spike S1 (#338); drop when those move to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "expires 2027-02-01: zvariant is unmaintained (merged into zbus 6); reached only through zbus 5 for the Linux Secret Service agent-identity store (secret-service 5.2.0); no known vulnerability" },
+    { id = "RUSTSEC-2026-0371", reason = "expires 2027-02-01: zbus_names is unmaintained (merged into zbus 6); reached only through zbus 5 for the Linux Secret Service agent-identity store; no known vulnerability" },
+    { id = "RUSTSEC-2026-0372", reason = "expires 2027-02-01: zvariant_derive is unmaintained (merged into zbus 6); reached only through zbus 5 for the Linux Secret Service agent-identity store; no known vulnerability" },
     { id = "RUSTSEC-2026-0543", reason = "expires 2027-02-01: chrono is unmaintained (no known vulnerability); it is reached only through rmcp 3.10 and its schemars chrono04 feature for the MCP server; drop when rmcp moves off chrono" },
 ]
 

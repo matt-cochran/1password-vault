@@ -15,6 +15,7 @@ pub mod domain;
 pub mod error;
 pub mod hardening;
 pub mod host;
+pub mod identity;
 pub mod json;
 pub mod output;
 pub mod ports;

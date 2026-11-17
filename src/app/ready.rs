@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::account::Report;
+use crate::app::doctor::identity as who;
 use crate::app::rule_source::{RuleSource, RuleStatus, rule_source};
 use crate::cause::{Cause, EnvName, KeyName, ProductName};
 use crate::domain::plan::RuleGate;
@@ -291,6 +292,12 @@ pub struct Receipt {
     pub sets: Vec<SetReport>,
     /// Every target of every environment, in environment then name order (FR-56).
     pub targets: Vec<TargetReport>,
+    /// Each environment's identity (#338, design `agent-identity.md` §7.4), in the
+    /// receipt's environment order: the value-free object `opv doctor`'s `op identity` row
+    /// carries. Not bound by `receipt_id` (its counts and days move); omitted when a caller
+    /// built the receipt without reading identities.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub identity: Vec<serde_json::Value>,
     pub findings: Vec<Finding>,
     pub next: Option<Next>,
     /// RFC 3339 UTC the receipt was generated (design row `receipts`). The `--save` receipt
@@ -416,6 +423,7 @@ fn receipt_with_sets(
         matrix,
         sets,
         targets,
+        identity: Vec::new(),
         findings,
         next,
         generated_at: generated_at.to_string(),
@@ -935,10 +943,10 @@ fn build_findings(
             CREDENTIAL_EXPIRING | CREDENTIAL_EXPIRED => {
                 let (kind, target) = h.other.clone().unwrap_or_default();
                 let target = (!target.is_empty()).then_some(target.as_str());
-                let kind = if kind == "deploy" {
-                    crate::domain::credential::CredentialKind::Deploy
-                } else {
-                    crate::domain::credential::CredentialKind::ServiceAccount
+                let kind = match kind.as_str() {
+                    "deploy" => crate::domain::credential::CredentialKind::Deploy,
+                    "agent" => crate::domain::credential::CredentialKind::Agent,
+                    _ => crate::domain::credential::CredentialKind::ServiceAccount,
                 };
                 credential_next(kind, env, target)
             }
@@ -1433,6 +1441,10 @@ mod tests;
 #[path = "expiry_reporting_tests.rs"]
 mod expiry_reporting_tests;
 
+#[cfg(test)]
+#[path = "ready_identity_tests.rs"]
+mod identity_tests;
+
 /// One `op vault user list` for `vault_id` (FR-56): `None` when this person can see the
 /// vault, else the `grants_missing` reason naming it. The vault ID is never a value.
 ///
@@ -1465,6 +1477,165 @@ fn state_vault_grants(r: &dyn crate::runner::CommandRunner, vault_id: &str) -> O
         }
         Err(e) => Some(format!("state vault {vault_id}: {e}")),
     }
+}
+
+// #338: the identity each environment is read with (design `agent-identity.md` §5, §7.4) --
+
+/// How `ready` learns each environment's identity (#338, design §5, §7.4): the host the
+/// rules read, the `op identity` row's seams, and, under rule 3, which environment this
+/// process already acts for and whether this machine's index records an identity for
+/// another. [`IdentityProbe::process`] is this machine's; tests give fakes.
+pub(crate) struct IdentityProbe<'a> {
+    pub host: crate::host::Host,
+    pub seams: who::Seams<'a>,
+    /// The environment this process's agent identity acts for, once one is kept.
+    pub acting_for: Box<dyn Fn() -> Option<String> + 'a>,
+    /// Whether this machine's value-free index records an agent identity for (fleet, env).
+    pub installed: InstalledFn<'a>,
+}
+
+/// Whether this machine's index records an agent identity for (fleet, env).
+pub(crate) type InstalledFn<'a> = Box<dyn Fn(&crate::domain::Fleet, &str) -> bool + 'a>;
+
+impl<'a> IdentityProbe<'a> {
+    /// This process: its host, the doctor row's process seams, the kept identity and the
+    /// index file.
+    pub(crate) fn process(r: &'a dyn crate::runner::CommandRunner) -> Self {
+        IdentityProbe {
+            host: crate::host::Host::detect(),
+            seams: who::Seams::process(r),
+            acting_for: Box::new(|| {
+                crate::identity::resolved()
+                    .and_then(crate::identity::Resolved::agent)
+                    .map(|a| a.key().env().as_str().to_string())
+            }),
+            installed: Box::new(move |fleet, env| {
+                let Some(account) = fleet.environments.get(env).and_then(|e| e.account.clone())
+                else {
+                    return false;
+                };
+                let project =
+                    super::personal::project_name(r, &std::env::current_dir().unwrap_or_default());
+                crate::app::agent_identity::index_path()
+                    .and_then(|p| crate::app::agent_identity::load(&p).ok())
+                    .is_some_and(|i| i.find(&account, &project, env).is_some())
+            }),
+        }
+    }
+}
+
+/// One environment's identity as `ready` reports it: the §7.4 object, the error that
+/// stops reading the environment when rule 3 gives it no token (the run carries on with
+/// the others, design §5), and the agent identity's credential record for FR-69 expiry.
+pub(crate) struct EnvIdentity {
+    pub object: serde_json::Value,
+    pub stop: Option<Error>,
+    pub agent: Option<crate::domain::credential::CredentialRecord>,
+}
+
+/// The identity `env` is read with (design §5, §7.4), before its first `op` call. Under
+/// rule 3 an environment with no agent identity of its own stops with
+/// `agent_identity_not_installed`, never the person's session (vet R4). Once this process
+/// acts for another environment, an environment this machine records no identity for is
+/// reported as not installed; one it does is the usage stop (one environment per run).
+///
+/// The same object the doctor row carries, by the same rules ([`who::row`]), except that
+/// `ready` never writes the store: the self-check is doctor's (`store.self_check`
+/// `not_run`); a locked store already stops the token read. Value-free (ADR-0001 R1): no
+/// token, length or digest.
+pub(crate) fn env_identity(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    r: &dyn crate::runner::CommandRunner,
+    probe: &IdentityProbe<'_>,
+    today: &str,
+) -> EnvIdentity {
+    let mut found = who::before(&probe.host, Some(fleet), Some(env), &probe.seams);
+    if let who::Who::AgentUnavailable(e) = &found
+        && e.code_str() == "usage"
+        && (probe.acting_for)().is_some_and(|k| k != env)
+        && !(probe.installed)(fleet, env)
+    {
+        found = who::Who::AgentUnavailable(
+            Cause::AgentIdentityNotInstalled {
+                env: EnvName::new(env),
+            }
+            .into(),
+        );
+    }
+    let stop = match &found {
+        who::Who::AgentUnavailable(e) => Some(Error::from(e.parts().0.clone())),
+        _ => None,
+    };
+    let mut agent = None;
+    let facts = match found {
+        who::Who::Agent { name } => {
+            let expires_on = (probe.seams.record)(&name, env).map(|rec| rec.expires_on);
+            agent = Some(crate::domain::credential::agent_record(
+                env,
+                &name,
+                expires_on.as_deref(),
+            ));
+            who::Facts::Agent(Box::new(who::AgentFacts {
+                source: (probe.seams.source)().describe(),
+                expires_on,
+                reach: who::reach(fleet, env, r),
+                rate: crate::adapters::onepassword_ratelimit::read(r),
+                rejected: None,
+                // Doctor's check, never run here: `ready` writes nothing.
+                self_check: who::SelfCheck::Ok {
+                    elapsed: std::time::Duration::ZERO,
+                },
+                name,
+            }))
+        }
+        other => who::Facts::Other(other),
+    };
+    let ctx = who::Context {
+        env: Some(env.to_string()),
+        marker: probe.host.agent_mode().is_some(),
+        today: today.to_string(),
+    };
+    let mut object = who::row(facts, &ctx).identity;
+    if let Some(store) = object.get_mut("store").filter(|s| s.is_object()) {
+        store["self_check"] = serde_json::json!("not_run");
+        store["self_check_ms"] = serde_json::Value::Null;
+    }
+    EnvIdentity {
+        object,
+        stop,
+        agent,
+    }
+}
+
+/// The identity object of each environment in scope (`only`, else all), in the order
+/// `ready` reads them: what MCP's `accounts` section carries beside the account report
+/// (design §7.4, D7).
+pub(crate) fn identities(
+    fleet: &crate::domain::Fleet,
+    only: Option<&str>,
+    r: &dyn crate::runner::CommandRunner,
+    probe: &IdentityProbe<'_>,
+    today: &str,
+) -> Vec<serde_json::Value> {
+    ordered_envs(fleet, only)
+        .into_iter()
+        .map(|(name, _)| env_identity(fleet, name, r, probe, today).object)
+        .collect()
+}
+
+/// The environments in scope in `ready`'s order (FR-55): their own `order`, then name.
+fn ordered_envs<'f>(
+    fleet: &'f crate::domain::Fleet,
+    only: Option<&str>,
+) -> Vec<(&'f String, &'f crate::domain::Environment)> {
+    let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
+        .environments
+        .iter()
+        .filter(|(name, _)| only.is_none_or(|o| o == name.as_str()))
+        .collect();
+    ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
+    ordered
 }
 
 /// `opv ready [<env>] [--json] [--save <file>]` (FR-51): read-only. The account report
@@ -1510,9 +1681,63 @@ pub fn run_at(
     generated_at: &str,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    let probe = IdentityProbe::process(r);
+    run_probed(
+        fleet,
+        config_source,
+        only,
+        r,
+        json,
+        save,
+        gate,
+        generated_at,
+        &probe,
+        out,
+    )
+}
+
+/// [`run_at`] with the identity probe given (#338): tests give a fake host and store.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_probed(
+    fleet: &crate::domain::Fleet,
+    config_source: Option<&str>,
+    only: Option<&str>,
+    r: &dyn crate::runner::CommandRunner,
+    json: bool,
+    save: Option<&std::path::Path>,
+    gate: bool,
+    generated_at: &str,
+    probe: &IdentityProbe<'_>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     if let Some(e) = only {
         super::environment(fleet, e)?;
     }
+    // FR-55: the environments' own order, then their keys; never a fixed list.
+    let ordered = ordered_envs(fleet, only);
+    // #338 (design §5): each environment's identity, resolved before its first `op` call
+    // (and before the session check, so under rule 3 it carries the agent's token). An
+    // environment rule 3 gives no token is reported and skipped; the others carry on.
+    let today = expiry_today(generated_at);
+    let identity: Vec<(String, EnvIdentity)> = ordered
+        .iter()
+        .map(|(name, _)| {
+            let id = env_identity(fleet, name, r, probe, &today);
+            ((*name).clone(), id)
+        })
+        .collect();
+    let mut stops: BTreeMap<String, Error> = BTreeMap::new();
+    let mut identity_objects = Vec::new();
+    let mut agent_records = Vec::new();
+    for (name, id) in identity {
+        identity_objects.push(id.object);
+        agent_records.extend(id.agent);
+        if let Some(e) = id.stop {
+            stops.insert(name, e);
+        }
+    }
+    // An environment the identity stopped is never listed under another identity (#338).
+    let stopped: BTreeSet<String> = stops.keys().cloned().collect();
     // #157: nobody signed in is one finding of its own, never every target's missing grant.
     // L9: an account op does not know is not a failure here: the account report below names
     // it (`selected_account_absent`) with its step, `opv login --add`.
@@ -1522,13 +1747,6 @@ pub fn run_at(
         other => other?,
     }
     let account = project_accounts(fleet, r);
-    // FR-55: the environments' own order, then their keys; never a fixed list.
-    let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
-        .environments
-        .iter()
-        .filter(|(name, _)| only.is_none_or(|o| o == name.as_str()))
-        .collect();
-    ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
     // Each environment's fields, copied during its one read, for the health checks (#92).
     let mut kept: Vec<(String, bool, Vec<crate::domain::plan::ItemField>)> = Vec::new();
     let mut envs: Vec<EnvInput> = Vec::new();
@@ -1544,6 +1762,19 @@ pub fn run_at(
         } else {
             PersonalItem::default()
         };
+        // #338: rule 3 gave this environment no token: its stop is its one finding, and it
+        // is never read under another identity (vet R4).
+        if let Some(stop) = stops.remove(name.as_str()) {
+            envs.push(EnvInput {
+                name: name.clone(),
+                target: None,
+                rows: Err(stop),
+                title: env.title.clone(),
+                audience: env.audience.clone(),
+                personal_item,
+            });
+            continue;
+        }
         if env.targets.is_empty() {
             // A run-only environment: one read, and its rows stand on their own (FR-56).
             let mut fields = Vec::new();
@@ -1658,7 +1889,13 @@ pub fn run_at(
     }
     // #296: every recorded CI or deploy credential, expiring or expired, is reported on
     // every run (not only `--gate`), value-free, with one rotation command as its Next.
-    health.extend(credential_health(fleet, &envs, &expiry_today(generated_at)));
+    health.extend(credential_health(fleet, &envs, &today));
+    // #338 (FR-69): the agent identity's expiry, by the same codes and window, advisory.
+    health.extend(
+        agent_records
+            .iter()
+            .filter_map(|record| credential_finding(record, &today)),
+    );
     let personal = fleet
         .products
         .iter()
@@ -1674,7 +1911,7 @@ pub fn run_at(
     // the versions to judge delivery evidence too; the plain report needs neither.
     let (versions, assistant_imported): (BTreeMap<String, u64>, BTreeSet<String>) =
         if save.is_some() || gate {
-            read_item_versions(fleet, only, r)?
+            read_item_versions(fleet, only, &stopped, r)?
         } else {
             (BTreeMap::new(), BTreeSet::new())
         };
@@ -1749,6 +1986,8 @@ pub fn run_at(
             site: "ready receipt serialization",
         })
     };
+    let mut doc = doc;
+    doc.identity = identity_objects;
     let mut v = serde_json::to_value(&doc).map_err(bug)?;
     v["schema_version"] = serde_json::json!(crate::json::SCHEMA_VERSION);
     if let Some(path) = save {
@@ -1823,12 +2062,13 @@ struct ListRow {
 fn read_item_versions(
     fleet: &crate::domain::Fleet,
     only: Option<&str>,
+    unread: &BTreeSet<String>,
     r: &dyn crate::runner::CommandRunner,
 ) -> Result<(BTreeMap<String, u64>, BTreeSet<String>), Error> {
     let mut versions = BTreeMap::new();
     let mut assistant_imported = BTreeSet::new();
     for name in fleet.environments.keys() {
-        if only.is_some_and(|o| o != name.as_str()) {
+        if only.is_some_and(|o| o != name.as_str()) || unread.contains(name) {
             continue;
         }
         for (_, b) in fleet.bound_boundaries(name)? {
@@ -2244,6 +2484,7 @@ pub(crate) fn credential_next(
             Some(t) => format!("opv access {env} --target {t} --rotate --github <owner/repo>"),
             None => format!("opv access {env} --rotate --github <owner/repo>"),
         },
+        CredentialKind::Agent => format!("opv access {env} --rotate --agent"),
     }
 }
 
@@ -2254,6 +2495,7 @@ fn credential_kind_word(kind: crate::domain::credential::CredentialKind) -> &'st
     match kind {
         CredentialKind::Deploy => "deploy",
         CredentialKind::ServiceAccount | CredentialKind::Federated => "service_account",
+        CredentialKind::Agent => "agent",
     }
 }
 
@@ -2265,7 +2507,6 @@ pub(crate) fn credential_health(
     envs: &[EnvInput],
     today: &str,
 ) -> Vec<crate::domain::health::HealthFinding> {
-    use crate::domain::credential::ExpiryState;
     let bindings = fleet_bindings(fleet);
     let mut out = Vec::new();
     for env in envs {
@@ -2275,52 +2516,65 @@ pub(crate) fn credential_health(
             .map(|e| e.targets.keys().cloned().collect())
             .unwrap_or_default();
         for record in crate::domain::credential::records(&bindings, &env.name, &targets) {
-            let state = crate::domain::credential::expiry_state(
-                record.expires_on.as_deref(),
-                today,
-                crate::domain::credential::DEFAULT_EXPIRY_WINDOW_DAYS,
-            );
-            let code = match state {
-                ExpiryState::Expired => CREDENTIAL_EXPIRED,
-                ExpiryState::Expiring { .. } => CREDENTIAL_EXPIRING,
-                _ => continue,
-            };
-            let what = match (&record.target, record.kind) {
-                (Some(t), crate::domain::credential::CredentialKind::Deploy) => {
-                    format!("the deploy credential for {t} in {}", env.name)
-                }
-                (Some(t), _) => format!("the CI identity for {t} in {}", env.name),
-                (None, _) => format!("the CI reader for {}", env.name),
-            };
-            let message = match state {
-                ExpiryState::Expired => format!("{what} expired; rotate it"),
-                ExpiryState::Expiring { days_left } => {
-                    format!("{what} expires in {days_left} days; rotate it")
-                }
-                _ => continue,
-            };
-            out.push(crate::domain::health::HealthFinding {
-                code,
-                environments: vec![env.name.clone()],
-                product: env.name.clone(),
-                key: record
-                    .target
-                    .clone()
-                    .unwrap_or_else(|| CI_READER.to_string()),
-                other: Some((
-                    credential_kind_word(record.kind).to_string(),
-                    record.target.clone().unwrap_or_default(),
-                )),
-                message,
-            });
+            out.extend(credential_finding(&record, today));
         }
     }
     out
 }
 
+/// The finding key of an environment's agent identity (#338).
+pub(crate) const AGENT_IDENTITY: &str = "agent_identity";
+
+/// The advisory finding for one expiring or expired credential (#296; the agent identity,
+/// #338, FR-69): `credential_expiring` or `credential_expired`, never blocking. `None` when
+/// it is `Ok` or its expiry is unknown. Value-free: names, a date's distance and states.
+pub(crate) fn credential_finding(
+    record: &crate::domain::credential::CredentialRecord,
+    today: &str,
+) -> Option<crate::domain::health::HealthFinding> {
+    use crate::domain::credential::{CredentialKind, ExpiryState};
+    let env = &record.env;
+    let state = credential_state(record, today);
+    let code = match state {
+        ExpiryState::Expired => CREDENTIAL_EXPIRED,
+        ExpiryState::Expiring { .. } => CREDENTIAL_EXPIRING,
+        _ => return None,
+    };
+    let what = match (&record.target, record.kind) {
+        (_, CredentialKind::Agent) => format!("the agent identity {} for {env}", record.identity),
+        (Some(t), CredentialKind::Deploy) => format!("the deploy credential for {t} in {env}"),
+        (Some(t), _) => format!("the CI identity for {t} in {env}"),
+        (None, _) => format!("the CI reader for {env}"),
+    };
+    let message = match state {
+        ExpiryState::Expiring { days_left } => {
+            format!("{what} expires in {days_left} days; rotate it")
+        }
+        _ => format!("{what} expired; rotate it"),
+    };
+    let key = match record.kind {
+        CredentialKind::Agent => AGENT_IDENTITY.to_string(),
+        _ => record
+            .target
+            .clone()
+            .unwrap_or_else(|| CI_READER.to_string()),
+    };
+    Some(crate::domain::health::HealthFinding {
+        code,
+        environments: vec![env.clone()],
+        product: env.clone(),
+        key,
+        other: Some((
+            credential_kind_word(record.kind).to_string(),
+            record.target.clone().unwrap_or_default(),
+        )),
+        message,
+    })
+}
+
 /// The `YYYY-MM-DD` credentials are measured from: `generated_at`'s date when it carries
 /// one, else the system clock (a plain receipt has no timestamp).
-fn expiry_today(generated_at: &str) -> String {
+pub(crate) fn expiry_today(generated_at: &str) -> String {
     if generated_at.len() >= 10 {
         generated_at[..10].to_string()
     } else {

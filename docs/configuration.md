@@ -426,7 +426,7 @@ On native Windows, values reach `az` (the service-principal secret, Key Vault va
 confirm_env = true
 ```
 
-With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the boundary items and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `inventory`, `run`) and `propose structure` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
+With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the boundary items and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so it is the only delivery command that needs it (creating or rotating the environment's [agent identity](#agent-identity-opv_identity-and-the-local-index) needs it too): reading commands (`status`, `plan`, `inventory`, `run`) and `propose structure` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
 
 ### Removed forms
 
@@ -444,6 +444,19 @@ There is one configuration form. Input in a removed form fails at load with its 
 | the `pattern` rule | `regex = "<regex-escaped prefix>(?:<pattern>)"` |
 
 There is no conversion. Every removed form's load error shows the replacement to paste.
+
+## Agent identity: `OPV_IDENTITY` and the local index
+
+An agent identity is a read-only 1Password service account for one environment on this machine, made with `opv access <env> --create --agent` ([agent identities](usage.md#agent-identities-read-only)). Nothing about it goes into `secrets.toml` or `secrets.bindings.toml`. Two things on the machine say how it is used:
+
+| Setting | Where | What |
+|---|---|---|
+| `OPV_IDENTITY` | the environment of the process that runs opv (an assistant's host, its MCP server entry) | `agent`: the environment's agent identity, with the token read from the OS credential store; `person`, or unset: your own session; any other value: a `usage` error. A token in `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*` comes first. An environment with no agent identity stops with `agent_identity_not_installed`; opv never falls back to your session. |
+| `agent-identities.toml` | `$XDG_CONFIG_HOME/opv/` when `XDG_CONFIG_HOME` is set; otherwise `~/.config/opv/` on Linux and WSL, `~/Library/Application Support/opv/` on macOS, `%APPDATA%\opv\` on Windows | the value-free index of this machine's agent identities, written by `--create --agent` and `--rotate --agent`, mode 0600 on Unix. It lives outside the repository. |
+
+Each identity in the index is one `[[identity]]` table: `project`, `account_id`, `account_name`, `environment`, `machine`, `store` (`macos_keychain`, `windows_credential_manager`, `secret_service` or `kernel_keyring`), `created_on` and `expires_on`, plus `rotation_successor` while a rotation is pending. It holds no token, value, digest or length. The token itself is in the OS credential store, under service `opv` and name `<account_id>/<project>/<environment>`.
+
+The environment's tier decides one more thing: creating or rotating the agent identity of a production-tier environment, or one with [`confirm_env`](#guarding-an-environment-confirm_env), needs `--confirm <env>`.
 
 ## Store layout
 

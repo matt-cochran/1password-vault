@@ -709,3 +709,171 @@ fn a_configured_account_is_not_named_again() {
         None
     );
 }
+
+// ------------------------------------------------------------ agent identity (#338, S6)
+
+mod agent_identity {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::adapters::credential_store::{
+        AgentCredentialSource, AgentKey, FakeCredentialSource, SourceDescription,
+    };
+    use crate::cause::{AccountId, AgentStore, EnvName};
+    use crate::domain::SecretValue;
+    use crate::identity::{AgentTarget, Resolver};
+
+    const ACCOUNT_ID: &str = "AFAKEOP0000000000000000S06";
+    const CANARY: &str = "ops_CANARY-s6-signin-token-4b7e";
+
+    /// The fixture with staging and prod in the account `ACCOUNT_ID`.
+    fn fleet() -> Fleet {
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
+        let text = ["staging", "prod"].iter().fold(text, |t, env| {
+            t.replacen(
+                &format!("[environments.{env}]\n"),
+                &format!("[environments.{env}]\naccount = \"{ACCOUNT_ID}\"\n"),
+                1,
+            )
+        });
+        config::parse(&text).unwrap()
+    }
+
+    fn key(env: &str) -> AgentKey {
+        AgentKey::new(AccountId::new(ACCOUNT_ID), "shop", EnvName::new(env)).unwrap()
+    }
+
+    /// A store holding a canary token for staging, counting its reads.
+    struct Counting {
+        inner: FakeCredentialSource,
+        reads: AtomicUsize,
+    }
+
+    impl AgentCredentialSource for Counting {
+        fn describe(&self) -> SourceDescription {
+            self.inner.describe()
+        }
+        fn preflight(&self) -> Result<SourceDescription, Error> {
+            self.inner.preflight()
+        }
+        fn resolve(&self, key: &AgentKey) -> Result<Option<SecretValue>, Error> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.resolve(key)
+        }
+        fn store(&self, key: &AgentKey, value: &SecretValue) -> Result<(), Error> {
+            self.inner.store(key, value)
+        }
+        fn delete(&self, key: &AgentKey) -> Result<bool, Error> {
+            self.inner.delete(key)
+        }
+    }
+
+    fn installed() -> Counting {
+        let inner = FakeCredentialSource::new(AgentStore::SecretService);
+        inner
+            .store(&key("staging"), &SecretValue::new(CANARY.to_string()))
+            .unwrap();
+        Counting {
+            inner,
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn host(identity: &str) -> FakeEnv {
+        FakeEnv::new("linux")
+            .shell("/bin/bash")
+            .var_val(crate::identity::VAR, identity)
+    }
+
+    /// One sign-in preflight for `env_name` under `host`, against `resolver` and `store`.
+    fn preflight(
+        host: &FakeEnv,
+        resolver: &Resolver,
+        store: &Counting,
+        env_name: &str,
+    ) -> Result<(), Error> {
+        let kept = resolver
+            .get()
+            .and_then(crate::identity::Resolved::agent)
+            .map(crate::identity::AgentIdentity::key);
+        resolve_identity_on(
+            host,
+            &fleet(),
+            env_name,
+            &|| "shop".to_string(),
+            &|| "laptop".to_string(),
+            kept,
+            &|target: AgentTarget| resolver.resolve(host, store, || Ok(target)).map(|_| ()),
+        )
+    }
+
+    #[test]
+    fn the_agent_identity_is_read_once_across_two_op_preflights() {
+        let (h, resolver, store) = (host("agent"), Resolver::new(), installed());
+        preflight(&h, &resolver, &store, "staging").unwrap();
+        preflight(&h, &resolver, &store, "staging").unwrap();
+        assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_agent_identity_is_named_for_its_project_environment_and_machine() {
+        let (h, resolver, store) = (host("agent"), Resolver::new(), installed());
+        preflight(&h, &resolver, &store, "staging").unwrap();
+        assert_eq!(
+            crate::identity::Resolved::agent(resolver.get().unwrap()).map(|a| a.name()),
+            Some("shop-staging-agent-laptop")
+        );
+    }
+
+    #[test]
+    fn under_the_person_identity_the_preflight_reads_no_store() {
+        let resolved = Cell::new(0);
+        let h = host("person");
+        let _ = resolve_identity_on(
+            &h,
+            &fleet(),
+            "staging",
+            &|| "shop".to_string(),
+            &|| "laptop".to_string(),
+            None,
+            &|_| {
+                resolved.set(resolved.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(resolved.get(), 0);
+    }
+
+    #[test]
+    fn a_second_environment_under_the_agent_stops_with_usage() {
+        let (h, resolver, store) = (host("agent"), Resolver::new(), installed());
+        preflight(&h, &resolver, &store, "staging").unwrap();
+        let e = preflight(&h, &resolver, &store, "prod").unwrap_err();
+        assert_eq!(e.code_str(), "usage");
+    }
+
+    #[test]
+    fn an_environment_whose_account_is_no_account_id_stops_with_usage() {
+        let (h, resolver, store) = (host("agent"), Resolver::new(), installed());
+        let fl = config::parse(&crate::config::merged_text("tests/fixtures/secrets.toml")).unwrap();
+        let e = resolve_identity_on(
+            &h,
+            &fl,
+            "staging",
+            &|| "shop".to_string(),
+            &|| "laptop".to_string(),
+            None,
+            &|target| resolver.resolve(&h, &store, || Ok(target)).map(|_| ()),
+        )
+        .unwrap_err();
+        assert_eq!(e.code_str(), "usage");
+    }
+
+    #[test]
+    fn an_agent_environment_with_no_identity_installed_never_falls_back() {
+        let (h, resolver, store) = (host("agent"), Resolver::new(), installed());
+        let e = preflight(&h, &resolver, &store, "prod").unwrap_err();
+        assert_eq!(e.code_str(), "agent_identity_not_installed");
+    }
+}

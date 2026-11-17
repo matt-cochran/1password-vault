@@ -1,7 +1,7 @@
 [package]
 name = "opv"
 default-run = "opv"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2024"
 # Pinned with rust-toolchain.toml; the minimum supported Rust is that toolchain.
 rust-version = "1.100.0"
@@ -62,6 +62,10 @@ age = { version = "0.12.1", default-features = false, features = ["armor"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "alloc", "std"] }
 ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", optional = true }
+# The agent identity's OS credential store (design agent-identity §4.4, spike S1 §4): the
+# keyring-core API with one native store per platform, pinned exactly. Not the `keyring`
+# facade, whose features pick stores implicitly.
+keyring-core = "=1.0.1"
 
 [target.'cfg(unix)'.dependencies]
 # SIGINT/SIGTERM/SIGHUP/SIGQUIT forwarding to the running CLI (NR-12); libc is already in
@@ -72,7 +76,26 @@ libc = "0.2"
 # liveness of the run that left a stale directory. Already in the tree via tempfile.
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Agent identity stores on Linux (spike S1 §4): Secret Service in pure Rust (no OpenSSL, no
+# libdbus, no tokio), `secret-service` for the no-prompt `Collection::is_locked` check, and
+# keyutils for the declared volatile `@u` fallback.
+zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["rt-async-io-crypto-rust"] }
+secret-service = { version = "=5.2.0", default-features = false, features = ["rt-async-io-crypto-rust"] }
+linux-keyutils = "=0.2.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The agent identity's store on macOS: the login keychain (spike S1 §4).
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+# Already in the tree through the keychain store: opv disables keychain user interaction
+# around each call, so a locked keychain or an ACL fails instead of prompting (vet R6).
+security-framework = "=3.7.0"
+
 [target.'cfg(windows)'.dependencies]
+# The agent identity's store on Windows: generic credentials in Credential Manager. No
+# default features: `search` would pull regex for nothing (spike S1 §4).
+windows-native-keyring-store = { version = "=1.1.0", default-features = false }
+
 # Azure value hand-off and private az directory on native Windows (FR-40, SR-3, SR-4): a
 # user-only named pipe and ACL. Already in the tree (rustix, errno).
 windows-sys = { version = "0.61", features = [

@@ -53,6 +53,10 @@ pub struct Facts {
     /// The desktop app integration as far as the host alone tells (§4.3): a signed-out
     /// reply where op talks to the app is the app locked.
     pub integration: Option<crate::app::desktop_integration::DesktopIntegration>,
+    /// The agent identity this process runs as, by its service account's name (#338,
+    /// design `agent-identity.md` §5): a rejected token is then that identity's
+    /// (`agent_rejected`), never an environment variable's.
+    pub agent: Option<String>,
 }
 
 /// The outcome of looking for a vault in the machine's other accounts ([`search_vault`]).
@@ -160,6 +164,7 @@ impl Facts {
             in_app: crate::app::account::app_holds_accounts_here(),
             session_vars: super::onepassword::shell_session_vars(),
             integration: crate::app::doctor_session::host_integration(&crate::host::Host::detect()),
+            agent: crate::identity::agent_name().map(str::to_string),
             ..Self::default()
         }
     }
@@ -183,8 +188,16 @@ pub fn diagnose_with(seen: Observed, stderr: &str, ctx: &DiagnoseContext, facts:
     }
     match reading(stderr) {
         Some(Reading::AccountNotOnMachine) => account_not_on_machine(&seen, stderr, ctx, facts),
-        Some(Reading::ServiceAccountTokenRejected) => service_account_rejected(seen),
-        Some(Reading::ServiceAccountDeleted) => service_account_rejected(seen),
+        Some(Reading::ServiceAccountTokenRejected | Reading::ServiceAccountDeleted) => {
+            match &facts.agent {
+                Some(name) => Cause::AgentRejected {
+                    name: name.clone(),
+                    env: ctx.env.clone(),
+                    seen,
+                },
+                None => service_account_rejected(seen),
+            }
+        }
         Some(Reading::AllAndAccount) if facts.overridden_by(OP_ACCOUNT) => {
             Cause::CredentialRejected {
                 system: System::OnePassword,

@@ -155,3 +155,108 @@ jobs:
       with:
         node-version: '24'
     - run: node --test 'tests/*.test.ts'
+  # The agent identity's OS credential store against each platform's real store (#338,
+  # design agent-identity §4.4, spike S1). tests/credential_store_live.rs only ever stores a
+  # fixed dummy and deletes it; it is a no-op without OPV_LIVE_STORE_TEST=1.
+  credential-store-linux:
+    name: Credential store (Secret Service, kernel keyring)
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+      with:
+        toolchain: 1.100.0
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+    - name: Install a headless Secret Service
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends dbus gnome-keyring keyutils
+    - name: Build the live store test
+      shell: bash
+      run: |
+        set -euo pipefail
+        exe=$(cargo test --locked --test credential_store_live --no-run --message-format=json \
+          | jq -r 'select(.profile.test == true and .target.name == "credential_store_live") | .executable')
+        test -x "$exe"
+        mkdir -p live
+        cp "$exe" live/credential_store_live
+    - name: Kernel keyring fallback, no session bus
+      # Advisory: a CI job's (or systemd service's) session keyring does not link the user
+      # keyring @u, so the write is refused there (agent_store_unavailable, never a file).
+      # Logins (pam_keyinit) link it; the next step proves that case.
+      continue-on-error: true
+      shell: bash
+      run: |
+        keyctl show @s || true
+        keyctl show @u || true
+        env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live
+    - name: Kernel keyring fallback inside a login-like session (@u linked into @s)
+      shell: bash
+      run: |
+        keyctl session - bash -c 'keyctl link @u @s && env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=kernel_keyring live/credential_store_live'
+    - name: Secret Service, unlocked with a dummy keyring password
+      shell: bash
+      run: |
+        dbus-run-session -- sh -c '
+          printf "%s" ci-dummy-keyring-password | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+          OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=secret_service live/credential_store_live'
+    - name: Secret Service, locked collection fails as agent_store_locked within 5 s
+      shell: bash
+      run: |
+        # The login keyring from the step above, in a new session whose daemon was never
+        # unlocked: the collection exists and is locked, as at a WSL VM start.
+        test -f "$HOME/.local/share/keyrings/login.keyring"
+        dbus-run-session -- sh -c '
+          gnome-keyring-daemon --start --components=secrets >/dev/null
+          OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_LOCKED=1 timeout 30 live/credential_store_live'
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: credential-store-live-linux
+        path: live/credential_store_live
+        retention-days: 1
+  credential-store-native:
+    name: Credential store (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: macos-latest
+          store: macos_keychain
+        - os: windows-latest
+          store: windows_credential_manager
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+      with:
+        toolchain: 1.100.0
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+    - name: Round-trip the dummy through the platform store
+      run: cargo test --locked --test credential_store_live
+      env:
+        OPV_LIVE_STORE_TEST: '1'
+        OPV_LIVE_STORE_EXPECT: ${{ matrix.store }}
+  credential-store-wsl:
+    name: Credential store (WSL interop to Credential Manager)
+    needs: credential-store-linux
+    runs-on: windows-latest
+    steps:
+    # WSL 1: hosted Windows runners have no nested virtualization for WSL 2. The interop
+    # path (powershell.exe from Linux, value on stdin) is the same in both.
+    - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+      with:
+        distribution: Ubuntu-24.04
+        wsl-version: 1
+        use-cache: 'true'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: credential-store-live-linux
+    - name: Round-trip the dummy through Credential Manager from WSL
+      shell: wsl-bash {0}
+      run: |
+        set -eu
+        chmod +x ./credential_store_live
+        # Warm up interop: a fresh runner's first powershell.exe from WSL can take longer than
+        # opv's 15 s store bound, which the test would report as agent_store_locked.
+        for i in 1 2; do (cd /mnt/c && timeout 120 powershell.exe -NoProfile -NonInteractive -Command '[void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]; "warm"') || true; done
+        OPV_LIVE_STORE_TEST=1 OPV_LIVE_STORE_EXPECT=windows_credential_manager ./credential_store_live
