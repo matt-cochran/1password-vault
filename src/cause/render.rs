@@ -2357,6 +2357,39 @@ impl Cause {
                 command.0,
                 principal_words(identity)
             ),
+            // agent identity (#338)
+            AgentIdentityNotInstalled { env } => {
+                format!("no agent identity for {env} on this machine")
+            }
+            AgentIdentityExists { env, name } => {
+                format!("agent identity {name} for {env} is already installed on this machine")
+            }
+            AgentRejected { name, env, seen: _ } => {
+                let of_env = env
+                    .as_ref()
+                    .map(|e| format!(" for {e}"))
+                    .unwrap_or_default();
+                format!("agent identity {name}{of_env} was rejected by 1Password")
+            }
+            AgentStoreUnavailable { store } => format!(
+                "no credential store on this machine can hold the agent identity's token: {} is not usable",
+                store.label()
+            ),
+            AgentStoreLocked { store } => format!(
+                "{} is locked or would prompt, and opv never waits on its prompt",
+                store.label()
+            ),
+            AgentStoreVolatile { store, env } => {
+                let of_env = env
+                    .as_ref()
+                    .map(|e| format!(" for {e}"))
+                    .unwrap_or_default();
+                format!(
+                    "the agent identity's token{of_env} is in {}, which WSL clears when it stops; unattended runs will break",
+                    store.label()
+                )
+            }
+            // end agent identity
             CredentialRejected {
                 system,
                 credential,
@@ -4002,6 +4035,63 @@ impl Cause {
                     ),
                 }
             }
+            // agent identity (#338): a person's own step is never "set OPV_IDENTITY=person"; the
+            // agent asks the person to run it in their own terminal (design §5, vet R10).
+            AgentIdentityNotInstalled { env } => plan(
+                inspect(
+                    "ask the person to create it in their own terminal; opv never falls back to their session",
+                ),
+                Next::Handoff(cmd(&["access"], &[env.as_str(), "--create", "--agent"])),
+            ),
+            AgentIdentityExists { env, name: _ } => plan(
+                None,
+                Next::Handoff(cmd(&["access"], &[env.as_str(), "--rotate", "--agent"])),
+            ),
+            AgentRejected { name, env, seen: _ } => plan(
+                inspect(format!(
+                    "1Password no longer accepts {name} (revoked, deleted or expired): ask the person to rotate it in their own terminal"
+                )),
+                Next::Handoff(match env {
+                    Some(e) => cmd(&["access"], &[e.as_str(), "--rotate", "--agent"]),
+                    None => cmd(&["access"], &["--rotate", "--agent"]),
+                }),
+            ),
+            AgentStoreUnavailable { store } => {
+                let how = match store {
+                    AgentStore::SecretService => {
+                        "start a Secret Service for your user (such as gnome-keyring)".to_string()
+                    }
+                    other => format!("make {} usable for your user", other.label()),
+                };
+                plan(
+                    Some((
+                        Action::StoreSetup { store: *store },
+                        format!("{how}; opv never keeps the token in a file"),
+                    )),
+                    Next::Rerun,
+                )
+            }
+            AgentStoreLocked { store } => plan(
+                Some((
+                    Action::StoreSetup { store: *store },
+                    format!("unlock {}, then run again", store.label()),
+                )),
+                Next::Rerun,
+            ),
+            AgentStoreVolatile { store, env } => plan(
+                Some((
+                    Action::StoreSetup { store: *store },
+                    format!(
+                        "keep the token in a store that survives a WSL stop, such as a Secret Service login keyring, not {}",
+                        store.label()
+                    ),
+                )),
+                Next::Check(match env {
+                    Some(e) => cmd(&["doctor"], &["--env", e.as_str()]),
+                    None => cmd(&["doctor"], &[]),
+                }),
+            ),
+            // end agent identity
             NeedsOwnSession {
                 command: _,
                 identity,

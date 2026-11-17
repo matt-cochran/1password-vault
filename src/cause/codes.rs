@@ -82,6 +82,9 @@ pub fn table() -> Vec<CodeRow> {
 /// `docs/design/error-catalog.md` §6.3.
 pub const ASSISTANT_READS_AFTER_PERSON: &[&str] = &[
     "account_ambiguous",
+    "agent_store_locked",
+    "agent_store_unavailable",
+    "agent_store_volatile",
     "choice_required",
     "concurrent_edit",
     "confirm_mismatch",
@@ -189,6 +192,24 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "own_session_required" => {
             "the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials)"
+        }
+        "agent_identity_not_installed" => {
+            "OPV_IDENTITY=agent selected the agent identity, but this environment has none on this machine; opv never falls back to the person's session, and a person creates one with opv access <env> --create --agent"
+        }
+        "agent_identity_exists" => {
+            "this environment already has an agent identity on this machine; a person replaces it with opv access <env> --rotate --agent"
+        }
+        "agent_rejected" => {
+            "1Password rejected the agent identity's token (revoked, deleted or expired); a person rotates it with opv access <env> --rotate --agent"
+        }
+        "agent_store_unavailable" => {
+            "no OS credential store on this machine can hold the agent identity's token; opv never falls back to a file"
+        }
+        "agent_store_locked" => {
+            "the OS credential store is locked or would prompt, and opv never waits on a prompt; a person unlocks it"
+        }
+        "agent_store_volatile" => {
+            "the agent identity's token is in a store WSL clears when it stops, so unattended runs will break"
         }
         "deploy_credentials_failed" => {
             "the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed"
@@ -714,6 +735,32 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 var: VarName::new("OP_SERVICE_ACCOUNT_TOKEN"),
             },
         },
+        // agent identity (#338)
+        AgentIdentityNotInstalled {
+            env: EnvName::new("env-dev"),
+        },
+        AgentIdentityExists {
+            env: EnvName::new("env-dev"),
+            name: "shop-env-dev-agent-laptop".into(),
+        },
+        AgentRejected {
+            name: "shop-env-dev-agent-laptop".into(),
+            env: Some(EnvName::new("env-dev")),
+            seen: seen(Principal::ShellToken {
+                var: VarName::new("OP_SERVICE_ACCOUNT_TOKEN"),
+            }),
+        },
+        AgentStoreUnavailable {
+            store: AgentStore::SecretService,
+        },
+        AgentStoreLocked {
+            store: AgentStore::SecretService,
+        },
+        AgentStoreVolatile {
+            store: AgentStore::KernelKeyring,
+            env: Some(EnvName::new("env-dev")),
+        },
+        // end agent identity
         CredentialRejected {
             system: System::Fly,
             credential: CredentialRef::DeployCredentials {

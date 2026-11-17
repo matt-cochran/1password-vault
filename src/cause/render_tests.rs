@@ -1032,6 +1032,50 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["deploy/prod-api.opv-sealed", "6", "7"],
         ),
         // end sealed target
+        // agent identity (#338)
+        (
+            AgentIdentityNotInstalled {
+                env: EnvName::new("env-dev"),
+            },
+            vec!["env-dev"],
+        ),
+        (
+            AgentIdentityExists {
+                env: EnvName::new("env-dev"),
+                name: "agent-xyz".into(),
+            },
+            vec!["env-dev", "agent-xyz"],
+        ),
+        (
+            AgentRejected {
+                name: "agent-xyz".into(),
+                env: Some(EnvName::new("env-dev")),
+                seen: seen(Principal::ShellToken {
+                    var: VarName::new("OP_SERVICE_ACCOUNT_TOKEN"),
+                }),
+            },
+            vec!["agent-xyz", "env-dev"],
+        ),
+        (
+            AgentStoreUnavailable {
+                store: AgentStore::SecretService,
+            },
+            vec!["Secret Service"],
+        ),
+        (
+            AgentStoreLocked {
+                store: AgentStore::SecretService,
+            },
+            vec!["Secret Service"],
+        ),
+        (
+            AgentStoreVolatile {
+                store: AgentStore::KernelKeyring,
+                env: Some(EnvName::new("env-dev")),
+            },
+            vec!["kernel keyring", "env-dev"],
+        ),
+        // end agent identity
     ]
 }
 
@@ -1138,10 +1182,17 @@ fn ordinal(c: &Cause) -> usize {
         // sealed target (#271)
         SealedRefused { .. } => 89,
         FederatedRefused { .. } => 91,
+        // agent identity (#338)
+        AgentIdentityNotInstalled { .. } => 93,
+        AgentIdentityExists { .. } => 94,
+        AgentRejected { .. } => 95,
+        AgentStoreUnavailable { .. } => 96,
+        AgentStoreLocked { .. } => 97,
+        AgentStoreVolatile { .. } => 98,
     }
 }
 
-const VARIANTS: usize = 93;
+const VARIANTS: usize = 99;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -5715,4 +5766,216 @@ fn a_federated_identity_mismatch_names_the_configured_client() {
         client_id: "client-xyz".into(),
     };
     assert!(crate::error::report(&c.into()).contains("client-id client-xyz"));
+}
+
+// --- agent identity (#338, design agent-identity.md §5, §7): one assertion each ------------
+
+fn not_installed() -> Cause {
+    Cause::AgentIdentityNotInstalled {
+        env: EnvName::new("dev"),
+    }
+}
+
+fn agent_rejected(env: Option<&str>) -> Cause {
+    Cause::AgentRejected {
+        name: "shop-dev-agent-laptop".into(),
+        env: env.map(EnvName::new),
+        seen: seen(Principal::ShellToken {
+            var: VarName::new("OP_SERVICE_ACCOUNT_TOKEN"),
+        }),
+    }
+}
+
+fn agent_run() -> Invocation {
+    cli(&["opv", "run", "dev"])
+}
+
+/// An assistant's run: no terminal of its own.
+fn assistant_run() -> Situation {
+    Situation {
+        terminal: false,
+        ..person_at_terminal()
+    }
+}
+
+#[test]
+fn a_missing_agent_identity_is_an_authentication_stop() {
+    assert_eq!(not_installed().exit_code(), 7);
+}
+
+#[test]
+fn a_missing_agent_identity_needs_a_person() {
+    assert!(not_installed().human_required_in(&agent_run(), &person_at_terminal()));
+}
+
+#[test]
+fn a_missing_agent_identity_nexts_the_persons_create_command() {
+    assert_eq!(
+        next_in(&not_installed(), &agent_run()),
+        "opv access dev --create --agent"
+    );
+}
+
+#[test]
+fn a_missing_agent_identity_asks_the_person_to_create_it_in_their_own_terminal() {
+    assert_eq!(
+        not_installed().do_text_in(&agent_run(), &person_at_terminal()),
+        Some(
+            "ask the person to create it in their own terminal; opv never falls back to their session"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn an_assistant_without_a_terminal_hands_the_create_to_the_person() {
+    let next = not_installed().step_in(&agent_run(), &assistant_run()).1;
+    assert_eq!(next_value(&next, &agent_run())["actor"], "person");
+}
+
+#[test]
+fn an_installed_agent_identity_is_a_policy_refusal() {
+    let c = Cause::AgentIdentityExists {
+        env: EnvName::new("dev"),
+        name: "shop-dev-agent-laptop".into(),
+    };
+    assert_eq!(c.exit_code(), 6);
+}
+
+#[test]
+fn an_installed_agent_identity_nexts_its_rotation() {
+    let c = Cause::AgentIdentityExists {
+        env: EnvName::new("dev"),
+        name: "shop-dev-agent-laptop".into(),
+    };
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "access", "dev", "--create", "--agent"])),
+        "opv access dev --rotate --agent"
+    );
+}
+
+#[test]
+fn a_rejected_agent_identity_is_in_the_auth_category() {
+    assert_eq!(
+        document(&agent_rejected(Some("dev")), None, &agent_run(), false)["category"],
+        "auth"
+    );
+}
+
+#[test]
+fn a_rejected_agent_identity_nexts_the_rotation_of_its_environment() {
+    assert_eq!(
+        next_in(&agent_rejected(Some("dev")), &agent_run()),
+        "opv access dev --rotate --agent"
+    );
+}
+
+#[test]
+fn a_rejected_agent_identity_without_an_environment_nexts_the_rotation_of_all() {
+    assert_eq!(
+        next_in(&agent_rejected(None), &agent_run()),
+        "opv access --rotate --agent"
+    );
+}
+
+#[test]
+fn no_usable_credential_store_is_a_dependency_failure() {
+    let c = Cause::AgentStoreUnavailable {
+        store: AgentStore::SecretService,
+    };
+    assert_eq!(document(&c, None, &agent_run(), false)["category"], "dependency");
+}
+
+#[test]
+fn no_usable_credential_store_never_falls_back_to_a_file() {
+    let c = Cause::AgentStoreUnavailable {
+        store: AgentStore::SecretService,
+    };
+    assert!(
+        c.do_text(&agent_run())
+            .is_some_and(|d| d.ends_with("opv never keeps the token in a file"))
+    );
+}
+
+#[test]
+fn no_usable_credential_store_needs_a_person() {
+    let c = Cause::AgentStoreUnavailable {
+        store: AgentStore::SecretService,
+    };
+    assert!(c.human_required_in(&agent_run(), &person_at_terminal()));
+}
+
+#[test]
+fn a_locked_credential_store_is_an_authentication_stop() {
+    let c = Cause::AgentStoreLocked {
+        store: AgentStore::SecretService,
+    };
+    assert_eq!(c.exit_code(), 7);
+}
+
+#[test]
+fn a_locked_credential_store_says_to_unlock_it_and_run_again() {
+    let c = Cause::AgentStoreLocked {
+        store: AgentStore::SecretService,
+    };
+    assert_eq!(
+        c.do_text_in(&agent_run(), &person_at_terminal()),
+        Some("unlock the login keyring (Secret Service), then run again".into())
+    );
+}
+
+#[test]
+fn a_locked_credential_store_needs_a_person() {
+    let c = Cause::AgentStoreLocked {
+        store: AgentStore::SecretService,
+    };
+    assert!(c.human_required_in(&agent_run(), &person_at_terminal()));
+}
+
+#[test]
+fn a_volatile_credential_store_is_a_dependency_failure() {
+    let c = Cause::AgentStoreVolatile {
+        store: AgentStore::KernelKeyring,
+        env: Some(EnvName::new("dev")),
+    };
+    assert_eq!(c.exit_code(), 3);
+}
+
+#[test]
+fn a_volatile_credential_store_nexts_the_doctor_of_its_environment() {
+    let c = Cause::AgentStoreVolatile {
+        store: AgentStore::KernelKeyring,
+        env: Some(EnvName::new("dev")),
+    };
+    assert_eq!(next_in(&c, &agent_run()), "opv doctor --env dev");
+}
+
+/// Design §5 and vet R10: no step, for any cause, tells anyone to pose as the person.
+#[test]
+fn no_step_suggests_opv_identity_person() {
+    let bad: Vec<&str> = super::super::codes::examples()
+        .iter()
+        .filter(|c| {
+            let text = render_text(c, None, &agent_run(), false, true, false);
+            text.contains("OPV_IDENTITY=person")
+        })
+        .map(Cause::code)
+        .collect();
+    assert_eq!(bad, Vec::<&str>::new());
+}
+
+/// ADR-0001 R1: an agent cause names an identity and a store, never a token, a length or a
+/// digest; its document holds only the names the fixtures gave it.
+#[test]
+fn no_agent_cause_document_holds_a_token_shaped_word() {
+    let bad: Vec<&str> = causes()
+        .iter()
+        .filter(|c| c.code().starts_with("agent_"))
+        .filter(|c| {
+            let doc = document(c, None, &agent_run(), true).to_string();
+            doc.contains("ops_") || doc.contains("sha256") || doc.contains("length")
+        })
+        .map(Cause::code)
+        .collect();
+    assert_eq!(bad, Vec::<&str>::new());
 }
