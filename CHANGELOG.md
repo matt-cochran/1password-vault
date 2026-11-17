@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A project's `.opv` account applies under the agent identity** (found by the e2e canaries before release). Configuration discovery skipped the `.opv` account whenever any `op` credential was selected, so every run as the agent stopped with `usage` (no account ID). It now applies the `.opv` account under the agent identity too, because the store entry is keyed by it. A token in the environment still decides the account by itself.
+- **`opv run` under a token identity leaves personal keys out with one note, instead of failing** (the agent identity, a CI service account or Connect). 1Password never grants a service account a Private vault, so such a run used to stop with a misleading "personal vault was not found". It now names the personal keys it did not inject, with no value, and runs with the shared keys. This changes CI runs too.
+- **Under the agent identity, a pending deploy names CI's deploy job or the person.** `plan`'s `Next:` and `status`'s pending-deploy line no longer hand the assistant `opv sync`, which it is refused. In `plan --json`, `next` is then a step object `{kind, actor, command}` (the shape `error.next` uses), with `actor: "person"`; every other run keeps the plain command string.
+- **A rotation's successor name is unique within a day** (`<name>-YYYYMMDD-HHMM`, then `-2`, `-3`, …), for agent identities and CI readers alike; a second rotation on the same day reused the name.
 
 ## [0.21.0] - 2026-11-17
 
