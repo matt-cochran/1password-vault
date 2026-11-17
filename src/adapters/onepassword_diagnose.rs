@@ -164,6 +164,7 @@ impl Facts {
             in_app: crate::app::account::app_holds_accounts_here(),
             session_vars: super::onepassword::shell_session_vars(),
             integration: crate::app::doctor_session::host_integration(&crate::host::Host::detect()),
+            agent: crate::identity::agent_name().map(str::to_string),
             ..Self::default()
         }
     }

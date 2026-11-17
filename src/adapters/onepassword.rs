@@ -652,8 +652,16 @@ fn session_cause_with(
 /// The service-account or Connect credential in effect was rejected, or 1Password could
 /// not be reached with it (04.11): both Connect variables are named.
 fn credential_rejected(c: OpCredential, seen: Observed) -> Cause {
+    // The agent identity's token (#338): named by its service account, never a variable.
+    if let (OpCredential::Agent, Some(name)) = (c, crate::identity::agent_name()) {
+        return Cause::AgentRejected {
+            name: name.to_string(),
+            env: None,
+            seen,
+        };
+    }
     let credential = match c {
-        OpCredential::ServiceAccount => CredentialRef::ServiceAccountToken {
+        OpCredential::ServiceAccount | OpCredential::Agent => CredentialRef::ServiceAccountToken {
             var: VarName::new(c.var()),
         },
         OpCredential::Connect => CredentialRef::Connect {

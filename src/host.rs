@@ -16,7 +16,8 @@
 //! 4. Non-interactive credentials, by name only: 1Password `OP_SERVICE_ACCOUNT_TOKEN`, or
 //!    Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`); each provider's own
 //!    (`Provider::credential_vars`, e.g. `FLY_API_TOKEN`). With one set, failures are never
-//!    answered with an interactive sign-in command.
+//!    answered with an interactive sign-in command. Without one, `OPV_IDENTITY=agent` (or an
+//!    unknown value) is the agent identity, [`OpCredential::Agent`] ([`crate::identity`]).
 //!
 //! Credential variables are tested by name only; their values are never read (SR-1).
 //! Messages are text, never prompts (FR-9). Detection runs only on failure paths.
@@ -688,13 +689,18 @@ pub fn is_basic_env(name: &str) -> bool {
         || (cfg!(windows) && ENV_BASICS.iter().any(|b| b.eq_ignore_ascii_case(name)))
 }
 
-/// A non-interactive 1Password credential in the environment (by name; value never read).
+/// A non-interactive 1Password credential for this run: one in the environment (by name;
+/// value never read), or the agent identity `OPV_IDENTITY=agent` selects (#338).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCredential {
     /// `OP_SERVICE_ACCOUNT_TOKEN`.
     ServiceAccount,
     /// `OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`.
     Connect,
+    /// The read-only agent identity (design `agent-identity.md` §5): a service account whose
+    /// token comes from this machine's credential store ([`crate::identity`]), never from the
+    /// environment. Every refusal treats it as a service account.
+    Agent,
 }
 
 impl OpCredential {
@@ -703,6 +709,8 @@ impl OpCredential {
         match self {
             OpCredential::ServiceAccount => "OP_SERVICE_ACCOUNT_TOKEN",
             OpCredential::Connect => "OP_CONNECT_TOKEN",
+            // The variable op reads it from; opv sets it on op's call alone (slice S6).
+            OpCredential::Agent => "OP_SERVICE_ACCOUNT_TOKEN",
         }
     }
 
@@ -711,6 +719,7 @@ impl OpCredential {
         match self {
             OpCredential::ServiceAccount => "service-account",
             OpCredential::Connect => "Connect",
+            OpCredential::Agent => "agent identity",
         }
     }
 }
@@ -721,7 +730,8 @@ pub struct Host {
     pub platform: Platform,
     pub shell: Shell,
     pub ci: bool,
-    /// A non-interactive 1Password credential, if set (service account wins over Connect).
+    /// A non-interactive 1Password credential, if set (service account wins over Connect,
+    /// and both over the agent identity, design `agent-identity.md` §5).
     pub op_credential: Option<OpCredential>,
     /// Stdin and stdout are a terminal: `opv login` can sign in here (P7).
     pub interactive: bool,
@@ -801,13 +811,16 @@ impl Host {
             Platform::Windows => Shell::PowerShell,
             _ => Shell::Posix,
         });
-        let op_credential = if env.is_set("OP_SERVICE_ACCOUNT_TOKEN") {
-            Some(OpCredential::ServiceAccount)
-        } else if env.is_set("OP_CONNECT_HOST") || env.is_set("OP_CONNECT_TOKEN") {
-            Some(OpCredential::Connect)
-        } else {
-            None
-        };
+        // Rule 1, then rule 3 (#338, design `agent-identity.md` §5): `OPV_IDENTITY=agent`,
+        // or a value `identity::choose` refuses, is the agent identity here, so no reader ever
+        // takes such a run for a person's session (vet R4).
+        let op_credential = crate::identity::env_token(env).or_else(|| {
+            matches!(
+                crate::identity::asked(env),
+                crate::identity::Asked::Agent | crate::identity::Asked::Unknown
+            )
+            .then_some(OpCredential::Agent)
+        });
         let tokens = registry::credential_vars()
             .iter()
             .enumerate()
