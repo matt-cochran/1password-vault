@@ -128,10 +128,8 @@ rec "person_vault_types: $(op vault list "${acct_args[@]}" --format json 2>/dev/
 rec "person_private_vault_names: $(op vault list "${acct_args[@]}" --format json 2>/dev/null | jq -r '[.[] | select((.type // "") | test("PERSONAL|PRIVATE";"i")) | .name] | join(", ")' 2>/dev/null || echo unknown)"
 
 # Create. --raw prints only the token; it goes straight into the variable.
-set +e
-token="$(op service-account create "$name" "${acct_args[@]}" --vault "$vault:read_items" --expires-in 1h --raw 2>/dev/null)"
-rc=$?
-set -e
+rc=0
+token="$(op service-account create "$name" "${acct_args[@]}" --vault "$vault:read_items" --expires-in 1h --raw 2>/dev/null)" || rc=$?
 if [ $rc -ne 0 ] || [ -z "$token" ]; then
   token=""
   rec "create: FAILED (exit $rc). Nothing was stored. Check in the web app whether $name exists."
@@ -140,20 +138,22 @@ fi
 rec "create: ok (expires in 1h)"
 
 # Facts under the token only.
-set +e
-w="$(op_sa whoami --format json 2>&1)"; rc=$?
-set -e
+rc=0
+w="$(op_sa whoami --format json 2>&1)" || rc=$?
 if [ $rc -eq 0 ]; then
   rec "sa_whoami_user_type: $(printf '%s' "$w" | jq -r '.user_type // .type // "unknown"')"
-  rec "sa_whoami_account_uuid: $(printf '%s' "$w" | jq -r '.account_uuid // "unknown"')"
-  rec "sa_whoami_url: $(printf '%s' "$w" | jq -r '.url // "unknown"')"
+  # The account UUID and sign-in URL are never recorded (the results file is committed);
+  # only whether they equal the person's.
+  pw="$(op whoami "${acct_args[@]}" --format json 2>/dev/null || true)"
+  same() { [ -n "$1" ] && [ "$1" = "$2" ] && echo yes || echo no; }
+  rec "sa_whoami_account_uuid_equals_person: $(same "$(printf '%s' "$w" | jq -r '.account_uuid // empty')" "$(printf '%s' "$pw" | jq -r '.account_uuid // empty')")"
+  rec "sa_whoami_url_equals_person: $(same "$(printf '%s' "$w" | jq -r '.url // empty')" "$(printf '%s' "$pw" | jq -r '.url // empty')")"
 else
   rec "sa_whoami: FAILED (exit $rc): $(printf '%s' "$w" | head -n 2)"
 fi
 
-set +e
-vl="$(op_sa vault list --format json 2>&1)"; rc=$?
-set -e
+rc=0
+vl="$(op_sa vault list --format json 2>&1)" || rc=$?
 if [ $rc -eq 0 ]; then
   rec "sa_vault_count: $(printf '%s' "$vl" | jq 'length')"
   rec "sa_vault_names: $(printf '%s' "$vl" | jq -r '[.[].name] | join(", ")')"
@@ -162,34 +162,27 @@ else
 fi
 
 # Read-only proof: an empty secure note, no value in argv.
-set +e
-ic="$(op_sa item create --vault "$vault" --category "Secure Note" --title "opv-spike-338-readonly-probe" 2>&1)"; rc=$?
-set -e
+rc=0
+ic="$(op_sa item create --vault "$vault" --category "Secure Note" --title "opv-spike-338-readonly-probe" 2>&1)" || rc=$?
 if [ $rc -ne 0 ]; then
   rec "sa_item_create: refused (exit $rc): $(printf '%s' "$ic" | grep -v '^$' | head -n 2 | tr '\n' ' ')"
 else
   rec "sa_item_create: NOT REFUSED. An empty note opv-spike-338-readonly-probe was created in $vault; delete it."
 fi
 
-set +e
-rl="$(op_sa service-account ratelimit 2>&1)"; rc=$?
-set -e
+rc=0
+rl="$(op_sa service-account ratelimit 2>&1)" || rc=$?
 rec "sa_ratelimit_no_argument: exit $rc"
 while IFS= read -r line; do rec "  ratelimit| $line"; done <<< "$rl"
-set +e
-rlj="$(op_sa service-account ratelimit --format json 2>&1)"; rc=$?
-set -e
+rc=0
+rlj="$(op_sa service-account ratelimit --format json 2>&1)" || rc=$?
 rec "sa_ratelimit_json: exit $rc, keys: $(printf '%s' "$rlj" | jq -r '[.[0] | keys[]] | join(",")' 2>/dev/null || echo n/a)"
 
 # Candidate store: Windows Credential Manager through interop. Value over stdin only.
-set +e
-st="$(printf '%s' "$token" | ps_run "\$v=[Console]::In.ReadToEnd(); $PS_LOAD"' $pv.Add((New-Object Windows.Security.Credentials.PasswordCredential("'"$WIN_RESOURCE"'","'"$WIN_USER"'",$v))); Remove-Variable v; "stored"' 2>&1)"
-set -e
+st="$(printf '%s' "$token" | ps_run "\$v=[Console]::In.ReadToEnd(); $PS_LOAD"' $pv.Add((New-Object Windows.Security.Credentials.PasswordCredential("'"$WIN_RESOURCE"'","'"$WIN_USER"'",$v))); Remove-Variable v; "stored"' 2>&1)" || true
 rec "windows_credential_manager_store: $(printf '%s' "$st" | tail -n 1)"
 t0=$(date +%s%N)
-set +e
-back="$(ps_run "$PS_LOAD"' $c=$pv.Retrieve("'"$WIN_RESOURCE"'","'"$WIN_USER"'"); $c.RetrievePassword(); [Console]::Out.Write($c.Password)' 2>/dev/null)"
-set -e
+back="$(ps_run "$PS_LOAD"' $c=$pv.Retrieve("'"$WIN_RESOURCE"'","'"$WIN_USER"'"); $c.RetrievePassword(); [Console]::Out.Write($c.Password)' 2>/dev/null)" || true
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 if [ -n "$back" ] && [ "$back" = "$token" ]; then rec "windows_credential_manager_readback: match (${ms} ms)"; else rec "windows_credential_manager_readback: no match (${ms} ms)"; fi
 back=""; unset back

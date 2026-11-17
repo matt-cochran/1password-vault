@@ -5,16 +5,18 @@ whether slice S19 exists. Scope: evidence, not product code. Every output below 
 the only value stored or read was the fixed dummy `spike-dummy-not-a-secret`, and the probes
 print outcomes (`stored`, `present+match`, `absent`, `timeout`), never a value.
 
-The owner part, which needs a 1Password session, is `docs/design/spike-338-owner.sh`. Its
-results land in `docs/design/spike-338-owner-results.txt` and are folded in here afterwards
-(§6).
+The owner part, which needs a 1Password session, is `docs/design/spike-338-owner.sh`. The
+owner ran its first half on 2026-11-17. Its results are in
+`docs/design/spike-338-owner-results.txt` (the account UUID and URL are redacted) and are folded
+in below (§6). The `--after-reboot` half is **still pending**.
 
 ## 1. Summary
 
 | | Result |
 |---|---|
+| Read-only identity | **Verified by the owner run**: type `SERVICE_ACCOUNT`, exactly 1 vault visible, `op item create` refused with exit 12, "(101) You do not have permission to perform this action". |
 | WSL store | **Persistent is possible, but not through any Linux-side store.** Windows Credential Manager, reached through WSL interop, stores and reads headless in 0.6 to 1.7 s and lives outside the WSL VM. The kernel keyring is volatile on WSL (RAM only, and the WSL kernel has no persistent keyrings). Secret Service has no provider on stock WSL, and a self-hosted one comes up **locked** at every VM start. |
-| Recommendation | **Persistent: Windows Credential Manager through interop is the WSL store. Drop S19**, subject to the owner's reboot check (§6). Kernel `@u` stays as the fallback, with doctor `FAIL agent_store_volatile`, only when interop is off. |
+| Recommendation | **Persistent: Windows Credential Manager through interop is the WSL store. Drop S19**, **conditional on the owner's pending reboot check** (§6). The store and readback under a real token are verified (match, 656 ms). Kernel `@u` stays as the fallback, with doctor `FAIL agent_store_volatile`, only when interop is off. |
 | Crate (S4) | `keyring-core =1.0.1` with `apple-native-keyring-store =1.0.2` (`keychain`), `windows-native-keyring-store =1.1.0` (no default features), `zbus-secret-service-keyring-store =1.0.1` (`rt-async-io-crypto-rust`) plus `secret-service =5.2.0` for the lock check, and `linux-keyutils =0.2.5` directly. Not the `keyring` 4.2.0 facade, and not `linux-keyutils-keyring-store`. |
 | Non-interactive with timeout | keyutils: verified (syscalls only, 0 ms). Secret Service: verified **that it hangs** without a bound and that a bound plus a lock pre-check work. WSL to Windows Credential Manager: verified (child process with `timeout`). Native Windows and macOS: still unknown here (S4 on CI). |
 
@@ -47,8 +49,8 @@ against `oo7-daemon 0.7.1` (built from crates.io) on a **private** `dbus-daemon`
 | # | Item | Status | Evidence |
 |---|---|---|---|
 | 1 | `keyring` crate: backends, versions, non-interactive mode, headless/WSL | **Verified** (Linux, WSL); macOS and Windows native **still unknown** at run time | §4, §5 |
-| 2 | Kernel keyring and Secret Service survive a WSL VM stop; `@u` survives the uid's last process | Kernel keyring: **refuted** (does not survive; docs plus kernel config; owner reboot run confirms). Secret Service: survives on disk but comes back **locked** (verified by daemon restart). `@u` and last process: **refuted** by `user-keyring(7)`; not reproduced, since that would kill this session | §5.1, §5.2 |
-| 3 | `op service-account ratelimit` under a token: argument, output | Argument: **verified optional** (help: `ratelimit [{ <serviceAccountName> \| <serviceAccountID> }]`). Output shape: documented as `TYPE ACTION LIMIT USED REMAINING RESET`; the run under a token is in the owner script | §7 |
+| 2 | Kernel keyring and Secret Service survive a WSL VM stop; `@u` survives the uid's last process | Kernel keyring: **refuted** (does not survive; docs plus kernel config). The owner's `@u` control was skipped because keyctl is not installed, so this rests on the docs and the kernel config. Windows Credential Manager survival: **pending** (the reboot check). Secret Service: survives on disk but comes back **locked** (verified by daemon restart). `@u` and last process: **refuted** by `user-keyring(7)`; not reproduced, since that would kill this session | §5.1, §5.2 |
+| 3 | `op service-account ratelimit` under a token: argument, output | **Verified** (owner run). With no argument it exits 0 and reports the token in `OP_SERVICE_ACCOUNT_TOKEN`. Columns are `TYPE ACTION LIMIT USED REMAINING RESET`. Rows: `token write`, `token read` and `account read_write`. `--format json` keys: `action, limit, remaining, reset, type, used`. `reset` is relative text ("59 minutes from now"), not a timestamp | §6, §7 |
 | 4 | Service-account count limit per plan, and op's wording | **Partly verified**: 1Password docs say "You can create up to 100 service accounts", with no per-plan split. op's wording at the limit: **still unknown** | §7 |
 | 5 | Activity reporting on every plan (FM7) | **Refuted as stated**: "Most reports are only available in 1Password Business"; Teams can trial reports and the audit log. Service-account usage reports are not promised on Teams or Families. FM7 detection must not rely on it | §7 |
 | 6 | `op` accepts a token by any channel other than the env var | **Refuted**: only `OP_SERVICE_ACCOUNT_TOKEN`. No flag, file or fd channel (help plus binary strings) | §7 |
@@ -253,8 +255,46 @@ What changes in the design if the owner accepts this:
 `windows_credential_manager_entry: present`. If it shows `absent`, the answer is volatile, S19
 stays, and §5.2's lock behaviour decides the Secret Service documentation.
 
-Owner results: *(pending: fold in `spike-338-owner-results.txt` after the owner runs the
-script)*.
+### 6.1 Owner run, first half (2026-11-17, names only)
+
+| Fact | Result |
+|---|---|
+| Service account | `opv-spike-338-20261117-1106`, read_items on vault `opv-spike-338`, expires in 1 h |
+| `op whoami` under the token | `user_type: SERVICE_ACCOUNT`, account `<account-uuid>` (redacted) |
+| `op vault list` under the token | 1 vault: `opv-spike-338` (exactly the granted set, as the binding check in §4.3 expects) |
+| `op item create` under the token | **refused**, exit 12: "(101) You do not have permission to perform this action". The read-only grant holds at the server. |
+| `op service-account ratelimit` (no argument) | exit 0. `token write` limit 100 per hour (1 used: the refused create still counted), `token read` limit 1000 per hour (2 used), `account read_write` limit 1000, reset about 13 h away (daily window, 8 used) |
+| Windows Credential Manager through interop, real token | `stored`; readback **match** in 656 ms |
+| `@u` control | skipped (keyctl not installed) |
+| Private vault addressing | unresolved: `op vault list --format json` carries no `type` field (`person_vault_types: unknown=91`) |
+
+**Rate limits (vet R7).** These limits match the documented tier for 1Password, Families and
+Teams (§7). The binding number is the **account-wide 1000 requests per day, reads and writes
+combined**. Every token on the account shares it: the agent's identity, CI's reader and deploy
+identities, and every other service account. An agent loop that runs `opv run -- cargo test`
+costs a few `op` reads per iteration, so a few hundred iterations in a day exhaust the budget
+that CI needs. The hourly per-token read limit (1000) is not the constraint. Consequences for
+S10 and S11: the doctor and `ready` row must read the `account read_write` row, not only the
+`token` rows, and warn on remaining against the account limit. The docs (S13) should state the
+shared daily budget plainly. A refused write counts against the token's write limit, so a
+refusal loop also has a cost.
+
+**Private vault addressing is moot if S19 is dropped.** Only S19's durable copy (option P) uses
+the Private vault. If the reboot check confirms the Windows store, nothing in 0.22.0 addresses
+the Private vault, and the question closes with S19. If S19 survives, it needs another way to
+find the vault: by the `--vault` default of `op item create` (Private, Personal or Employee by
+account type), or from the fields of `op vault get`. The owner script did not probe this.
+
+### 6.2 Reboot check: PENDING
+
+> **Placeholder.** Not run yet. The owner runs `wsl --shutdown` from Windows, opens a new WSL
+> terminal, and runs `bash docs/design/spike-338-owner.sh --after-reboot`. Record here:
+> `windows_credential_manager_entry: present|absent` and `uptime_since` (it must be later than
+> 2026-11-16 12:44:21, the first run's boot).
+>
+> - **present:** the recommendation stands. The WSL store is persistent, and S19 is dropped.
+> - **absent:** the answer is volatile. S19 stays, and Private-vault addressing (§6.1) becomes an
+>   S19 task.
 
 ## 7. op 2.40.0 and 1Password facts
 
@@ -291,6 +331,7 @@ From 1Password docs (fetched 2026-11-17):
   `ratelimit` columns are `TYPE ACTION LIMIT USED REMAINING RESET`. For vet R7: the daily limit is
   shared with CI, and on a Families or individual plan it is only 1,000 requests. An agent loop
   can exhaust it in minutes, so S10's warning threshold matters most there.
+- The owner run confirms the 1000/100 hourly and 1000 daily tier on the owner's account (§6.1).
 - [reports](https://support.1password.com/reports/): "Most reports are only available in
   1Password Business." Teams can trial reports and the audit log.
 
