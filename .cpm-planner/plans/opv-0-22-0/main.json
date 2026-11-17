@@ -1,0 +1,770 @@
+{
+  "deliverables": [
+    {
+      "id": "s0-design-adr-gate",
+      "owned_files": [
+        "docs/adr/0001-never-emit-a-secret-value-through-any-output.md",
+        "docs/design/agent-identity.md",
+        "docs/design/agent-identity-review.md"
+      ],
+      "prerequisites": [],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1,
+        "pessimistic": 2
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "ADR-0001 accepted by the owner; design revised for the DESIGN-FMECA vet and owner decisions; `junior adr check --stage design --input docs/design/agent-identity.md` clean",
+        "owner": "agent",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338
+      }
+    },
+    {
+      "id": "s1-spike-stores",
+      "owned_files": [
+        "docs/design/spike-338-findings.md"
+      ],
+      "prerequisites": [],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Spike: keyring backends and non-interactive reads, WSL store survival (gates D2/D10), op service-account ratelimit under a token, --expires-in 90d, service-account count limit",
+        "owner": "agent",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Each of the 7 items in design \u00a715 is marked verified, refuted or still unknown, with evidence",
+            "A recommendation for the WSL store (persistent or volatile) that decides whether S19 exists",
+            "No value or token appears in the findings"
+          ],
+          "checks": [
+            "test -f docs/design/spike-338-findings.md"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s2-domain-agent-principal",
+      "owned_files": [
+        "src/domain/access_plan.rs",
+        "src/domain/access_plan_tests.rs",
+        "src/domain/agent_identity.rs"
+      ],
+      "prerequisites": [
+        "s0-design-adr-gate"
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.5
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Domain: Principal::Agent, agent_account() naming, CiReader-equal grants, AgentRecord index type",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "agent_account(project, env, machine) == '{project}-{env}-agent-{machine}', machine sanitized to [a-z0-9-] and at most 32 characters",
+            "Principal::Agent grants equal CiReader's: read only, boundary vaults only",
+            "AgentRecord serializes with no value or digest field"
+          ],
+          "checks": [
+            "cargo test --lib -- domain::access_plan",
+            "cargo test --lib -- domain::agent_identity"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s3-agent-causes",
+      "owned_files": [
+        "src/cause/mod.rs",
+        "src/cause/codes.rs",
+        "src/cause/render.rs",
+        "src/adapters/onepassword_diagnose.rs"
+      ],
+      "prerequisites": [
+        "s0-design-adr-gate"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Causes and codes: agent_identity_not_installed, agent_identity_exists, agent_rejected, agent_store_unavailable, agent_store_locked, agent_store_volatile",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Each code has a category, exit code, retry, human_required and a typed next with actor person",
+            "No next suggests OPV_IDENTITY=person; a person-only refusal says to run the command in your own terminal",
+            "A rejected service-account token under the agent identity is diagnosed as agent_rejected"
+          ],
+          "checks": [
+            "cargo test --lib -- cause::",
+            "cargo test --lib -- adapters::onepassword_diagnose"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s4-credential-source",
+      "owned_files": [
+        "src/adapters/credential_store.rs",
+        "src/adapters/credential_store_tests.rs",
+        "src/adapters/mod.rs",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "prerequisites": [
+        "s1-spike-stores",
+        "s3-agent-causes"
+      ],
+      "estimate": {
+        "optimistic": 3.0,
+        "likely": 4.0,
+        "pessimistic": 7.0
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Credential-store adapter: AgentCredentialSource trait, fake, OS-store source on the backends S1 chose, non-interactive 5-second reads",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "The trait has resolve, describe and preflight; resolve returns a SecretValue registered with the scrubber",
+            "A read never prompts: a locked store or one that would prompt gives agent_store_locked within 5 s",
+            "No usable store gives agent_store_unavailable; there is no file fallback",
+            "A volatile backend is reported as volatile in describe()"
+          ],
+          "checks": [
+            "cargo test --lib -- adapters::credential_store",
+            "cargo clippy --all-targets -- -D warnings"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s5-identity-selection",
+      "owned_files": [
+        "src/identity.rs",
+        "src/host.rs",
+        "src/lib.rs"
+      ],
+      "prerequisites": [
+        "s2-domain-agent-principal",
+        "s4-credential-source"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Selection rules 1-3 resolved once per process; OpCredential::Agent; stop without fallback",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "An env token wins (rule 1); OPV_IDENTITY=person gives the person (rule 2); OPV_IDENTITY=agent gives the agent identity (rule 3)",
+            "OPV_IDENTITY=agent with no identity for an environment stops with agent_identity_not_installed and never uses a person session",
+            "Resolved once, before the first op call; Host::detect() reports op_credential = Agent afterwards"
+          ],
+          "checks": [
+            "cargo test --lib -- identity",
+            "cargo test --lib -- host::"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s6-runner-token",
+      "owned_files": [
+        "src/runner.rs",
+        "src/app/signin.rs"
+      ],
+      "prerequisites": [
+        "s5-identity-selection"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Runner: token on captured calls (token_only) and on inherited op run (vet R1)",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Each captured op call under the agent identity carries OP_SERVICE_ACCOUNT_TOKEN only in its own env and takes token_only",
+            "Inherited op run: OP_SESSION*, OP_CONNECT_* and OP_ACCOUNT removed, add_op_session skipped, OP_BIOMETRIC_UNLOCK_ENABLED=false and OP_CACHE=false, env not cleared",
+            "Non-op children never get the token"
+          ],
+          "checks": [
+            "cargo test --lib -- runner::",
+            "cargo test --lib -- app::signin"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s7-write-refusals",
+      "owned_files": [
+        "src/app/tidy.rs",
+        "src/mcp.rs",
+        "src/app/provision.rs",
+        "src/app/sync.rs",
+        "tests/agent_identity_refusals.rs"
+      ],
+      "prerequisites": [
+        "s5-identity-selection"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Refusal unification, sync refused under the agent, write-path matrix",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Every one of the 12 require_person callers refuses with own_session_required under the agent identity before any op write",
+            "opv_import_local and provision use the selected identity, not environment variables only",
+            "opv sync under the agent identity is refused before any call, and Next says your own terminal or CI's deploy job"
+          ],
+          "checks": [
+            "cargo test --features fake --test agent_identity_refusals",
+            "cargo test --lib -- app::tidy"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s8-create-agent",
+      "owned_files": [
+        "src/app/access_create.rs",
+        "src/app/access_create_tests.rs",
+        "src/app/agent_identity.rs",
+        "src/main.rs"
+      ],
+      "prerequisites": [
+        "s2-domain-agent-principal",
+        "s3-agent-causes",
+        "s4-credential-source"
+      ],
+      "estimate": {
+        "optimistic": 3.0,
+        "likely": 4.0,
+        "pessimistic": 7.0
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "--create --agent: Destination split, binding check, store, index, production --confirm, clap flags for create and rotate, person_only",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Create requests read_items on exactly the CiReader vaults, --expires-in 90d, no --can-create-vaults",
+            "The binding check (whoami account UUID, vault set) runs on every create; on a mismatch nothing is stored and the person is told to remove the account",
+            "A production-tier environment without --confirm <env> is refused before the prompt",
+            "Output matches design \u00a77.2 and ends with Next: opv doctor --env <env>; no token in the output",
+            "--agent conflicts with --github, --target and --grant-receipt; refused under agent markers"
+          ],
+          "checks": [
+            "cargo test --lib -- app::access_create",
+            "cargo test --lib -- app::agent_identity",
+            "cargo test --test cli -- access"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s9-rotate-agent",
+      "owned_files": [
+        "src/app/agent_identity_rotate.rs",
+        "src/app/credentials_rotate.rs"
+      ],
+      "prerequisites": [
+        "s8-create-agent"
+      ],
+      "estimate": {
+        "optimistic": 3.0,
+        "likely": 4.0,
+        "pessimistic": 7.0
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "--rotate --agent for one identity or all on the machine; #324 marker per identity",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Without an env it rotates every indexed identity on this machine; one Do: line names every old account",
+            "The old token is replaced only after the successor passes the token-scoped check",
+            "An interrupted rotation refuses that identity with secret_not_stored and --revoked, and goes on with the others",
+            "A production identity without --confirm is skipped with a note"
+          ],
+          "checks": [
+            "cargo test --lib -- app::agent_identity_rotate",
+            "cargo test --lib -- app::credentials_rotate"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s10-doctor-identity",
+      "owned_files": [
+        "src/app/doctor.rs",
+        "src/app/doctor_session.rs",
+        "src/adapters/onepassword_ratelimit.rs"
+      ],
+      "prerequisites": [
+        "s5-identity-selection",
+        "s6-runner-token"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Doctor op identity row: states, reach, expiry, rate limit, store states",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Every state in design \u00a77.4 renders as text and JSON (check op_identity)",
+            "reads N of M vaults from a token-scoped op vault list; never claims writes none",
+            "An unreadable ratelimit omits the figure and never fails the row",
+            "agent_store_volatile and agent_store_locked are FAIL rows"
+          ],
+          "checks": [
+            "cargo test --lib -- app::doctor",
+            "cargo test --lib -- adapters::onepassword_ratelimit"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s11-ready-identity",
+      "owned_files": [
+        "src/app/ready.rs",
+        "src/schema.rs",
+        "src/json.rs",
+        "src/domain/credential.rs",
+        "tests/surface_contract.rs"
+      ],
+      "prerequisites": [
+        "s10-doctor-identity"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "ready identity object, FR-69 agent expiry, schema and JSON (MCP follows)",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "ready --json carries identity per environment with kind, name, source, read_only, expires_on, reach, rate_limit and state",
+            "Agent expiry within 14 days is credential_expiring; it stays advisory and never fails --gate",
+            "opv_state ready and accounts carry the same object; no new MCP tool or section",
+            "The schema and surface contract are updated"
+          ],
+          "checks": [
+            "cargo test --lib -- app::ready",
+            "cargo test --lib -- domain::credential",
+            "cargo test --test surface_contract"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s12-sim-e2e-canaries",
+      "owned_files": [
+        "tests/sim/op.rs",
+        "tests/sim/world.rs",
+        "tests/e2e/scenarios/agent_identity.rs",
+        "tests/e2e/main.rs"
+      ],
+      "prerequisites": [
+        "s6-runner-token",
+        "s8-create-agent"
+      ],
+      "estimate": {
+        "optimistic": 3.0,
+        "likely": 4.0,
+        "pessimistic": 7.0
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "opv-sim service accounts for agents; e2e with token and value canaries, op run env, plan/status causes",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "A fake token and fake values never appear in stdout, stderr, --json or MCP across create, run, plan, ready, status, doctor and rotate",
+            "op run's environment under the agent identity has the token and no OP_SESSION*, OP_CONNECT_* or OP_ACCOUNT; the app's environment has no OP_*",
+            "plan and status causes under reader grants are pinned in snapshots",
+            "The coverage gate passes (new calls faulted or listed in SKIPPED.md)"
+          ],
+          "checks": [
+            "cargo test --features fake --test e2e -- agent_identity",
+            "cargo test --features fake --test e2e -- coverage"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s13-agent-docs",
+      "owned_files": [
+        "docs/agent-setup.md",
+        "docs/agent-skill.md",
+        "src/app/skill.rs",
+        "llms.txt"
+      ],
+      "prerequisites": [
+        "s8-create-agent",
+        "s10-doctor-identity",
+        "s11-ready-identity"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Docs for agents: setup guide, skill, llms",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "The four-identity table, the person's one command, OPV_IDENTITY=agent, and \u00a74.6's residual word for word, with optional hardening",
+            "No OP_SERVICE_ACCOUNT_TOKEN= export in the agent docs; never suggests OPV_IDENTITY=person or an agent sync"
+          ],
+          "checks": [
+            "cargo test --test agent_guidance",
+            "cargo test --test docs_commands",
+            "cargo test --lib -- app::skill"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s14-people-docs",
+      "owned_files": [
+        "docs/usage.md",
+        "README.md",
+        "docs/mcp.md",
+        "docs/configuration.md",
+        "docs/design/requirements.md",
+        "CHANGELOG.md"
+      ],
+      "prerequisites": [
+        "s8-create-agent",
+        "s9-rotate-agent",
+        "s11-ready-identity"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Docs for people: usage, README, MCP, configuration, FR-71, changelog",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "usage has an Agent identities section matching \u00a77; FR-71 added; FR-11 and SR-5 name the agent identity",
+            "Every documented command parses with the built opv"
+          ],
+          "checks": [
+            "cargo test --test docs_commands",
+            "cargo test --test examples"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s15-gate-mvp",
+      "owned_files": [],
+      "prerequisites": [
+        "s2-domain-agent-principal",
+        "s3-agent-causes",
+        "s4-credential-source",
+        "s5-identity-selection",
+        "s6-runner-token",
+        "s7-write-refusals",
+        "s8-create-agent",
+        "s9-rotate-agent",
+        "s10-doctor-identity",
+        "s11-ready-identity",
+        "s12-sim-e2e-canaries",
+        "s13-agent-docs",
+        "s14-people-docs"
+      ],
+      "estimate": {
+        "optimistic": 1.12,
+        "likely": 1.5,
+        "pessimistic": 2.62
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Release gate: cargo test, clippy, e2e with CI=true",
+        "owner": "agent",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "The full test suite, clippy and e2e pass locally and with CI=true"
+          ],
+          "checks": [
+            "cargo test --all-features",
+            "cargo clippy --all-targets --all-features -- -D warnings",
+            "CI=true cargo test --features fake --test e2e"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s16-owner-wsl-check",
+      "owned_files": [],
+      "prerequisites": [
+        "s15-gate-mvp"
+      ],
+      "estimate": {
+        "optimistic": 0.38,
+        "likely": 0.5,
+        "pessimistic": 0.88
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Owner step: real agent identity on WSL; opv run dev -- cargo test from an assistant with OPV_IDENTITY=agent; env shows no token",
+        "owner": "owner",
+        "kind": "manual",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "The owner confirms the run worked unattended and env showed no token"
+          ],
+          "checks": []
+        }
+      }
+    },
+    {
+      "id": "s17-auto-select",
+      "owned_files": [
+        "src/identity.rs",
+        "tests/agent_identity_selection.rs"
+      ],
+      "prerequisites": [
+        "s15-gate-mvp"
+      ],
+      "estimate": {
+        "optimistic": 2.25,
+        "likely": 3.0,
+        "pessimistic": 5.25
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Rule 4: auto-select in agent mode; once one identity is installed for the account and project, an environment without one stops",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "An agent marker plus any installed identity selects the agent identity",
+            "A multi-env ready under a marker never uses the person session for an environment without an identity: it reports agent_identity_not_installed for that environment"
+          ],
+          "checks": [
+            "cargo test --lib -- identity",
+            "cargo test --features fake --test agent_identity_selection"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s18-remove-agent",
+      "owned_files": [
+        "src/app/agent_identity_remove.rs",
+        "src/main.rs"
+      ],
+      "prerequisites": [
+        "s15-gate-mvp"
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.5
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "--remove --agent: delete the store and index entries; Do: revoke",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "The store entry and index entry are removed; Do: names the account to revoke; person only"
+          ],
+          "checks": [
+            "cargo test --lib -- app::agent_identity_remove"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s19-volatile-store-install",
+      "owned_files": [
+        "src/app/agent_identity_install.rs",
+        "src/app/agent_identity.rs"
+      ],
+      "prerequisites": [
+        "s15-gate-mvp",
+        "s1-spike-stores"
+      ],
+      "estimate": {
+        "optimistic": 3.0,
+        "likely": 4.0,
+        "pessimistic": 7.0
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "Only if S1 finds the WSL store volatile: Private-vault durable copy and --install --agent",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "Create also writes the token to the person's Private vault on op item create stdin",
+            "--install reloads the working copy with one person approval and checks it"
+          ],
+          "checks": [
+            "cargo test --lib -- app::agent_identity_install"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s20-site-pages",
+      "owned_files": [
+        "opv-site:src/pages/assistants/index.astro",
+        "opv-site:src/components/home/ForAgents.astro",
+        "opv-site:src/components/home/Security.astro",
+        "opv-site:src/components/home/HowItWorks.astro",
+        "opv-site:src/components/home/Features.astro",
+        "opv-site:src/pages/docs/index.astro",
+        "opv-site:public/llms.txt",
+        "opv-site:public/INSTALL.md"
+      ],
+      "prerequisites": [
+        "s13-agent-docs",
+        "s14-people-docs"
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.5
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "opv-site pages (design \u00a79)",
+        "owner": "junior",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338,
+        "junior": {
+          "acceptance": [
+            "The site shows the four-identity model, the one command and the residual"
+          ],
+          "checks": [
+            "npm run build (in opv-site)"
+          ]
+        }
+      }
+    },
+    {
+      "id": "s21-release-0-22-0",
+      "owned_files": [
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "prerequisites": [
+        "s16-owner-wsl-check",
+        "s17-auto-select",
+        "s18-remove-agent",
+        "s19-volatile-store-install",
+        "s20-site-pages"
+      ],
+      "estimate": {
+        "optimistic": 1,
+        "likely": 1.5,
+        "pessimistic": 3
+      },
+      "earning_rule": "zero_hundred",
+      "metadata": {
+        "artifact": "opv 0.22.0 PR dev\u2192staging\u2192main, tag v0.22.0, npm 7/7; `junior adr check --stage implementation` clean",
+        "owner": "agent",
+        "kind": "agent",
+        "track": "338",
+        "issue": 338
+      }
+    }
+  ]
+}
