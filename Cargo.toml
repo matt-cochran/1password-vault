@@ -1,10 +1,10 @@
 [package]
 name = "opv"
 default-run = "opv"
-version = "0.20.1"
+version = "0.21.0"
 edition = "2024"
 # Pinned with rust-toolchain.toml; the minimum supported Rust is that toolchain.
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT"
 description = "Sync secrets from 1Password into runtime targets such as Fly.io without ever printing, logging or writing a value"
 repository = "https://github.com/matt-cochran/1password-vault"
@@ -24,7 +24,7 @@ fake = []
 ui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
-rmcp = { version = "3.9.0", optional = true, default-features = false, features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.10.0", optional = true, default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 clap = { version = "4.6", features = ["derive", "env", "string"] }
 serde = { version = "1", features = ["derive"] }

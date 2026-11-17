@@ -8,12 +8,41 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 
 **Start every session with one read-only command:** `opv ready --json`. It says, in one document, what is ready, what is not, who acts next (`actor`: assistant, person or CI) and the exact command for each step (`prerequisite`, then `verify`; for a personal key, `prerequisite` is a step for the person in their own 1Password item, not a command). Act on its findings in order; re-run it to resume after any interruption.
 
+## Orchestrate processes without exposing values to the model
+
+An assistant may run an authorized command through `opv run <env> -- <command>`.
+OPV and the child process consume the real declared values; the model receives
+only the command's safe results. That is the intended execution boundary, not
+secret exposure by itself. Do not hand a command back to the user merely because
+its child needs credentials. This applies to tests, builds, provider clients and
+bounded diagnostics; each command still needs authorization for its actual effects.
+
+Prefer native value-free OPV metadata first. When a diagnostic must inspect a
+declared value, run a bounded child through OPV and return only a fixed result
+such as `json_object`, `not_valid_json` or an allowlisted error code. Never dump
+the environment, print a value or exception containing it, copy a secret into
+model-visible output, or transform/encode a value to evade masking. OPV-managed
+file delivery is allowed; the model must not read the delivered file and the child
+must not retain copies. Masking is defense in depth, not permission to print secrets.
+
+Use the existing authorization and least-privilege scope. Do not add a new approval
+for an already authorized read/test just because OPV supplies its credentials.
+New external effects still require appropriate authorization; human-only sign-in,
+secret entry, plan application, native confirmations and project-specific gates
+remain human steps. CLI `opv run` is distinct from the metadata-only MCP tools.
+
+If `opv ready <env> --json` reports `op_not_signed_in`, request only the necessary
+authentication step, then resume the agent-run command. An unrelated terminal's
+sign-in does not reach this process. Never request a session token or password
+in chat, steal another process's session, or clear agent markers to bypass a
+native refusal. See the guide's sign-in/readiness instructions.
+
 ## Rules
 
-1. **Never handle a secret value.** Do not ask the user to paste a secret into the chat, a file or a command. Values go into 1Password by the user, in the 1Password app or website. You work with names, kinds and rules only.
-2. **Never read a value.** Do not run `op item get --reveal`, `op read`, `op inject`, `op run -- env`, or anything that prints a field's value. opv has no command that prints a secret; do not build one out of other commands.
-3. **Never write a value to disk or argv.** No `.env` files, no `secrets.toml` values, no values in command arguments or CI logs. `secrets.toml` holds IDs, names, kinds and rules only.
-4. **Ask before anything that changes something outside the repo.** Get the user's explicit yes, for this run, before:
+1. **Never expose a secret value to the model.** Do not ask the user to paste a secret into the chat, a file or a command. Values go into 1Password by the user, in the 1Password app or website. The model works with names, kinds, rules and safe results; authorized OPV-managed children may consume values as described above.
+2. **Never retrieve a value into model context.** Do not run `op item get --reveal`, `op read`, `op inject`, `op run -- env`, or anything that prints a field's value. opv has no command that prints a secret; do not build one out of other commands.
+3. **Never copy a value into model-visible files, argv or logs.** No agent-authored `.env` dumps, `secrets.toml` values, or literal values in command arguments or CI logs. OPV-managed ephemeral file delivery to an authorized child is distinct from an agent-readable dump. `secrets.toml` holds IDs, names, kinds and rules only.
+4. **Require authorization for external changes.** Use the user's existing authorization where it covers the exact operation and environment; otherwise ask before:
    - `opv config import` on a configuration that lives in 1Password (it writes the project's manifest, which holds names and IDs only);
    - `opv config export <env>`, the explicit layout repair, and any command whose schema entry has `tidies_1password: true` run in the user's own signed-in session (`opv login`), the first time: it tidies the 1Password item's layout (creates missing sections and empty fields, conceals secrets saved as text, renames and moves fields, sets duplicates aside in `opv · kept`). It never deletes or prints a value and says what it changed in one line; tell the user before the first run. Service accounts, CI and runs under `deploy_credentials` never tidy, and the project manifest item is never tidied. `doctor` and `ready` never tidy, whoever runs them: when the layout needs it, `doctor` names `opv config export <env>`;
    - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
@@ -192,7 +221,7 @@ CI runs `opv sync staging --expect-plan 674d43e2` with the same flags, and a per
 
 If anything changed since the plan (the item, the target or the configuration), `--expect-plan` refuses (exit 6) with nothing written and prints the new id: show the new plan to the user again. On an environment with `confirm_env = true`, a reviewed plan id counts as the confirmation.
 
-`sync` refuses (exit 6, `error.code` `keys_blocking`) and stages nothing while any key is missing or failing a rule. Go back to step 4. A guarded environment (`confirm_env = true`) refuses with `confirm_required`: ask the user, and only with their yes run the `next` command, which adds `--confirm <env>`; the same refusal also lists the blocking keys, so one run tells you everything. A changed plan refuses with `stale_plan`: show the new plan to the user.
+`sync` refuses (exit 6, `error.code` `keys_blocking`) and stages nothing while any key is missing or failing a rule. Go back to step 4. A guarded environment (`confirm_env = true`) refuses with `confirm_required`: obtain the required authorization and hand the `next` command to its named person or CI actor; do not execute a human-only confirmation yourself. The command adds `--confirm <env>`; the same refusal also lists the blocking keys, so one run tells you everything. A changed plan refuses with `stale_plan`: show the new plan to the user.
 
 `opv setup`, `opv login` and `opv config edit` need the user's own terminal. Without one they refuse with `terminal_required`, `Do: ask the user to run this in their own terminal` and the command as it was typed, with its arguments, on `Next:` (`opv login prod`); pass both to the user.
 
@@ -261,8 +290,8 @@ Every failure also has a stable `error.code` with `--json`; the full list, with 
 | 3 | `op`, `flyctl`, `az`, `kubectl`, `gh` or `ssh` missing or unusable | install it (`opv doctor` prints how) |
 | 4 | 1Password error | the message names the vault and item; the identity may need access |
 | 5 | target error (Fly, Azure or Kubernetes) | the message names the app and, for a deploy, the unhealthy revision or rollout; the old one keeps serving; follow the `Next:` line |
-| 6 | refused | `keys_blocking`: a key is missing or failing a rule (run `opv status <env>`); `confirm_required`: ask the user, then run `next`; `stale_plan`: run `opv plan <env>` and show the new plan; `terminal_required`: hand `next` (`setup`, `login`, `config edit`) to the user; `ram_dir_unavailable`: Azure deploy credentials need a RAM-backed directory, follow `do`; `policy_refused`: follow `do` |
-| 7 | not signed in | run the sign-in command opv prints |
+| 6 | refused | `keys_blocking`: a key is missing or failing a rule (run `opv status <env>`); `confirm_required`: obtain authorization and follow the named actor on `next`; `stale_plan`: run `opv plan <env>` and show the new plan; `terminal_required`: hand `next` (`setup`, `login`, `config edit`) to the user; `ram_dir_unavailable`: Azure deploy credentials need a RAM-backed directory, follow `do`; `policy_refused`: follow `do` |
+| 7 | not signed in | hand the native sign-in step to the human; once authentication reaches this process, resume the authorized agent-run command |
 | 8 | findings | `status`, `plan` or `check` found keys to fix; see step 4 |
 | 9 | outcome unknown, or a provider did not answer | a change may or may not have been applied, or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command when `retry` is `safe` (a CI job may retry it); with `check_first` (`create_outcome_unknown`) run `next` first |
 | 70 | internal error | an opv bug; stop and give the user `opv version` to report it |
@@ -287,3 +316,4 @@ The [MCP interface](mcp.md) (`opv mcp serve`, registered for a project with `opv
 Structure never replaces what it cannot see: `ids_not_in_account` or an incomplete inventory (rule 7) is the user's to resolve, never a reason to create a second vault. Permission grants, deploy credentials, shared or personal keys, removals and changes to an existing target stay separate proposals the person applies. A target's deploy credential is one of them: never mint, read, copy or paste one yourself; hand the user `opv target credentials <env> --target <name> --create`, which mints the least-privilege token at the provider and stores it straight in 1Password without ever showing it. Once a Fly target records deploy credentials, a CI job runs that target's fixed operations under them with `opv target op <env> --target <name> machines` (a read) or `machine-update --machine <id> --image <ref> [--confirm <env>]` (a write the person approves); it is not an MCP tool, and it prints ids, names, states, regions and image references only.
 
 Every tool has the same command on the CLI, so a person can run what an assistant ran: `opv inventory`, `opv needs`, `opv contract`, `opv next` and `opv propose` read and prepare, and `opv apply`, `opv set` and `opv import` are the person's. `opv explain` reproduces `opv_explain`. `opv schema` lists each tool with its command under `mcp_tools`. Without the MCP server, or with an older opv, use the CLI and report the missing tool as a capability gap.
+
