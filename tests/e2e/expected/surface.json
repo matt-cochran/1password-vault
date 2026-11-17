@@ -15,6 +15,7 @@
         "json",
         "name",
         "project",
+        "remove",
         "revoked",
         "rotate",
         "secret-name",

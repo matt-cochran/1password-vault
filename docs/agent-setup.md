@@ -93,7 +93,7 @@ Never suggest `OPV_IDENTITY=person` or unsetting `OPV_IDENTITY` to get past a re
 opv access <env> --rotate --agent
 ```
 
-Without `<env>` it rotates every agent identity on this machine (production-tier ones only with `--confirm <env>`); `--revoked <name>` resumes an interrupted rotation. Afterwards they revoke the old accounts in 1Password (Developer > Service accounts), as its `Do:` line says.
+Without `<env>` it rotates every agent identity on this machine (production-tier ones only with `--confirm <env>`); `--revoked <name>` resumes an interrupted rotation. Afterwards they revoke the old accounts in 1Password (Developer > Service accounts), as its `Do:` line says. To take an identity off this machine, hand them `opv access <env> --remove --agent` (without `<env>`, every one on this machine); it deletes the token and the index entry, and its `Do:` line names the accounts they then delete in 1Password.
 
 **What it does not defend.** An assistant with a shell that runs as the same OS user can reach the token: it can read the OS store, read the environment of the `op run` process, or make an authorized child print a value. opv's guarantee is its own outputs: no opv output carries the token or a value. What limits the damage: read-only, one environment, 90 days. Optional hardening: run the assistant as a separate OS user or in a container that cannot reach the person's store, and start it where no person session reaches it (no desktop-app CLI integration in its terminal, not inside `opv login --`).
 

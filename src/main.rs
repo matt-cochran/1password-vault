@@ -1098,7 +1098,7 @@ enum Cmd {
     /// (read-only; people are counted, never named).
     #[command(
         before_help = ACCESS_QUICK,
-        group(clap::ArgGroup::new("identity_write").args(["create", "rotate"])),
+        group(clap::ArgGroup::new("identity_write").args(["create", "rotate", "remove"])),
         group(clap::ArgGroup::new("token_destination").args(["github", "agent"]))
     )]
     Access {
@@ -1118,7 +1118,8 @@ enum Cmd {
         create: bool,
         /// With --create: the environment's read-only agent identity on this machine, its
         /// token kept in this machine's OS credential store. With --rotate: replace that
-        /// identity, or with no environment every one recorded on this machine (#338).
+        /// identity, or with no environment every one recorded on this machine. With
+        /// --remove: remove that identity, or every one, from this machine (#338).
         #[arg(
             long,
             requires = "identity_write",
@@ -1150,6 +1151,16 @@ enum Cmd {
         /// shown (#296, #338).
         #[arg(long, requires = "token_destination")]
         rotate: bool,
+        /// With --agent: remove this machine's agent identity of the environment, or with
+        /// no environment every one recorded here: its token from the OS credential store,
+        /// then its index entry. Then delete the account in 1Password, as its `Do:` line
+        /// says; op cannot. Your own terminal only (#338).
+        #[arg(
+            long,
+            requires = "agent",
+            conflicts_with_all = ["create", "rotate", "github", "github_env", "target", "grant_receipt", "name", "confirm"]
+        )]
+        remove: bool,
         /// With --rotate: the successor an interrupted rotation left (named in its refusal),
         /// which you revoked in 1Password; rotation then goes ahead (#324).
         #[arg(long, value_name = "NAME", requires = "rotate")]
@@ -4122,6 +4133,19 @@ fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
                 .chain(["--rotate".into(), "--agent".into()])
                 .collect(),
         ),
+        // #338: and so is removing one, or every one on this machine.
+        Cmd::Access {
+            env,
+            remove: true,
+            agent: true,
+            ..
+        } => (
+            vec!["access"],
+            env.iter()
+                .cloned()
+                .chain(["--remove".into(), "--agent".into()])
+                .collect(),
+        ),
         _ => return None,
     };
     Some(opv::cause::Cmd {
@@ -5561,6 +5585,47 @@ fn run_other(
             } else {
                 opv::app::access_create::run_agent(
                     &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::Console,
+                    out,
+                )
+            }
+        }
+        Cmd::Access {
+            env,
+            project,
+            remove: true,
+            agent: true,
+            json,
+            ..
+        } => {
+            opv::app::setup_runtime::Console::require_terminal("access --remove")?;
+            let dir = std::env::current_dir().unwrap_or_default();
+            let project = match project.as_deref() {
+                Some(name) => config_store::default_project(Some(name), None, &dir)?,
+                None => opv::app::personal::project_name(r, &dir),
+            };
+            let index = opv::app::agent_identity::index_path()
+                .ok_or_else(opv::app::agent_identity::no_config_dir)?;
+            let store = opv::adapters::credential_store::machine_store();
+            let req = opv::app::agent_identity_remove::Request {
+                env: env.as_deref(),
+                project: &project,
+                store: &*store,
+                index: &index,
+                json,
+            };
+            // With --json, stdout is the one document: the question goes to stderr.
+            if json {
+                opv::app::agent_identity_remove::run(
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::LoginConsole,
+                    out,
+                )
+            } else {
+                opv::app::agent_identity_remove::run(
                     &req,
                     r,
                     &mut opv::app::setup_runtime::Console,
@@ -7503,6 +7568,90 @@ members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
         assert_eq!(
             e.map(|e| e.kind()),
             Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+    }
+
+    // --- `opv access [<env>] --remove --agent` (#338, S18) -----------------------------
+
+    fn remove_kind(extra: &[&str]) -> Option<clap::error::ErrorKind> {
+        let argv = ["opv", "access", "dev", "--remove", "--agent"]
+            .into_iter()
+            .chain(extra.iter().copied());
+        Cli::try_parse_from(argv).err().map(|e| e.kind())
+    }
+
+    #[test]
+    fn remove_agent_needs_no_environment() {
+        assert!(Cli::try_parse_from(["opv", "access", "--remove", "--agent"]).is_ok());
+    }
+
+    #[test]
+    fn remove_needs_agent() {
+        let e = Cli::try_parse_from(["opv", "access", "dev", "--remove"]).err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+    }
+
+    #[test]
+    fn remove_agent_conflicts_with_create() {
+        assert_eq!(
+            remove_kind(&["--create"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn remove_agent_conflicts_with_rotate() {
+        assert_eq!(
+            remove_kind(&["--rotate"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn remove_agent_conflicts_with_github() {
+        assert_eq!(
+            remove_kind(&["--github", "a/b"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn remove_agent_conflicts_with_target() {
+        assert_eq!(
+            remove_kind(&["--target", "web"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn remove_agent_conflicts_with_grant_receipt() {
+        assert_eq!(
+            remove_kind(&["--grant-receipt", "r.json"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn remove_agent_is_refused_under_an_agent_marker() {
+        let cli = Cli::try_parse_from(["opv", "access", "dev", "--remove", "--agent"]).unwrap();
+        let cmd = person_only(&cli.cmd).expect("person-only");
+        let refused =
+            opv::host::refuse_if_agent(&opv::host::FakeEnv::new("linux").var("CLAUDECODE"), cmd);
+        assert_eq!(
+            refused.err().and_then(|e| e.cause().map(|(c, _)| c.code())),
+            Some("person_only")
+        );
+    }
+
+    #[test]
+    fn remove_agent_hands_the_assistant_the_persons_command() {
+        let cli = Cli::try_parse_from(["opv", "access", "--remove", "--agent"]).unwrap();
+        assert_eq!(
+            person_only(&cli.cmd).map(|c| opv::cause::render::cmd_text(&c)),
+            Some("opv access --remove --agent".to_string())
         );
     }
 
