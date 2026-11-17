@@ -20,6 +20,16 @@
 //!    zeroizing [`SecretValue`] registered with the run's scrubber.
 //! 4. The GitHub secret is set with the token on stdin ([`crate::adapters::ci_secrets`]).
 //!
+//! `opv access <env> --create --agent [--name <machine>] [--confirm <env>]` (#338, design
+//! `agent-identity.md` §4.3, §7.1, §7.2) shares every step before the token exists, with
+//! the environment's CI-reader grants under the name `{project}-{env}-agent-{machine}`. Its
+//! destination is this machine's OS credential store ([`Destination::Machine`]): the store
+//! preflight replaces GitHub's, a production-tier environment needs `--confirm <env>`, and
+//! an identity already installed here is `agent_identity_exists`. After the create: bind
+//! (the token's own `op whoami` account and `op vault list` must equal the request, or
+//! nothing is stored), store, read back and check, then record the value-free index entry
+//! ([`super::agent_identity`]). A lost token is never re-created (X5); the message names it.
+//!
 //! An owner command: it needs a person's own terminal and 1Password session (never a
 //! service account, Connect, CI or an assistant without a terminal). The old service
 //! account is never touched: keep it until the new token has produced verified delivery
@@ -207,6 +217,39 @@ pub struct Request<'a> {
     pub github: GitHub,
 }
 
+/// Where the new token goes (design `agent-identity.md` §7.1). Everything before the token
+/// exists is shared; the destination decides its preflight, its line in the question and
+/// what happens to the token.
+pub enum Destination<'a> {
+    /// A GitHub Actions secret: the CI reader or a deploy identity.
+    GitHub(&'a GitHub),
+    /// This machine's OS credential store: the environment's read-only agent identity.
+    Machine(&'a Machine<'a>),
+}
+
+/// This machine, as the destination of an agent identity's token (#338).
+pub struct Machine<'a> {
+    /// `--name`, or this host's name: the account's machine part, sanitized.
+    pub name: &'a str,
+    /// `--confirm <env>`, which a production-tier environment needs (D6).
+    pub confirm: Option<&'a str>,
+    /// Where the token is kept.
+    pub store: &'a dyn crate::adapters::credential_store::AgentCredentialSource,
+    /// The value-free index of agent identities ([`super::agent_identity`], §7.5).
+    pub index: &'a std::path::Path,
+    /// Print one JSON document instead of lines.
+    pub json: bool,
+}
+
+/// `opv access <env> --create --agent`: the environment's read-only agent identity on
+/// this machine.
+pub struct AgentRequest<'a> {
+    pub env: &'a str,
+    /// The project naming the service account.
+    pub project: &'a str,
+    pub machine: Machine<'a>,
+}
+
 /// Create the identity and store its token. `ui` asks the one question and shows progress.
 pub fn run(
     fleet: &crate::domain::Fleet,
@@ -227,7 +270,153 @@ pub fn run_with_receipt(
     out: &mut dyn Write,
     receipt_path: Option<&std::path::Path>,
 ) -> Result<(), Error> {
-    let (env, target, project, gh) = (req.env, req.target, req.project, &req.github);
+    let to = Destination::GitHub(&req.github);
+    run_to(
+        fleet,
+        req.env,
+        req.target,
+        req.project,
+        &to,
+        r,
+        ui,
+        out,
+        receipt_path,
+    )
+}
+
+/// Create the environment's read-only agent identity and keep its token on this machine
+/// (design `agent-identity.md` §4.3, §7.2): bind, store, check, then index.
+pub fn run_agent(
+    fleet: &crate::domain::Fleet,
+    req: &AgentRequest<'_>,
+    r: &dyn CommandRunner,
+    ui: &mut dyn Interaction,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let to = Destination::Machine(&req.machine);
+    run_to(fleet, req.env, None, req.project, &to, r, ui, out, None)
+}
+
+/// What the machine destination found before the question (§7.2's refusals all come first).
+struct MachinePrep {
+    /// The machine part of the account name.
+    slug: String,
+    source: crate::adapters::credential_store::SourceDescription,
+    key: crate::adapters::credential_store::AgentKey,
+    /// The account's immutable ID, from the person's own `op whoami`.
+    account_uuid: String,
+}
+
+/// The destination's preflight result.
+enum Prepared {
+    GitHub { env_missing: bool },
+    Machine(MachinePrep),
+}
+
+/// The machine part `name` gives the account, or `None` when nothing usable is left.
+fn machine_slug(project: &str, env: &str, name: &str) -> Option<String> {
+    let account = crate::domain::access_plan::agent_account(project, env, name);
+    account
+        .strip_prefix(&format!("{project}-{env}-agent-"))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// D6: a production-tier (or `confirm_env`) environment needs `--confirm <env>`, checked
+/// before any call and so before the question.
+fn require_confirm(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    confirm: Option<&str>,
+) -> Result<(), Error> {
+    let e = fleet.environment(env)?;
+    let guarded = e.tier == crate::domain::Tier::Production || e.confirm_env;
+    match confirm {
+        Some(c) if c != env => Err(Cause::ConfirmMismatch {
+            given: c.to_string(),
+            env: EnvName::new(env),
+        }
+        .into()),
+        None if guarded => Err(Cause::NeedsConfirm {
+            env: EnvName::new(env),
+        }
+        .into()),
+        _ => Ok(()),
+    }
+}
+
+/// The account's immutable ID from the person's own session (`op whoami`): the binding
+/// check compares the new token's account with it. Without one, nothing is created.
+fn person_account_uuid(r: &dyn CommandRunner, env: &str) -> Result<String, Error> {
+    #[derive(serde::Deserialize)]
+    struct Who {
+        account_uuid: String,
+    }
+    let call = Call::new("op", &["whoami", "--format", "json"]);
+    let uuid = match r.read(&call, &[]) {
+        Ok(crate::runner::Outcome::Done(o)) if o.status == 0 => {
+            serde_json::from_slice::<Who>(&o.stdout)
+                .ok()
+                .map(|w| w.account_uuid)
+        }
+        _ => None,
+    };
+    uuid.filter(|a| a.len() == 26 && a.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .ok_or_else(|| super::reader_grants::refusal(env, "immutable_account_id_required"))
+}
+
+/// The machine preflight (§7.2): the store first, then the account, then an identity that
+/// is already installed here (`agent_identity_exists`; replacing one is `--rotate`).
+fn prepare_machine(
+    m: &Machine<'_>,
+    slug: String,
+    env: &str,
+    project: &str,
+    service_account: &str,
+    r: &dyn CommandRunner,
+) -> Result<MachinePrep, Error> {
+    use crate::adapters::credential_store::AgentKey;
+    let account_uuid = person_account_uuid(r, env)?;
+    let key = AgentKey::new(
+        AccountId::new(account_uuid.clone()),
+        project,
+        EnvName::new(env),
+    )
+    .ok_or_else(|| usage("--project", "letters, digits, '-' or '_'"))?;
+    let exists = |name: String| -> Error {
+        Cause::AgentIdentityExists {
+            env: EnvName::new(env),
+            name,
+        }
+        .into()
+    };
+    if let Some(e) = super::agent_identity::load(m.index)?.find(&account_uuid, project, env) {
+        return Err(exists(e.record.account_name.clone()));
+    }
+    // An entry the index lost (an interrupted create): never overwritten by a create.
+    if m.store.resolve(&key)?.is_some() {
+        return Err(exists(service_account.to_string()));
+    }
+    Ok(MachinePrep {
+        slug,
+        source: m.store.describe(),
+        key,
+        account_uuid,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_to(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    target: Option<&str>,
+    project: &str,
+    to: &Destination<'_>,
+    r: &dyn CommandRunner,
+    ui: &mut dyn Interaction,
+    out: &mut dyn Write,
+    receipt_path: Option<&std::path::Path>,
+) -> Result<(), Error> {
     let contract = receipt_path
         .map(|_| super::reader_grants::contract(fleet, env))
         .transpose()?;
@@ -240,9 +429,40 @@ pub fn run_with_receipt(
     if let Some(path) = receipt_path {
         super::reader_grants::preflight_destination(path)?;
     }
-    check(gh)?;
+    // Arguments, before any call (X23).
+    let slug = match to {
+        Destination::GitHub(gh) => {
+            check(gh)?;
+            None
+        }
+        Destination::Machine(m) => {
+            let slug = machine_slug(project, env, m.name)
+                .ok_or_else(|| usage("--name", "letters, digits or '-'"))?;
+            require_confirm(fleet, env, m.confirm)?;
+            Some(slug)
+        }
+    };
     super::tidy::require_person(r, "opv access --create")?;
-    let id = super::access::identity(fleet, env, target, project, r)?;
+    // The store answers before anything else is asked of 1Password (§7.2).
+    if let Destination::Machine(m) = to {
+        m.store.preflight()?;
+    }
+    let mut id = super::access::identity(fleet, env, target, project, r)?;
+    if let (Destination::Machine(_), Some(slug)) = (to, &slug) {
+        // `Principal::Agent` takes exactly the CI reader's grants, under its own name.
+        let name = crate::domain::access_plan::agent_account(project, env, slug);
+        for g in &mut id.grants {
+            g.principal = crate::domain::access_plan::Principal::Agent {
+                environment: env.to_string(),
+                machine: slug.clone(),
+            };
+            g.service_account = name.clone();
+            g.permission = Permission::Read;
+        }
+        id.service_account = name;
+        // op lists no service account, so the CI reader's presence says nothing here.
+        id.already_present = false;
+    }
     if let Some(c) = &contract {
         let requested: std::collections::BTreeSet<_> = id
             .grants
@@ -264,16 +484,35 @@ pub fn run_with_receipt(
     if let Some(vault) = id.not_in_account.first() {
         return Err(vault.error());
     }
+    // In the account the vaults were checked in (#157), never op's default.
+    let er = crate::app::signin::EnvRunner::with_account(r, id.account.clone());
     // Preflight: everything the token's journey needs, before 1Password shows it once.
     use crate::adapters::ci_secrets;
-    if !ci_secrets::signed_in(r)? {
-        return Err(ci_secrets::not_signed_in());
-    }
-    let env_missing = ci_secrets::environment_missing(r, &gh.repo, gh.environment.as_deref())?;
+    let prepared = match to {
+        Destination::GitHub(gh) => {
+            if !ci_secrets::signed_in(r)? {
+                return Err(ci_secrets::not_signed_in());
+            }
+            let env_missing =
+                ci_secrets::environment_missing(r, &gh.repo, gh.environment.as_deref())?;
+            Prepared::GitHub { env_missing }
+        }
+        Destination::Machine(m) => Prepared::Machine(prepare_machine(
+            m,
+            slug.clone().unwrap_or_default(),
+            env,
+            project,
+            &id.service_account,
+            &er,
+        )?),
+    };
     // The one question.
-    let who = match target {
-        Some(t) => format!("the deploy identity of {env}/{t}"),
-        None => format!("the read-only CI reader of {env}"),
+    let who = match (to, target) {
+        (Destination::Machine(_), _) => {
+            format!("the read-only agent identity of {env} on this machine")
+        }
+        (_, Some(t)) => format!("the deploy identity of {env}/{t}"),
+        (_, None) => format!("the read-only CI reader of {env}"),
     };
     ui.show(&format!(
         "Create 1Password service account {:?} ({who}), valid 90 days, with:",
@@ -286,15 +525,39 @@ pub fn run_with_receipt(
         };
         ui.show(&format!("  vault {}: {perm}", g.vault_id))?;
     }
-    let place = match &gh.environment {
-        Some(e) if env_missing => format!("{} environment {e} (created now)", gh.repo),
-        Some(e) => format!("{} environment {e}", gh.repo),
-        None => format!("{} (repository secret)", gh.repo),
-    };
-    ui.show(&format!(
-        "and store its token as the GitHub secret {} in {place}. The token is never shown.",
-        gh.secret
-    ))?;
+    let mut place = String::new();
+    match (to, &prepared) {
+        (Destination::GitHub(gh), Prepared::GitHub { env_missing }) => {
+            place = match &gh.environment {
+                Some(e) if *env_missing => format!("{} environment {e} (created now)", gh.repo),
+                Some(e) => format!("{} environment {e}", gh.repo),
+                None => format!("{} (repository secret)", gh.repo),
+            };
+            ui.show(&format!(
+                "and store its token as the GitHub secret {} in {place}. The token is never shown.",
+                gh.secret
+            ))?;
+        }
+        (_, Prepared::Machine(prep)) => {
+            let store = super::agent_identity::store_name(prep.source.store);
+            ui.show(&format!(
+                "and keep its token in this machine's {store}. The token is never shown."
+            ))?;
+            ui.show(
+                "It reads these vaults' values only to deliver them, and can never change them. \
+                 An assistant running as you can still reach the token; see opv guide agent, \
+                 \"Agent identity\".",
+            )?;
+            if prep.source.volatile_cause(None).is_some() {
+                ui.show(&format!(
+                    "Note: {} is cleared when this machine (or WSL) stops; unattended runs \
+                     break after that.",
+                    prep.source.store.label()
+                ))?;
+            }
+        }
+        _ => {}
+    }
     if id.already_present {
         ui.show(&format!(
             "An account named {:?} already reads these vaults: this makes a second one. Keep the \
@@ -309,10 +572,12 @@ pub fn run_with_receipt(
         }
         .into());
     }
-    if let (true, Some(e)) = (env_missing, gh.environment.as_deref()) {
+    if let (Destination::GitHub(gh), Prepared::GitHub { env_missing: true }) = (to, &prepared)
+        && let Some(e) = gh.environment.as_deref()
+    {
         ci_secrets::create_environment(r, &gh.repo, e)?;
     }
-    // The token: created, held in memory only, then sent to GitHub on stdin.
+    // The token: created, held in memory only, then handed to its destination.
     let mut args: Vec<String> = vec![
         "service-account".into(),
         "create".into(),
@@ -340,8 +605,6 @@ pub fn run_with_receipt(
         account: id.account.clone().map(AccountId::new),
         ..DiagnoseContext::default()
     };
-    // In the account the vaults were checked in (#157), never op's default.
-    let er = crate::app::signin::EnvRunner::with_account(r, id.account.clone());
     let raw = create(&er, &Call::new("op", &argv), &ctx)?;
     let token = SecretValue::new(String::from_utf8_lossy(&raw).trim().to_string());
     drop(raw);
@@ -361,6 +624,18 @@ pub fn run_with_receipt(
         }
         .into());
     }
+    let hub = match (to, prepared) {
+        (Destination::Machine(m), Prepared::Machine(prep)) => {
+            return keep_on_machine(m, prep, env, project, &id, token, r, ui, out);
+        }
+        (Destination::GitHub(gh), _) => *gh,
+        _ => {
+            return Err(Cause::Bug {
+                site: "access --create: a destination prepared as another",
+            }
+            .into());
+        }
+    };
     // A token-scoped native call binds the closed create request to the actual immutable
     // account/user IDs. Never parse identity out of a token or match a mutable name.
     let issued = if let Some(contract) = contract {
@@ -374,7 +649,13 @@ pub fn run_with_receipt(
     } else {
         None
     };
-    let stored = ci_secrets::store(r, &gh.repo, gh.environment.as_deref(), &gh.secret, &token);
+    let stored = ci_secrets::store(
+        r,
+        &hub.repo,
+        hub.environment.as_deref(),
+        &hub.secret,
+        &token,
+    );
     drop(token);
     if let Err(e) = stored {
         // The account exists and its token is lost (1Password shows it once): say so
@@ -406,7 +687,7 @@ pub fn run_with_receipt(
     writeln!(
         out,
         "created {:?} and stored its token as {} in {place}; nothing was printed",
-        id.service_account, gh.secret
+        id.service_account, hub.secret
     )
     .map_err(write_err)?;
     // 07.16: a typed command, filled from what is known. A deploy identity's delivery leaves
@@ -422,6 +703,141 @@ pub fn run_with_receipt(
         }
         None => check,
     };
+    writeln!(out, "Next: {}", cmd_text(&next)).map_err(write_err)
+}
+
+/// The line for a token that exists only in memory after a step failed (§4.3, FM8): it
+/// names the account, says opv does not create it again (X5) and how to start over.
+fn token_lost(name: &str, store: &str) -> String {
+    format!(
+        "Service account {name:?} was created, but its token could not be kept in {store}. \
+         1Password shows a token only once, so opv does not try again: remove {name:?} in \
+         1Password (Developer > Service accounts), then run this again."
+    )
+}
+
+/// §4.3 steps 1.1 to 1.4, after the account exists: bind (nothing stored on a mismatch),
+/// store, check end to end, then record the value-free index entry and print (§7.2).
+#[allow(clippy::too_many_arguments)]
+fn keep_on_machine(
+    m: &Machine<'_>,
+    prep: MachinePrep,
+    env: &str,
+    project: &str,
+    id: &super::access::Identity,
+    token: SecretValue,
+    r: &dyn CommandRunner,
+    ui: &mut dyn Interaction,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use super::reader_grants::{Contract, VaultGrant};
+    let name = &id.service_account;
+    let store = super::agent_identity::store_name(prep.source.store);
+    let contract = Contract {
+        environment: env.to_string(),
+        role: "agent".into(),
+        account_id: prep.account_uuid.clone(),
+        vaults: id
+            .grants
+            .iter()
+            .map(|g| VaultGrant {
+                vault_id: g.vault_id.clone(),
+                permissions: vec!["read_items".into()],
+            })
+            .collect(),
+        can_create_vaults: false,
+    };
+    let vaults = contract.vaults.len();
+    // 1. Bind, always (FM5): the token's own account and vault set, before it is kept.
+    if let Err(e) = super::reader_grants::issued(&contract, &token, r) {
+        drop(token);
+        ui.show(&format!(
+            "Service account {name:?} was created, but under its token it is not exactly what \
+             was asked (account {} and these {vaults} vaults, read only), so nothing was \
+             stored: remove {name:?} in 1Password (Developer > Service accounts) before \
+             running this again.",
+            prep.account_uuid
+        ))?;
+        return Err(e);
+    }
+    // 2. Store, once (X5: the create is never re-run).
+    let stored = m.store.store(&prep.key, &token);
+    drop(token);
+    if let Err(e) = stored {
+        ui.show(&token_lost(name, store))?;
+        return Err(e);
+    }
+    // 3. Check end to end: read back non-interactively, then a token-scoped call.
+    let checked = match m.store.resolve(&prep.key) {
+        Ok(Some(back)) => super::reader_grants::issued(&contract, &back, r).map(|_| ()),
+        Ok(None) => Err(Cause::AgentStoreUnavailable {
+            store: prep.source.store,
+        }
+        .into()),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = checked {
+        // A token that does not read back is no identity: its entry goes, so nothing
+        // half-made is left for the next run to find.
+        let _ = m.store.delete(&prep.key);
+        ui.show(&token_lost(name, store))?;
+        return Err(e);
+    }
+    // 4. Record the value-free index entry (§7.5).
+    let today = super::retire::today();
+    let expires_on = crate::domain::credential::add_days(&today, VALIDITY_DAYS).unwrap_or_default();
+    let entry = super::agent_identity::IndexEntry {
+        project: project.to_string(),
+        account_id: prep.account_uuid.clone(),
+        record: crate::domain::agent_identity::AgentRecord {
+            account_name: name.clone(),
+            environment: env.to_string(),
+            machine: prep.slug.clone(),
+            store: super::agent_identity::store_id(prep.source.store),
+            created_on: today,
+            expires_on: expires_on.clone(),
+            rotation_successor: None,
+        },
+    };
+    if let Err(e) = super::agent_identity::record(m.index, entry) {
+        ui.show(&format!(
+            "Service account {name:?} was created and its token is kept and checked in \
+             {store}, but this machine's list of agent identities could not be written."
+        ))?;
+        return Err(e);
+    }
+    let reads = if vaults == 1 {
+        "exactly this vault".to_string()
+    } else {
+        format!("exactly these {vaults} vaults")
+    };
+    let done = format!(
+        "created {name:?}; checked it reads {reads}; stored its token in {store}; nothing was printed"
+    );
+    let set = "Set OPV_IDENTITY=agent in your assistant's environment to use it.";
+    let next = Cmd {
+        command: vec!["doctor".into()],
+        args: vec!["--env".into(), env.to_string()],
+    };
+    if m.json {
+        ui.show(&done)?;
+        ui.show(set)?;
+        let doc = serde_json::json!({
+            "created": name,
+            "kind": "agent",
+            "environment": env,
+            "machine": prep.slug,
+            "store": super::agent_identity::store_id(prep.source.store),
+            "read_only": true,
+            "vaults": vaults,
+            "expires_on": expires_on,
+            "use": "OPV_IDENTITY=agent",
+            "next": cmd_text(&next),
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    writeln!(out, "{done}").map_err(write_err)?;
+    writeln!(out, "{set}").map_err(write_err)?;
     writeln!(out, "Next: {}", cmd_text(&next)).map_err(write_err)
 }
 

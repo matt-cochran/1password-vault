@@ -12,6 +12,7 @@
 pub mod access;
 pub mod access_create;
 pub mod account;
+pub mod agent_identity;
 pub mod agent_view;
 pub mod apply;
 pub mod attest;

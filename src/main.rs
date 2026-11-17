@@ -1098,7 +1098,8 @@ enum Cmd {
     /// (read-only; people are counted, never named).
     #[command(
         before_help = ACCESS_QUICK,
-        group(clap::ArgGroup::new("identity_write").args(["create", "rotate"]))
+        group(clap::ArgGroup::new("identity_write").args(["create", "rotate"])),
+        group(clap::ArgGroup::new("token_destination").args(["github", "agent"]))
     )]
     Access {
         /// Only this environment.
@@ -1110,10 +1111,36 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
         /// Create the identity (the target's deploy identity, or without --target the CI
-        /// reader) and store its token as a GitHub secret; your own terminal only. The
+        /// reader) and store its token as a GitHub secret, or with --agent keep the
+        /// read-only agent identity's token on this machine; your own terminal only. The
         /// token is never shown, typed or written to a file.
-        #[arg(long, requires_all = ["env", "github"], conflicts_with = "rotate")]
+        #[arg(long, requires_all = ["env", "token_destination"], conflicts_with = "rotate")]
         create: bool,
+        /// With --create: the environment's read-only agent identity on this machine, its
+        /// token kept in this machine's OS credential store (#338).
+        #[arg(
+            long,
+            requires = "create",
+            conflicts_with_all = ["github", "github_env", "target", "grant_receipt", "rotate"]
+        )]
+        agent: bool,
+        /// With --agent: this machine's part of the account name (default: the host name).
+        #[arg(
+            long,
+            value_name = "MACHINE",
+            requires = "agent",
+            conflicts_with = "github"
+        )]
+        name: Option<String>,
+        /// With --agent: the environment's name again, which a production-tier
+        /// environment needs.
+        #[arg(
+            long,
+            value_name = "ENV",
+            requires = "agent",
+            conflicts_with = "github"
+        )]
+        confirm: Option<String>,
         /// Replace the identity with a fresh service account (named with today's date) and
         /// put its token in the existing GitHub secret; then revoke the old account in
         /// 1Password. Your own terminal only; the token is never shown (#296).
@@ -4056,6 +4083,16 @@ fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
             }
             (vec!["set"], args)
         }
+        // #338: creating an agent identity is a person's act, never the agent's.
+        Cmd::Access {
+            env: Some(env),
+            create: true,
+            agent: true,
+            ..
+        } => (
+            vec!["access"],
+            vec![env.clone(), "--create".into(), "--agent".into()],
+        ),
         _ => return None,
     };
     Some(opv::cause::Cmd {
@@ -5451,6 +5488,56 @@ fn run_other(
                 confirm,
             };
             target_op(&loaded?, &req, json, r, out)
+        }
+        Cmd::Access {
+            env: Some(env),
+            project,
+            create: true,
+            agent: true,
+            name,
+            confirm,
+            json,
+            ..
+        } => {
+            opv::app::setup_runtime::Console::require_terminal("access --create")?;
+            let dir = std::env::current_dir().unwrap_or_default();
+            let project = match project.as_deref() {
+                Some(name) => config_store::default_project(Some(name), None, &dir)?,
+                None => opv::app::personal::project_name(r, &dir),
+            };
+            let index = opv::app::agent_identity::index_path()
+                .ok_or_else(opv::app::agent_identity::no_config_dir)?;
+            let store = opv::adapters::credential_store::OsCredentialStore::detect();
+            let machine = opv::app::agent_identity::machine_name(name.as_deref());
+            let req = opv::app::access_create::AgentRequest {
+                env: &env,
+                project: &project,
+                machine: opv::app::access_create::Machine {
+                    name: &machine,
+                    confirm: confirm.as_deref(),
+                    store: &store,
+                    index: &index,
+                    json,
+                },
+            };
+            // With --json, stdout is the one document: the question goes to stderr.
+            if json {
+                opv::app::access_create::run_agent(
+                    &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::LoginConsole,
+                    out,
+                )
+            } else {
+                opv::app::access_create::run_agent(
+                    &loaded?,
+                    &req,
+                    r,
+                    &mut opv::app::setup_runtime::Console,
+                    out,
+                )
+            }
         }
         Cmd::Access {
             env: Some(env),
@@ -7179,6 +7266,102 @@ members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
         assert!(
             doc["plan"]["set"] == "signing" && !text.contains(HELD),
             "{text}"
+        );
+    }
+
+    // --- `opv access <env> --create --agent` (#338) -----------------------------------
+
+    fn access_parse(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let argv = ["opv", "access", "dev", "--create", "--agent"]
+            .into_iter()
+            .chain(extra.iter().copied());
+        Cli::try_parse_from(argv)
+    }
+
+    fn conflict_kind(extra: &[&str]) -> Option<clap::error::ErrorKind> {
+        access_parse(extra).err().map(|e| e.kind())
+    }
+
+    #[test]
+    fn create_agent_needs_no_github_repository() {
+        assert!(access_parse(&[]).is_ok());
+    }
+
+    #[test]
+    fn agent_conflicts_with_github() {
+        assert_eq!(
+            conflict_kind(&["--github", "acme/infra"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn agent_conflicts_with_target() {
+        assert_eq!(
+            conflict_kind(&["--target", "fleet"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn agent_conflicts_with_grant_receipt() {
+        assert_eq!(
+            conflict_kind(&["--grant-receipt", "r.json"]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn agent_needs_create() {
+        let e = Cli::try_parse_from(["opv", "access", "dev", "--agent"]).err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+    }
+
+    #[test]
+    fn create_without_a_destination_is_refused() {
+        let e = Cli::try_parse_from(["opv", "access", "dev", "--create"]).err();
+        assert_eq!(
+            e.map(|e| e.kind()),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+    }
+
+    #[test]
+    fn confirm_is_refused_with_github() {
+        let parsed = Cli::try_parse_from([
+            "opv",
+            "access",
+            "dev",
+            "--create",
+            "--github",
+            "a/b",
+            "--confirm",
+            "dev",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn create_agent_is_refused_under_an_agent_marker() {
+        let cli = access_parse(&[]).unwrap();
+        let cmd = person_only(&cli.cmd).expect("person-only");
+        let refused =
+            opv::host::refuse_if_agent(&opv::host::FakeEnv::new("linux").var("CLAUDECODE"), cmd);
+        assert_eq!(
+            refused.err().and_then(|e| e.cause().map(|(c, _)| c.code())),
+            Some("person_only")
+        );
+    }
+
+    #[test]
+    fn create_agent_hands_the_assistant_the_persons_command() {
+        let cli = access_parse(&["--name", "laptop"]).unwrap();
+        assert_eq!(
+            person_only(&cli.cmd).map(|c| opv::cause::render::cmd_text(&c)),
+            Some("opv access dev --create --agent".to_string())
         );
     }
 }
