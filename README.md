@@ -77,6 +77,12 @@ Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, ad
 opv skill install --user          # or, with the script: ... | sh -s -- --skill
 ```
 
+For unattended runs, give the assistant its own read-only identity instead of your session. Run one command in your own terminal, then set `OPV_IDENTITY=agent` in the assistant's environment. It is a 1Password service account that can only read that environment's vaults, the same as CI's reader. Its token stays in this machine's OS credential store, and only people change values ([agent identities](docs/usage.md#agent-identities-read-only)):
+
+```sh
+opv access dev --create --agent   # your own terminal; the token is never shown
+```
+
 In a checkout of a project whose configuration lives in 1Password, no file is needed:
 
 ```sh

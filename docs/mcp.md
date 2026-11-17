@@ -33,6 +33,17 @@ finding's `next`. When several accounts exist and none is selected for the proje
 `next` is `kind: choose`, one choice per account with its steps as `argv` arrays; never pick
 one for the person.
 
+`opv_state` sections `ready` and `accounts` also carry `identity` (0.22.0, #338): one value-free
+object per environment that says which 1Password identity the server's reads use. It is the
+same object as in `opv ready --json` and in `opv doctor`'s `op identity` row: `kind` (`agent`,
+`service_account`, `connect`, `person` or `none`), `name`, `environment`, `source`,
+`read_only`, `expires_on`, `days_left`, `reach`, `rate_limit`, `store` and `state`
+([agent identities](usage.md#check-it-opv-doctor-and-opv-ready)). Start the server with
+`OPV_IDENTITY=agent` in its environment and it reads as this machine's read-only agent
+identity. An environment that has none reports `state: agent_not_installed`, and the server
+never falls back to the person's session. No tool was added: under the agent identity,
+`opv_import_local` is refused with `own_session_required`, like every other write.
+
 `opv_state` section `needs` takes the CLI's `opv needs` inputs (0.13.0): `env` and `product`
 narrow the declared keys; `scan` is a directory to scan instead of the git tree, which must
 be inside the project (a relative path is resolved against it, and a path or symbolic link
