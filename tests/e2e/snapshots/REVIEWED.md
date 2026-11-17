@@ -303,3 +303,9 @@ One new scenario snapshot, `scenarios/agent_identity.snap` (`tests/e2e/scenarios
 Points for the owner: `plan prod` under the agent ends `Next: opv sync prod --deploy …`, a command the agent identity is refused (D12); `agent_store_unavailable`'s `Do:` names the host's store (here the fake's Secret Service advice).
 
 - [ ] Owner sign-off of the agent identity snapshot.
+
+### 0.22.0: agent polish (#338, s12b)
+
+`scenarios/agent_identity.snap` changed in two places, both under `OPV_IDENTITY=agent`: `plan prod` now ends `Next: deploy through CI's deploy job, or the person runs opv sync prod --deploy --prune --expect-plan … in their own terminal`, and its `--json` `next` is `{kind: apply, actor: person, command: "opv sync …"}` (was the assistant's `run`); `status prod`'s `pending deploy (…)` line carries the same words. This answers the point above (D12). The scenario's world now keeps the app's personal key (`web/PERSONAL_LLM_KEY`): `opv run dev` under the agent leaves it out with one value-free note naming it and runs with the shared keys (asserted by tests, not the snapshot). Checked by the implementing agent: no token and no value anywhere; no new line names `OPV_IDENTITY=person`.
+
+- [ ] Owner sign-off of the agent polish changes.

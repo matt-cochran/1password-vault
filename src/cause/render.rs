@@ -39,6 +39,58 @@ fn vendor(program: &str, args: &[&str]) -> Next {
     })
 }
 
+/// #338 (D12): whether this process runs as the read-only agent identity, which is refused
+/// `opv sync`.
+fn agent_runs() -> bool {
+    matches!(
+        crate::host::Host::detect().op_credential,
+        Some(crate::host::OpCredential::Agent)
+    )
+}
+
+/// Whether `c` is a step to `opv sync`: a deploy.
+fn is_sync(c: &Cmd) -> bool {
+    c.command == ["sync"]
+}
+
+/// A success-path step as its `Next:` words ([`cmd_text`]), for whoever runs opv. Under
+/// the agent identity a step to `opv sync` is never the agent's (D12: agents never deploy,
+/// and opv refuses it): the deploy goes through CI's deploy job, or the person runs that
+/// command in their own terminal.
+pub fn deploy_step_text(c: &Cmd) -> String {
+    deploy_step_text_on(c, agent_runs())
+}
+
+/// [`deploy_step_text`], judged by `agent`.
+pub(crate) fn deploy_step_text_on(c: &Cmd, agent: bool) -> String {
+    let shown = cmd_text(c);
+    if agent && is_sync(c) {
+        format!("deploy through CI's deploy job, or the person runs {shown} in their own terminal")
+    } else {
+        shown
+    }
+}
+
+/// A success-path step as a document's `next`: the command line (the assistant's `run`),
+/// or under the agent identity a step to `opv sync` as the person's `apply` of it, so an
+/// agent never reads a deploy as its own step ([`deploy_step_text`]).
+pub fn deploy_step_value(c: &Cmd) -> serde_json::Value {
+    deploy_step_value_on(c, agent_runs())
+}
+
+/// [`deploy_step_value`], judged by `agent`.
+pub(crate) fn deploy_step_value_on(c: &Cmd, agent: bool) -> serde_json::Value {
+    if agent && is_sync(c) {
+        serde_json::json!({
+            "kind": NextKind::Apply,
+            "actor": NextActor::Person,
+            "command": cmd_text(&without_json(c.clone())),
+        })
+    } else {
+        serde_json::Value::String(cmd_text(c))
+    }
+}
+
 /// The command line of a [`Cmd`]: its argv ([`Cmd::to_argv`]), each word quoted with
 /// `shell_word`.
 ///

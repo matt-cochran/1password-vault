@@ -292,6 +292,27 @@ fn created(w: &World) -> Vec<String> {
 
 // --- one environment ------------------------------------------------------------------
 
+/// #338: rotating the same identity twice in one minute names two service accounts.
+#[test]
+fn a_second_rotation_the_same_minute_names_a_new_successor() {
+    let w = World::new();
+    let m = machine(&["dev"]);
+    for _ in 0..2 {
+        let _ = rotate(
+            &w,
+            &m,
+            Opts {
+                env: Some("dev"),
+                ..Opts::default()
+            },
+        );
+    }
+    assert_eq!(
+        created(&w),
+        vec![successor("dev"), format!("{}-2", successor("dev"))]
+    );
+}
+
 #[test]
 fn one_environment_rotates_only_its_identity() {
     let w = World::new();

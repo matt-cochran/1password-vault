@@ -1,7 +1,7 @@
 //! `opv access [<env>] --rotate --agent [--revoked <name>] [--confirm <env>]` (#338, design
 //! `agent-identity.md` §7.3, vet R8): replace the read-only agent identity of `<env>` on
 //! this machine, or with no environment every identity this machine's index records for the
-//! project, each with a fresh service account `<base>-YYYYMMDD` that has the same read-only
+//! project, each with a fresh service account `<base>-YYYYMMDD-HHMM` that has the same read-only
 //! grants and a 90-day lifetime.
 //!
 //! One question covers the whole batch. Then, per identity and in this order:
@@ -248,7 +248,15 @@ fn plan(
         )
     })?;
     let base = crate::domain::access_plan::agent_account(req.project, &env, &entry.record.machine);
-    let successor = format!("{base}-{}", super::credentials_rotate::date_suffix());
+    // #338: unique within a day, and never the name being replaced or one just revoked.
+    let successor = super::credentials_rotate::successor_name(
+        &base,
+        &super::credentials_rotate::date_suffix(),
+        &[
+            entry.record.account_name.as_str(),
+            req.revoked.unwrap_or_default(),
+        ],
+    );
     let mut vaults: Vec<VaultGrant> = Vec::new();
     for g in &id.grants {
         if !vaults.iter().any(|v| v.vault_id == g.vault_id) {

@@ -2719,24 +2719,24 @@ pub fn plan_rooted(
     // environment's `--confirm`. A plan with findings has no sync step at all: its step is
     // the error's, opening the first value to fill (01.05), and opv never confirms (X4).
     let clean = n == 0;
-    let sync_next = step_text(
-        &SyncOpts {
-            // A live target has nothing to deploy (FR-46).
-            deploy: parts.iter().any(|p| !p.live),
-            prune: parts
-                .iter()
-                .any(|p| !p.plan.prune.is_empty() || !p.var_plan.prune.is_empty()),
-            product: product.map(str::to_string),
-            expect_plan: clean.then(|| id.clone()),
-            receipt: None,
-            targets: targets.to_vec(),
-            // The canonical (sorted, deduped) rotate set, so the Next command is stable.
-            rotate: parsed.iter().map(|(p, k)| key_label(p, k)).collect(),
-            sealed_root: sealed_root.map(std::path::Path::to_path_buf),
-            ..SyncOpts::default()
-        }
-        .command(env_name),
-    );
+    // #338 (D12): under the agent identity the step reads as CI's deploy job's or the
+    // person's, never the agent's ([`crate::cause::render::deploy_step_text`]).
+    let sync_next = SyncOpts {
+        // A live target has nothing to deploy (FR-46).
+        deploy: parts.iter().any(|p| !p.live),
+        prune: parts
+            .iter()
+            .any(|p| !p.plan.prune.is_empty() || !p.var_plan.prune.is_empty()),
+        product: product.map(str::to_string),
+        expect_plan: clean.then(|| id.clone()),
+        receipt: None,
+        targets: targets.to_vec(),
+        // The canonical (sorted, deduped) rotate set, so the Next command is stable.
+        rotate: parsed.iter().map(|(p, k)| key_label(p, k)).collect(),
+        sealed_root: sealed_root.map(std::path::Path::to_path_buf),
+        ..SyncOpts::default()
+    }
+    .command(env_name);
     let counts: Vec<String> = parts.iter().map(|p| p.count(env_name)).collect();
     for (p, count) in parts.iter().zip(&counts) {
         let heading = match product {
@@ -2772,7 +2772,7 @@ pub fn plan_rooted(
             &super::JsonExtra {
                 plan_id: clean.then_some(id.as_str()),
                 provenance: None,
-                next: clean.then_some(sync_next.as_str()),
+                next: clean.then(|| crate::cause::render::deploy_step_value(&sync_next)),
                 link: link.as_deref(),
             },
         )?;
@@ -2831,7 +2831,12 @@ pub fn plan_rooted(
         plan_id_line(&id, item_version, fleet.origin.noun())
     )
     .map_err(write_err)?;
-    write!(out, "{}", next_line(&sync_next)).map_err(write_err)
+    write!(
+        out,
+        "{}",
+        next_line(&crate::cause::render::deploy_step_text(&sync_next))
+    )
+    .map_err(write_err)
 }
 
 /// What `plan` planned for one target (FR-56).
