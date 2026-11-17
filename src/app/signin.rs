@@ -292,8 +292,8 @@ fn resolve_identity(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Res
         &host_name,
         kept,
         &|target| {
-            let store = crate::adapters::credential_store::OsCredentialStore::detect();
-            crate::identity::resolve(&store, || Ok(target)).map(|_| ())
+            let store = crate::adapters::credential_store::machine_store();
+            crate::identity::resolve(store.as_ref(), || Ok(target)).map(|_| ())
         },
     )
 }

@@ -5507,7 +5507,7 @@ fn run_other(
             };
             let index = opv::app::agent_identity::index_path()
                 .ok_or_else(opv::app::agent_identity::no_config_dir)?;
-            let store = opv::adapters::credential_store::OsCredentialStore::detect();
+            let store = opv::adapters::credential_store::machine_store();
             let machine = opv::app::agent_identity::machine_name(name.as_deref());
             let req = opv::app::access_create::AgentRequest {
                 env: &env,
@@ -5515,7 +5515,7 @@ fn run_other(
                 machine: opv::app::access_create::Machine {
                     name: &machine,
                     confirm: confirm.as_deref(),
-                    store: &store,
+                    store: store.as_ref(),
                     index: &index,
                     json,
                 },

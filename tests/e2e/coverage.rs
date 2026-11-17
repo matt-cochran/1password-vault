@@ -115,33 +115,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "native Windows only (D12); the e2e harness is Unix-only",
     ),
     // end provision
-    // agent identity (#338): the causes land before the store, the selection and opv-sim's
-    // `op service-account create` (design agent-identity.md §14, S4–S8); S12's e2e scenarios
-    // reach them and remove these rows. Reached by src/cause/render_tests.rs and
-    // src/adapters/onepassword_diagnose_tests.rs until then.
-    (
-        "AgentIdentityNotInstalled",
-        "no selection of the agent identity yet (S5); S12 reaches it",
-    ),
-    (
-        "AgentIdentityExists",
-        "no `opv access --create --agent` yet (S8); S12 reaches it",
-    ),
-    (
-        "AgentRejected",
-        "no agent identity run yet (S5, S6); S12 reaches it",
-    ),
-    (
-        "AgentStoreUnavailable",
-        "no credential-store adapter yet (S4); S12 reaches it",
-    ),
-    (
-        "AgentStoreLocked",
-        "no credential-store adapter yet (S4); S12 reaches it",
-    ),
+    // agent identity (#338): scenarios/agent_identity.rs reaches the other agent causes.
+    // `AgentStoreVolatile` is reported only by doctor's `identity` row (design §7.4, slice
+    // S10), which is not built yet; `access --create --agent` shows it as a note, never an
+    // error. Reached by src/cause/render_tests.rs until then.
     (
         "AgentStoreVolatile",
-        "no credential-store adapter yet (S4); S12 reaches it",
+        "only doctor's identity row (S10, not built yet) reports it",
     ),
     // end agent identity
 ];
@@ -2752,6 +2732,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .map(|(n, _, _)| *n)
         .chain(FLOWS.iter().copied())
         .chain(CORE.iter().copied())
+        .chain(crate::scenarios::agent_identity::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::consistency::SNAPSHOTS.iter().copied())
         .chain(

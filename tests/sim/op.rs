@@ -24,6 +24,22 @@
 //! the world's rows in the fields opv reads, one compact line, and are not taken from a
 //! recording.
 //!
+//! **Service accounts (#338).** `op service-account create <name> --vault <id>:<perms>…
+//! --expires-in <d> --raw`, run by a person, adds a `service_accounts` row and prints its new
+//! token, one line (what `--raw` prints; the token is a marker, `ops_SIMTOKEN…`). Under that
+//! token `whoami` is recording s30 and `vault list` s31, one entry per granted vault; every
+//! vault and item call sees only the granted vaults (a vault outside them is 08, not found),
+//! and a write to a vault granted `read_items` only is refused (no recording of op's text:
+//! exit 86). `op service-account ratelimit` is not recorded: it prints the world's
+//! `ratelimit` rows (or none) in op's documented table columns, awaiting owner recording.
+//!
+//! **`op run -- <command>…`** resolves each `op://<vault>/<item>/<section>/<field>` (or
+//! `…/<item>/<field id>`) variable from the world, under the same identity and vault reach,
+//! and execs the command with that environment, as op passes its whole environment on. The
+//! environment `op run` itself was given is recorded, value-free, in `op-run-env.json` of the
+//! scenario directory: the variable names, and whether `OP_SERVICE_ACCOUNT_TOKEN` was a token
+//! the world knows (never the token). An unresolvable reference is unrecorded (exit 86).
+//!
 //! `op signin --force --account <id>` with a live session for another account on the same
 //! sign-in address is recording 13 (a success with no output): it marks that account signed in
 //! for the calls after it (#160). With no such session, real op prompts, which the simulator
@@ -36,6 +52,10 @@
 //!                 "email": "a@example.com", "user": "UUUU…", "user_type": "HUMAN",
 //!                 "signed_in": true}],
 //!   "service_account_tokens": ["ops_…"],    // OP_SERVICE_ACCOUNT_TOKEN values op accepts
+//!                                            // (the whole default account)
+//!   "service_accounts": [{"id": "SA…", "name": "app-dev-agent-m", "token": "ops_…",
+//!                         "account": "AAAA…", "vaults": [{"id": "v…",
+//!                         "permissions": "read_items"}]}],  // `service-account create`
 //!   "vaults": [{"id": "v…", "name": "myapp-dev", "account": "AAAA…", "users": []}],
 //!   "items": [ /* `op item get --format json` documents, marker values only */ ]
 //! }
@@ -177,7 +197,22 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
         return from_recording("s01-account-list", |doc| per_entry(&doc, &rows));
     }
     // The acting identity: a service account token, else the named or default account.
-    let account = if let Ok(token) = std::env::var("OP_SERVICE_ACCOUNT_TOKEN") {
+    let scoped = std::env::var("OP_SERVICE_ACCOUNT_TOKEN")
+        .ok()
+        .and_then(|t| service_account(world, &t));
+    let account = if let Some(sa) = &scoped {
+        let Some(mut a) = sa["account"]
+            .as_str()
+            .and_then(|id| find_account(world, id))
+            .or_else(|| default_account(world))
+        else {
+            return fault(Kind::CredentialRejected, world, args);
+        };
+        a["user"] = sa["id"].clone();
+        a["user_type"] = json!("SERVICE_ACCOUNT");
+        a["signed_in"] = json!(true);
+        a
+    } else if let Ok(token) = std::env::var("OP_SERVICE_ACCOUNT_TOKEN") {
         let known = world.doc["op"]["service_account_tokens"]
             .as_array()
             .is_some_and(|t| t.iter().any(|t| t.as_str() == Some(token.as_str())));
@@ -218,9 +253,26 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
         a
     };
     let acct = id_of(&account);
+    let reach = Reach::of(scoped.as_ref());
+    GRANTED.with(|g| *g.borrow_mut() = reach.granted.clone());
     let ws: Vec<&str> = w.iter().map(String::as_str).collect();
+    if let Some(r) = reach.refuses_write(world, &acct, &ws, args) {
+        return r;
+    }
     match ws.as_slice() {
+        ["whoami"] if scoped.is_some() => from_recording("s30-whoami-service-account", |doc| {
+            filled(&doc, &account_row(&account))
+        }),
         ["whoami"] => whoami(&account, named_account(args).is_some()),
+        ["vault", "list"] if scoped.is_some() => {
+            let rows: Vec<Value> = vaults_of(world, &acct)
+                .iter()
+                .map(|v| vault_row(world, v))
+                .collect();
+            from_recording("s31-vault-list-service-account", |doc| {
+                per_entry(&doc, &rows)
+            })
+        }
         ["vault", "list"] => {
             let rows: Vec<Value> = vaults_of(world, &acct)
                 .iter()
@@ -290,7 +342,225 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
             }
             recorded(&format!("{DIR}/13-b-signin-with-a-session-live"), &[])
         }
+        ["service-account", "create", name] if scoped.is_none() => {
+            service_account_create(world, &acct, name, args)
+        }
+        ["service-account", "ratelimit", ..] => ratelimit(world),
+        ["run"] => op_run(world, &acct, args),
         _ => Reply::unsupported("op", args),
+    }
+}
+
+/// The `service_accounts` row whose token is `token`.
+fn service_account(world: &World, token: &str) -> Option<Value> {
+    world.doc["op"]["service_accounts"]
+        .as_array()?
+        .iter()
+        .find(|s| s["token"].as_str() == Some(token))
+        .cloned()
+}
+
+/// What the acting identity reaches: every vault of its account (a person, or a token of
+/// `service_account_tokens`), or a service account's granted vaults.
+struct Reach {
+    /// Granted vault ID → op's permission list (`read_items,write_items`).
+    granted: Option<Vec<(String, String)>>,
+}
+
+impl Reach {
+    fn of(service_account: Option<&Value>) -> Self {
+        Self {
+            granted: service_account.map(|sa| {
+                sa["vaults"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|g| {
+                        (
+                            g["id"].as_str().unwrap_or_default().to_string(),
+                            g["permissions"].as_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    /// Whether `vault` (an ID) may be written: always for a person, else with `write_items`.
+    fn writes(&self, vault: &str) -> bool {
+        self.granted.as_ref().is_none_or(|g| {
+            g.iter()
+                .any(|(id, p)| id == vault && p.split(',').any(|p| p == "write_items"))
+        })
+    }
+
+    /// A service account's write to a vault it may only read: op refuses it, and its text
+    /// is not recorded.
+    fn refuses_write(
+        &self,
+        world: &World,
+        acct: &str,
+        ws: &[&str],
+        args: &[String],
+    ) -> Option<Reply> {
+        self.granted.as_ref()?;
+        let vault_id = match ws {
+            ["item", "create" | "edit" | "delete", ..] => {
+                let v = flag(args, "--vault")?;
+                vault(world, acct, v).ok()?["id"].as_str()?.to_string()
+            }
+            ["vault", "create" | "edit" | "delete", ..] | ["service-account", "create", ..] => {
+                String::new()
+            }
+            _ => return None,
+        };
+        (!self.writes(&vault_id)).then(|| {
+            Reply::no_recording(
+                &format!("a read-only service account's op {}", ws.join(" ")),
+                DIR,
+            )
+        })
+    }
+}
+
+/// `op service-account create <name> --vault <id>:<perms>… --expires-in <d> --raw` by a
+/// person: a new `service_accounts` row in the person's account, its token printed alone.
+/// op's reply is not recorded; `--raw` prints the token and a newline.
+fn service_account_create(world: &mut World, acct: &str, name: &str, args: &[String]) -> Reply {
+    let mut grants = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a != "--vault" {
+            continue;
+        }
+        let Some((v, perms)) = it.next().and_then(|g| g.split_once(':')) else {
+            return Reply::unsupported("op", args);
+        };
+        let found = match vault(world, acct, v) {
+            Ok(found) => found,
+            Err(r) => return r,
+        };
+        grants.push(json!({"id": found["id"], "permissions": perms}));
+    }
+    let id = world.new_id("SASIM");
+    let token = format!("ops_SIMTOKEN{}", world.new_id("CANARY"));
+    world.array_at("/op/service_accounts").push(json!({
+        "id": id, "name": name, "token": token, "account": acct, "vaults": grants,
+        "expires_in": flag(args, "--expires-in"),
+    }));
+    Reply::ok(format!("{token}\n"))
+}
+
+/// `op service-account ratelimit`: op's table (`TYPE ACTION LIMIT USED REMAINING RESET`),
+/// one row per world `op.ratelimit` entry. Not recorded (awaiting owner recording).
+fn ratelimit(world: &World) -> Reply {
+    let mut out = String::from("TYPE       ACTION        LIMIT    USED    REMAINING    RESET\n");
+    for r in world.doc["op"]["ratelimit"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let col = |k: &str| match &r[k] {
+            Value::String(s) => s.clone(),
+            v => v.to_string(),
+        };
+        out.push_str(&format!(
+            "{:<11}{:<14}{:<9}{:<8}{:<13}{}\n",
+            col("type"),
+            col("action"),
+            col("limit"),
+            col("used"),
+            col("remaining"),
+            col("reset")
+        ));
+    }
+    Reply::ok(out)
+}
+
+/// The value of the field an `op://` reference names, within the acting identity's reach.
+fn resolve_reference(world: &World, acct: &str, reference: &str) -> Option<String> {
+    let path = reference.strip_prefix("op://")?;
+    let mut parts = path.splitn(3, '/');
+    let (v, i, rest) = (parts.next()?, parts.next()?, parts.next()?);
+    let vault = vault(world, acct, v).ok()?;
+    let item = find_item(world, acct, i, vault["id"].as_str()).ok()?;
+    let fields = item["fields"].as_array()?;
+    let field = match rest.split_once('/') {
+        Some((section, label)) => fields.iter().find(|f| {
+            f["label"] == label
+                && (f["section"]["label"] == section || f["section"]["id"] == section)
+        }),
+        None => fields
+            .iter()
+            .find(|f| f["id"] == rest || f["label"] == rest),
+    }?;
+    Some(field["value"].as_str().unwrap_or_default().to_string())
+}
+
+/// `op run -- <command>…`: the command exec'd with every `op://` variable resolved. The
+/// environment op itself was given is recorded value-free first (`op-run-env.json`).
+fn op_run(world: &mut World, acct: &str, args: &[String]) -> Reply {
+    let Some(at) = args.iter().position(|a| a == "--") else {
+        return Reply::unsupported("op", args);
+    };
+    let Some((program, rest)) = args[at + 1..].split_first() else {
+        return Reply::unsupported("op", args);
+    };
+    let mut names: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .collect();
+    names.sort();
+    let token = match std::env::var("OP_SERVICE_ACCOUNT_TOKEN") {
+        Err(_) => "absent",
+        Ok(t) if service_account(world, &t).is_some() => "service_account",
+        Ok(_) => "unknown",
+    };
+    let path = world.dir.join("op-run-env.json");
+    let mut runs: Vec<Value> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    runs.push(json!({"names": names, "token": token}));
+    let _ = std::fs::write(&path, serde_json::to_vec_pretty(&runs).unwrap_or_default());
+    let mut resolved = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        let (Ok(k), Ok(v)) = (k.into_string(), v.into_string()) else {
+            continue;
+        };
+        if v.starts_with("op://") {
+            match resolve_reference(world, acct, &v) {
+                Some(value) => resolved.push((k, value)),
+                None => {
+                    return Reply::no_recording(&format!("op run with {k} unresolvable"), DIR);
+                }
+            }
+        }
+    }
+    if let Err(e) = world.save() {
+        return Reply {
+            stderr: e.into_bytes(),
+            code: 1,
+            ..Reply::default()
+        };
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // The scenario directory's lock is close-on-exec: the command never holds it.
+        let e = std::process::Command::new(program)
+            .args(rest)
+            .envs(resolved)
+            .exec();
+        Reply {
+            stderr: format!("opv-sim: op run could not start {program}: {e}\n").into_bytes(),
+            code: 127,
+            ..Reply::default()
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (program, rest, resolved);
+        Reply::unsupported("op", args)
     }
 }
 
@@ -413,7 +683,24 @@ fn op_layout(v: &Value) -> String {
     out
 }
 
-/// The vaults of account `acct` (a vault with no `account` belongs to the default one).
+thread_local! {
+    /// The acting service account's granted vaults for this call ([`Reach::granted`]):
+    /// every vault and item lookup sees only these.
+    static GRANTED: std::cell::RefCell<Option<Vec<(String, String)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether the acting identity's reach includes `vault` (every vault of a person's account).
+fn in_reach(vault: &Value) -> bool {
+    GRANTED.with(|g| {
+        g.borrow()
+            .as_ref()
+            .is_none_or(|g| g.iter().any(|(id, _)| vault["id"] == id.as_str()))
+    })
+}
+
+/// The vaults of account `acct` (a vault with no `account` belongs to the default one) the
+/// acting identity reaches.
 fn vaults_of(world: &World, acct: &str) -> Vec<Value> {
     let default = default_account(world).map(|a| id_of(&a));
     world.doc["op"]["vaults"]
@@ -425,6 +712,7 @@ fn vaults_of(world: &World, acct: &str) -> Vec<Value> {
             Some(a) => a == acct,
             None => default.as_deref() == Some(acct),
         })
+        .filter(in_reach)
         .collect()
 }
 
@@ -437,9 +725,12 @@ fn vault(world: &World, acct: &str, name: &str) -> Result<Value, Reply> {
     {
         return Ok(v);
     }
-    let elsewhere = world.doc["op"]["vaults"]
-        .as_array()
-        .is_some_and(|all| all.iter().any(|v| v["id"] == name || v["name"] == name));
+    // A service account is told of no vault it was not granted: not found (08).
+    let scoped = GRANTED.with(|g| g.borrow().is_some());
+    let elsewhere = !scoped
+        && world.doc["op"]["vaults"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|v| v["id"] == name || v["name"] == name));
     Err(if elsewhere {
         recorded(
             &format!("{DIR}/14-vault-in-other-account"),

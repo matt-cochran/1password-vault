@@ -105,6 +105,15 @@ fn admin(args: &[String]) -> i32 {
                     return fail(&format!("cannot link {}: {e}", link.display()));
                 }
             }
+            // A call whose environment opv cleared still finds its world (world.rs).
+            if let Some(world) = std::env::var_os(world::WORLD_VAR)
+                && let Err(e) = std::fs::write(
+                    dir.join(world::WORLD_FILE),
+                    Path::new(&world).display().to_string(),
+                )
+            {
+                return fail(&format!("cannot write {}: {e}", world::WORLD_FILE));
+            }
             0
         }
         _ => fail(

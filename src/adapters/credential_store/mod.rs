@@ -35,6 +35,18 @@ use crate::error::Error;
 #[cfg(any(test, feature = "fake"))]
 pub use fake::{FakeCredentialSource, FakeFault};
 
+/// This machine's store for the agent identity ([`OsCredentialStore::detect`]). Builds with
+/// the `fake` feature (tests only; release builds never enable it) use a [`fake::DirStore`]
+/// in the directory `OPV_FAKE_AGENT_STORE` names instead, so the end-to-end scenarios never
+/// touch the host's own store.
+pub fn machine_store() -> Box<dyn AgentCredentialSource> {
+    #[cfg(feature = "fake")]
+    if let Some(dir) = std::env::var_os(fake::DIR_VAR).filter(|d| !d.is_empty()) {
+        return Box::new(fake::DirStore::from_env(dir.into()));
+    }
+    Box::new(OsCredentialStore::detect())
+}
+
 /// The bound on every store read (vet R6): a read that has not answered by then would be
 /// waiting on a prompt or a hung daemon, and opv never waits on either.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);

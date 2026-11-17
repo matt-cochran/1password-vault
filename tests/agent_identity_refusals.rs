@@ -22,6 +22,8 @@ const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 const OPV: &str = env!("CARGO_BIN_EXE_opv");
 const SIM: &str = env!("CARGO_BIN_EXE_opv-sim");
 const ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
+/// The installed agent identity's token: one `opv-sim` accepts (`tests/e2e/app/world.json`).
+const AGENT_TOKEN: &str = "ops_e2e_marker_service_account_token";
 
 /// A one-member set on `dev` (`opv provision gen --env dev`).
 const GEN_SET: &str = r#"
@@ -81,6 +83,16 @@ impl Project {
             std::fs::copy(app.join(from), p.path(to)).expect("app file");
         }
         std::fs::write(p.path("world/faults.toml"), "").expect("faults");
+        // The agent identity of `dev` and `prod` is installed, in a fake store in the
+        // scenario (`OPV_FAKE_AGENT_STORE`, never the host's own): a run resolves it before
+        // its first `op` call, then refuses the write. One file per entry, named by the hex
+        // of `account/project/env`; the token is one the simulator accepts.
+        for env in ["dev", "prod"] {
+            let user = format!("{ACCOUNT}/project/{env}");
+            let name: String = user.bytes().map(|b| format!("{b:02x}")).collect();
+            std::fs::create_dir_all(p.path("store")).expect("store");
+            std::fs::write(p.path("store").join(name), AGENT_TOKEN).expect("store entry");
+        }
         std::fs::write(p.path("project/.opv"), format!("account = \"{ACCOUNT}\"\n")).expect(".opv");
         let dotenv = p.path("project/dev.env");
         std::fs::write(&dotenv, "API_KEY=test-marker-e2e-agent-import\n").expect("dotenv");
@@ -126,6 +138,7 @@ impl Project {
             .env("OPV_TEST_SUID_DUMPABLE", "0")
             .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .env("OPV_IDENTITY", "agent")
+            .env("OPV_FAKE_AGENT_STORE", self.path("store"))
             .stderr(Stdio::piped());
         // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent.
         unsafe {
