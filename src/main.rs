@@ -5586,13 +5586,13 @@ fn run_other(
             };
             let index = opv::app::agent_identity::index_path()
                 .ok_or_else(opv::app::agent_identity::no_config_dir)?;
-            let store = opv::adapters::credential_store::OsCredentialStore::detect();
+            let store = opv::adapters::credential_store::machine_store();
             let req = opv::app::agent_identity_rotate::Request {
                 env: env.as_deref(),
                 project: &project,
                 revoked: revoked.as_deref(),
                 confirm: confirm.as_deref(),
-                store: &store,
+                store: &*store,
                 index: &index,
                 json,
             };

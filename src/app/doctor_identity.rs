@@ -185,9 +185,7 @@ impl<'a> Seams<'a> {
     pub fn process(r: &'a dyn CommandRunner) -> Self {
         Seams {
             resolve: Box::new(move |fleet, env| resolve_process(fleet, env, r)),
-            source: Box::new(|| {
-                Arc::new(crate::adapters::credential_store::OsCredentialStore::detect())
-            }),
+            source: Box::new(|| Arc::from(crate::adapters::credential_store::machine_store())),
             record: Box::new(|name, env| {
                 let path = crate::app::agent_identity::index_path()?;
                 let index = crate::app::agent_identity::load(&path).ok()?;
@@ -217,8 +215,8 @@ fn resolve_process(fleet: &Fleet, env: &str, r: &dyn CommandRunner) -> Result<St
         &|| crate::app::agent_identity::machine_name(None),
         kept,
         &|target| {
-            let store = crate::adapters::credential_store::OsCredentialStore::detect();
-            crate::identity::resolve(&store, || Ok(target)).map(|_| ())
+            let store = crate::adapters::credential_store::machine_store();
+            crate::identity::resolve(&*store, || Ok(target)).map(|_| ())
         },
     )?;
     crate::identity::agent_name()
