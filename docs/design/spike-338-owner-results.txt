@@ -1,0 +1,25 @@
+# spike-338 owner results (names only; no token, no value)
+== first run, 2026-11-17T16:06:55Z
+op_version: 2.40.0
+wsl_kernel: 6.18.58.1-microsoft-standard-WSL2
+uptime_since: 2026-11-16 12:44:21
+service_account_name: opv-spike-338-20261117-1106
+granted_vault: opv-spike-338 (read_items)
+person_vault_types: unknown=91
+person_private_vault_names: 
+create: ok (expires in 1h)
+sa_whoami_user_type: SERVICE_ACCOUNT
+sa_whoami_account_uuid: <account-uuid>
+sa_whoami_url: <account-url>
+sa_vault_count: 1
+sa_vault_names: opv-spike-338
+sa_item_create: refused (exit 12): [ERROR] 2026/11/17 11:07:05 (101) You do not have permission to perform this action 
+sa_ratelimit_no_argument: exit 0
+  ratelimit| TYPE       ACTION        LIMIT    USED    REMAINING    RESET
+  ratelimit| token      write         100      1       99           59 minutes from now
+  ratelimit| token      read          1000     2       998          59 minutes from now
+  ratelimit| account    read_write    1000     8       992          13 hours from now
+sa_ratelimit_json: exit 0, keys: action,limit,remaining,reset,type,used
+windows_credential_manager_store: stored
+windows_credential_manager_readback: match (656 ms)
+kernel_user_keyring_control: skipped (keyctl not installed; 'sudo apt install keyutils' adds it)
