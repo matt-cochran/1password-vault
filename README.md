@@ -71,7 +71,7 @@ npm picks the prebuilt binary for your system; the command is `opv`. Without Nod
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
-Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, add its agent skill, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json` and never handles a secret value:
+Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, add its agent skill, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json`. The assistant may run authorized commands, such as your tests, through `opv run`: opv delivers the values to that process, and the model sees only value-free results, never a secret value ([agent setup](docs/agent-setup.md)):
 
 ```sh
 opv skill install --user          # or, with the script: ... | sh -s -- --skill
