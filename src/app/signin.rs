@@ -267,11 +267,124 @@ fn open_at<'a>(
     let Some(env) = fleet.environments.get(env_name) else {
         return Ok(EnvRunner::new(r, None));
     };
+    resolve_identity(fleet, env_name, r)?;
     let mut runner = EnvRunner::new(r, account_of(env, host));
     if reach == Reach::Target {
         runner.deploy_sign_in(fleet, env_name, target)?;
     }
     Ok(runner)
+}
+
+/// Resolve this process's identity for `env_name` (#338, design §5) before the
+/// environment's first `op` call. Only rules 3 and 4 (`OPV_IDENTITY=agent`, or agent mode
+/// with an agent identity installed for the project) read anything: the agent identity of
+/// (account, project, `env_name`) from this machine's credential store,
+/// once per process; the runner then hands its token to `op` alone. Rules 1 and 2 (a token
+/// in the environment, the person) are unchanged.
+fn resolve_identity(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Result<(), Error> {
+    let kept = crate::identity::resolved()
+        .and_then(crate::identity::Resolved::agent)
+        .map(crate::identity::AgentIdentity::key);
+    resolve_identity_on(
+        &crate::host::ProcessEnv,
+        fleet,
+        env_name,
+        &|| crate::app::personal::project_name(r, &std::env::current_dir().unwrap_or_default()),
+        &host_name,
+        kept,
+        &|target| {
+            let store = crate::adapters::credential_store::machine_store();
+            crate::identity::resolve(store.as_ref(), || Ok(target)).map(|_| ())
+        },
+    )
+}
+
+/// [`resolve_identity`] with its inputs given (tests): `project` and `machine` name the
+/// identity, `kept` is the agent identity this process already resolved, and `resolve`
+/// reads the store for a target.
+///
+/// One process acts as one agent identity (vet R4): a command that reaches a second
+/// environment under the agent stops with a usage error naming the first, never falls back
+/// to the person's session.
+pub(crate) fn resolve_identity_on(
+    host: &dyn crate::host::HostEnv,
+    fleet: &Fleet,
+    env_name: &str,
+    project: &dyn Fn() -> String,
+    machine: &dyn Fn() -> String,
+    kept: Option<&crate::adapters::credential_store::AgentKey>,
+    resolve: &dyn Fn(crate::identity::AgentTarget) -> Result<(), Error>,
+) -> Result<(), Error> {
+    if crate::identity::choose(host)? != crate::identity::Choice::Agent {
+        return Ok(());
+    }
+    let target = agent_target(fleet, env_name, &project(), &machine())?;
+    match kept {
+        Some(k) if *k == target.key => Ok(()),
+        Some(k) => Err(agent_usage(format!(
+            "one environment per run (this run already acts for {})",
+            k.env()
+        ))),
+        None => resolve(target),
+    }
+}
+
+/// The agent identity of `env_name` (design §4.3): the store key `account_id/project/env`
+/// and the service-account name `{project}-{env}-agent-{machine}`. The key needs the
+/// environment's account as a 1Password account ID: a sign-in address names no one account.
+fn agent_target(
+    fleet: &Fleet,
+    env_name: &str,
+    project: &str,
+    machine: &str,
+) -> Result<crate::identity::AgentTarget, Error> {
+    use crate::adapters::credential_store::AgentKey;
+    use crate::cause::{AccountId, EnvName};
+    let env = fleet.environment(env_name)?;
+    let needs_id = || {
+        agent_usage(format!(
+            "the account of {env_name} as a 1Password account ID (account = \"<26-character ID>\")"
+        ))
+    };
+    let account = env
+        .account
+        .as_deref()
+        .filter(|a| a.len() == 26 && a.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .ok_or_else(needs_id)?;
+    let key = AgentKey::new(AccountId::new(account), project, EnvName::new(env_name))
+        .ok_or_else(|| agent_usage(format!("a project name without '/' (found {project:?})")))?;
+    Ok(crate::identity::AgentTarget {
+        key,
+        name: crate::domain::access_plan::agent_account(project, env_name, machine),
+    })
+}
+
+fn agent_usage(needs: String) -> Error {
+    crate::cause::Cause::Usage {
+        problem: crate::cause::UsageProblem::NeedsFlag {
+            flag: format!("{}=agent", crate::identity::VAR),
+            needs,
+        },
+    }
+    .into()
+}
+
+/// This host's name, the machine part of the agent identity's name (design §7).
+#[cfg(unix)]
+fn host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into the buffer it is given.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    match std::str::from_utf8(&buf[..end]) {
+        Ok(name) if ok => name.to_string(),
+        _ => String::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn host_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
 /// The environment's 1Password account for its `op` calls. A service-account or Connect
@@ -314,6 +427,7 @@ pub fn open_for_operation<'a>(
         }
         .into());
     };
+    resolve_identity(fleet, env_name, r)?;
     let mut runner = EnvRunner::new(r, account_of(env, &Host::detect));
     runner.sign_in_as_target(env_name, target_name, t, reference)?;
     Ok(runner)

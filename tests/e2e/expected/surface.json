@@ -5,13 +5,17 @@
         "env"
       ],
       "flags": [
+        "agent",
+        "confirm",
         "create",
         "github",
         "github-env",
         "grant-receipt",
         "grant-receipt-sha256",
         "json",
+        "name",
         "project",
+        "remove",
         "revoked",
         "rotate",
         "secret-name",

@@ -793,7 +793,7 @@ impl PinnedStatus {
         if !self.pending.is_empty() {
             line(format!(
                 "pending deploy ({}): {}",
-                crate::cause::render::cmd_text(deploy),
+                crate::cause::render::deploy_step_text(deploy),
                 names.join(&self.pending)
             ))?;
         }

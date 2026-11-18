@@ -1103,6 +1103,30 @@ Adopted for 0.19.0.
 - `opv access <env> [--target <t>] --rotate --github <owner/repo> [--github-env <e>]` creates a successor service account `<old>-YYYYMMDD` with the same grants, replaces the existing GitHub secret on stdin (it never creates the first one: that is `--create`), verifies the token and records the new expiry. opv cannot delete a service account: every success ends with `Do:` revoke the old one in 1Password. Rotation is a person's step: their own terminal and 1Password session, one confirmation.
 - `opv ci workflow --expiry-check` prints a daily workflow that runs `opv ready --json` with the CI reader token and opens or updates one issue when either finding is present. It only reports.
 
+## FR-70 — Unlisted Service Accounts Are Not Missing (#314)
+
+Adopted for 0.20.1. Spike: `docs/design/spike-304-findings.md` (Q3).
+
+- 1Password never lists a service account in `op vault user list`. In `opv access`, a CI reader's or deploy identity's grant on a readable vault whose access list names no service account is `not_supported`, counted as unclassified, never `missing`, and no `Owner runs: op service-account create …` command is printed for it.
+- A CI reader gets one `ci_reader_not_visible` finding per environment, stepping to `opv access <env> --verify-reader` (the reader grant receipts of #304, `docs/reader-grants.md`). A deploy identity gets one `deploy_identity_not_visible` finding per target, stepping to `opv delivery verify <env> --target <name>`.
+- An access list that does name service accounts is used as it is: a needed one absent from it is `missing`.
+
+## FR-71 — Agent Identity (#338)
+
+Adopted for 0.22.0. Design: `docs/design/agent-identity.md` (owner decisions D1, D4, D6, D7, D8, D11, D12; vet `agent-identity-review.md`). Governing decision: ADR-0001. User guide: `docs/usage.md`, "Agent identities (read-only)".
+
+- `opv access <env> --create --agent [--name <machine>] [--confirm <env>] [--json]` creates one 1Password service account per (project, environment, machine), `{project}-{env}-agent-{machine}`, with `read_items` on exactly the environment's boundary vaults (the CI reader's grants) and `--expires-in 90d`. A production-tier or `confirm_env` environment needs the typed `--confirm <env>` (`confirm_required`). It is a person's command: their own terminal and session, refused in agent mode, CI and under any service account.
+- Before the token is kept, a token-only `op whoami` and `op vault list` must show the environment's account and exactly the requested vaults; otherwise nothing is stored and the person is told to remove the account. The token goes into the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service; on WSL, the Windows user's Windows Credential Manager through interop) through its API, is read back and checked, and is never shown, put in argv or written to a file. No usable store is `agent_store_unavailable`, with no file fallback; the kernel keyring is a declared volatile fallback (`agent_store_volatile`). A lost token is never re-created (X5).
+- A value-free index, `agent-identities.toml` under the user's configuration directory (`$XDG_CONFIG_HOME/opv/` when set), lists the identities on the machine: names, ids, the store's kind and dates. Never a value, digest or length. An identity already recorded is `agent_identity_exists`.
+- A run uses the identity only with `OPV_IDENTITY=agent`, resolved once per process before the first `op` call, after a token in `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*`. `OPV_IDENTITY=person` or no value is the person's session; any other value is `usage`. An environment with no identity stops with `agent_identity_not_installed` and never falls back to the person's session.
+- The token reaches only opv's own `op` children: captured calls through the token-only path, and `op run` with the person's session, Connect, `OP_ACCOUNT`, biometric unlock and the cache removed. It is never in the agent's environment, argv, the app's environment or a file. Store reads never prompt and are bounded at 5 seconds (`agent_store_locked`).
+- Under the agent identity opv writes nothing to 1Password on any tier: every person write (`set`, `import`, `provision`, `apply`, `config import`, `target credentials`, `access --create/--rotate`, MCP `opv_import_local`) and `sync` are refused before any call with `own_session_required`, naming the agent identity. `sync`'s `Do:` hands the deploy to a person or CI's deploy job. 1Password enforces the read-only grant as well.
+- `opv doctor` reports an `op identity` row (`agent`, `person`, `service_account`, `connect`, `agent_expiring`, `agent_expired`, `rate_limit_near`, `agent_reach_short`, `token_in_agent_env`, `assistant_on_person_session`, `agent_unscoped`, `agent_not_installed`, `agent_store_locked`, `agent_store_unavailable`, `agent_store_volatile`, `agent_rejected`). `opv ready --json` and MCP `opv_state` `ready` and `accounts` carry a top-level `identity` array with the same value-free object per environment; `schema_version` stays 4.
+- Lifetime 90 days, warning at 14 (FR-69): `credential_expiring` and `credential_expired` with key `agent_identity`, advisory. `opv access [<env>] --rotate --agent [--revoked <name>] [--confirm <env>]` replaces one identity, or with no environment every identity of the project on the machine, with the #324 marker per identity. opv never revokes: one `Do:` names every old account to delete in 1Password.
+- Documented residual (D11): an agent with a shell running as the same OS user can reach the token through the store or `op run`'s environment. A separate OS user or a container is optional hardening, not a requirement.
+- Not in 0.22.0: selection in agent mode without `OPV_IDENTITY` (S17) and `--remove --agent` (S18).
+- Constraints kept: ADR-0001 R1–R5, SR-1, SR-2, SR-3, SR-4, SR-5, SR-8, FR-11, FR-40, FR-69, NR-31.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging

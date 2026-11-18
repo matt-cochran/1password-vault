@@ -349,6 +349,9 @@ pub enum Action {
     EditInput { path: PathBuf },
     /// Install or update a tool.
     Install { tool: String },
+    /// Unlock or set up this machine's credential store, which only the person signed in to
+    /// the machine can do (agent identity, #338).
+    StoreSetup { store: AgentStore },
     /// Free of person-only meaning: check something named by the subject.
     Inspect,
 }
@@ -368,7 +371,33 @@ impl Action {
                 | Action::Revoke { .. }
                 | Action::OwnerSetup { .. }
                 | Action::EditInput { .. }
+                | Action::StoreSetup { .. }
         )
+    }
+}
+
+/// The OS credential store that holds an agent identity's token on this machine (design
+/// `agent-identity.md` §4.4). Only the store's kind is ever shown, never what it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStore {
+    MacosKeychain,
+    WindowsCredentialManager,
+    /// A Secret Service over D-Bus (a desktop login keyring).
+    SecretService,
+    /// The kernel user keyring (keyutils), which WSL clears when its VM stops.
+    KernelKeyring,
+}
+
+impl AgentStore {
+    /// The store's name in a sentence.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentStore::MacosKeychain => "the macOS Keychain",
+            AgentStore::WindowsCredentialManager => "Windows Credential Manager",
+            AgentStore::SecretService => "the login keyring (Secret Service)",
+            AgentStore::KernelKeyring => "the kernel keyring",
+        }
     }
 }
 
@@ -939,6 +968,39 @@ pub enum Cause {
         problem: CredentialProblem,
         seen: Observed,
     },
+
+    // agent identity (#338, design `agent-identity.md` §5, §7)
+    /// `OPV_IDENTITY=agent` (or agent mode) selected the agent identity, but this environment
+    /// has none on this machine: the run stops and never falls back to the person's session.
+    AgentIdentityNotInstalled {
+        env: EnvName,
+    },
+    /// `opv access <env> --create --agent` found an agent identity for the environment
+    /// already installed on this machine.
+    AgentIdentityExists {
+        env: EnvName,
+        name: String,
+    },
+    /// 1Password rejected the agent identity's token: revoked, deleted or expired.
+    AgentRejected {
+        name: String,
+        env: Option<EnvName>,
+        seen: Observed,
+    },
+    /// No OS credential store opv can use is on this machine; opv never falls back to a file.
+    AgentStoreUnavailable {
+        store: AgentStore,
+    },
+    /// The credential store is locked, or reading it would prompt: opv never waits on it.
+    AgentStoreLocked {
+        store: AgentStore,
+    },
+    /// The token is in a store that does not survive a WSL stop, so unattended runs break.
+    AgentStoreVolatile {
+        store: AgentStore,
+        env: Option<EnvName>,
+    },
+    // end agent identity
 
     // §4.4 access and resources
     MissingRight {
@@ -2477,6 +2539,12 @@ impl Cause {
             AccountRequired { .. } => "account_required",
             InOtherAccount { .. } => "ids_not_in_account",
             NeedsOwnSession { .. } => "own_session_required",
+            AgentIdentityNotInstalled { .. } => "agent_identity_not_installed",
+            AgentIdentityExists { .. } => "agent_identity_exists",
+            AgentRejected { .. } => "agent_rejected",
+            AgentStoreUnavailable { .. } => "agent_store_unavailable",
+            AgentStoreLocked { .. } => "agent_store_locked",
+            AgentStoreVolatile { .. } => "agent_store_volatile",
             CredentialRejected { credential, .. } => match credential {
                 CredentialRef::DeployCredentials { .. } => "deploy_credentials_failed",
                 _ => "credential_rejected",
@@ -2618,7 +2686,9 @@ impl Cause {
             | ToolUnusable { .. }
             | RemoteVersionMismatch { .. }
             | ChildStartFailed { .. }
-            | ProducerFailed { .. } => 3,
+            | ProducerFailed { .. }
+            | AgentStoreUnavailable { .. }
+            | AgentStoreVolatile { .. } => 3,
             InventoryIncomplete { .. }
             | ChangedBeforeWrite {
                 object: StoreObject::Item { .. },
@@ -2674,6 +2744,7 @@ impl Cause {
                 why: FederatedWhy::OutsideCi,
                 ..
             }
+            | AgentIdentityExists { .. }
             | Unsupported { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
@@ -2681,7 +2752,10 @@ impl Cause {
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
             | FederatedRefused { .. }
-            | CredentialRejected { .. } => 7,
+            | CredentialRejected { .. }
+            | AgentIdentityNotInstalled { .. }
+            | AgentRejected { .. }
+            | AgentStoreLocked { .. } => 7,
             ValuesNeeded { .. }
             | DeliveryUnverified { .. }
             | TargetDrift { .. }
@@ -2753,6 +2827,7 @@ impl Cause {
             | UnexpectedOutput { .. }
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
+            | AgentIdentityExists { .. }
             | FederatedRefused {
                 why: FederatedWhy::OutsideCi,
                 ..
@@ -2771,6 +2846,7 @@ impl Cause {
         match self {
             InOtherAccount { seen, .. }
             | CredentialRejected { seen, .. }
+            | AgentRejected { seen, .. }
             | MissingRight { seen, .. }
             | NotFound { seen, .. }
             | TargetRefused { seen, .. }

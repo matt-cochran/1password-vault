@@ -71,6 +71,8 @@ pub fn set(
     // An assistant is refused before anything, with the exact command for the person; then
     // a process without a terminal. Neither path calls the prompt (R60).
     refuse_if_agent(env, command(key, env_name))?;
+    // #338 (D4): the agent identity is read-only, with or without a terminal.
+    super::tidy::refuse_agent("opv set")?;
     if !env.interactive() {
         return Err(Cause::NeedsTerminal {
             why: NoTerminal::NoTty,
@@ -140,6 +142,8 @@ pub fn set_from_file(
     }
     let by = from_file_command(key, env_name);
     refuse_if_agent(env, by.clone())?;
+    // #338 (D4): the agent identity is read-only, with or without a terminal.
+    super::tidy::refuse_agent("opv set")?;
     if !env.interactive() {
         return Err(Cause::NeedsTerminal {
             why: NoTerminal::NoTty,

@@ -773,3 +773,34 @@ fn apply_never_adds_a_field_for_an_infrastructure_key() {
     let applied = apply_reviewed(&path, &op).unwrap();
     assert!(!has_neon_url(&applied.fields_added));
 }
+
+// #338: the agent identity is read-only (D4) -------------------------------------------------
+
+/// Every `op` create, edit or delete the fake saw.
+fn op_writes(op: &FakeOp) -> usize {
+    op.calls
+        .borrow()
+        .iter()
+        .filter(|c| {
+            c.args
+                .iter()
+                .take(3)
+                .any(|a| matches!(a.as_str(), "create" | "edit" | "delete"))
+        })
+        .count()
+}
+
+#[test]
+fn the_structural_apply_under_the_agent_identity_is_refused_without_an_op_write() {
+    let (_dir, path, op) = workspace();
+    let agent = crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux").var_val("OPV_IDENTITY", "agent"),
+    );
+    let code = crate::host::with_test_host(agent, || {
+        apply_reviewed(&path, &op)
+            .map(|_| ())
+            .unwrap_err()
+            .code_str()
+    });
+    assert_eq!((code, op_writes(&op)), ("own_session_required", 0));
+}

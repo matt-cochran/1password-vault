@@ -42,13 +42,14 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | runtime | `opv unseal <bundle> --env <e> --product <p> --signers <file> [--identity-file <path> \| --identity-env <VAR>] [--project <name>] [--min-revision <N>] [--verify-only] [--json] [--exec -- <cmd>]` | the runtime, CI; an assistant: `--verify-only` and inspect | verify a [sealed bundle](sealed-delivery.md), then inspect its names or run the command with its values; no configuration, `op` or network ([below](#sealed-bundles-opv-unseal)) |
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>`, `opv ci workflow --expiry-check` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests; `--expiry-check` prints the daily [credential expiry](#ci-credential-expiry-and-rotation) check |
 | admin | `opv access <env> [--target <t>] --create\|--rotate --github <owner/repo> [--github-env <e>] [--secret-name <n>] [--revoked <name>]`, `opv target credentials <env> --target <t> [--create\|--rotate]`, `opv target credentials <env> --target <t> --create --federated --github <owner/repo> --github-env <e>` | person | CI and deploy identities, their [rotation](#ci-credential-expiry-and-rotation), and an Azure federated (OIDC) identity |
+| admin | `opv access <env> --create --agent [--name <machine>] [--confirm <env>] [--json]`, `opv access [<env>] --rotate --agent [--revoked <name>] [--confirm <env>] [--json]`, `opv access [<env>] --remove --agent [--json]` | person | this machine's read-only [agent identity](#agent-identities-read-only), its rotation and its removal |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
 Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed. `--sealed-root <dir>` on `sync`, `plan`, `status` and `delivery verify` is hidden too: it resolves a [sealed target](sealed-delivery.md#bundles-in-another-repository---sealed-root)'s bundles under another checkout.
 
-"Who" is who may run it, not what is permitted: the CLI has no permission model of its own. A command named **person** needs your own terminal and refuses CI or agent mode. A read that opens an item may also tidy its 1Password layout once when a person runs it signed in with their own session (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
+"Who" is who may run it, not what is permitted: the CLI has no permission model of its own. A command named **person** needs your own terminal and refuses CI or agent mode. A read that opens an item may also tidy its 1Password layout once when a person runs it signed in with their own session (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI, the [agent identity](#agent-identities-read-only) or a run under `deploy_credentials` never writes to 1Password.
 
 `plan` and `sync` also take `--rotate <product/KEY>` for immutable keys; `sync` additionally takes `--prune-immutable <product/KEY>` (all repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)). `sync --receipt <file>` and `sync --supply-stdin` are intentionally left out of `opv sync --help`: `--receipt` belongs to the CI recipes ([delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)), and `--supply-stdin` is written into a deploy job by `opv ci workflow --supply`, never typed. `opv schema` lists both.
 
@@ -60,6 +61,7 @@ Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are
 | | `OPV_PROJECT` | use the manifest of this project (`opv · <name>`) |
 | | `OP_ACCOUNT` | the 1Password account to find a manifest in (an environment's own `account` is used for its reads) |
 | | `OPV_PRODUCT` | default for `--product` on `inventory`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env`, never `sync`; stderr says `product <p> (from OPV_PRODUCT)` |
+| | `OPV_IDENTITY` | `agent`: run as this machine's read-only [agent identity](#agent-identities-read-only) of the environment; `person` or unset: your own session; any other value is a `usage` error |
 | `--timeout <SECS>` | | budget for the whole run (default 1800); see [time limits](how-opv-handles-failures.md#time-limits-and-progress) |
 | `--verbose` | | one stderr line per call to `op` or the target CLI, with all of its scrubbed stderr; a failure's box and `evidence.upstream` hold the tool's complete reply, scrubbed |
 | `--color auto\|always\|never` | `NO_COLOR` | colour state words (`ok`, `warn`, `FAIL`, `saved`, `missing`, ...) on a terminal; JSON and values never |
@@ -491,6 +493,7 @@ all clear: nothing pending
 - `--settings` also looks for likely-wrong values across every environment you can read (the same secret in two environments, a placeholder in a secret or a config key, a very weak secret, stray whitespace, `localhost` where it deploys, a test key in production): one `warn  settings:` line listing each, with `fix: opv open <key> --env <env>`. It reads every environment's item; values are compared, never shown. A warning never changes the exit code. `opv ready` reports the same findings. See [settings health](configuration.md#settings-health-likely-wrong-values).
 - `doctor` never writes 1Password, whoever runs it, so an assistant can rely on it in a person's session. When an item is not laid out the way opv expects, it reads it as it is and says so once, naming `opv config export <env>`, the explicit repair (a signed-in person runs it; one verified edit, nothing deleted).
 - With `deploy_credentials`, a failed sign-in is one `FAIL deploy credentials` line; the other checks still run.
+- An `op identity` row after `op auth` says which identity this run uses: your session, a CI token or this machine's [agent identity](#agent-identities-read-only), with its store, vault reach, expiry and rate-limit headroom.
 - `--env` also prints one line per recorded CI credential (`ci reader credential`, `deploy credential`, `ci identity credential`): `ok`, `expiring in N days` (warn) or `expired` (fail), with its rotation command ([below](#ci-credential-expiry-and-rotation)).
 - An Azure target with [`azure.federated`](configuration.md#federated-deploys-from-github-actions-azurefederated) gets a `deploy identity` line that explains the mode. In GitHub Actions it also checks that the app's federated credentials trust the job's subject, GitHub's immutable `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>` or the classic `repo:<owner>/<repo>:environment:<env>` (and prints the `az ad app federated-credential create` command when they do not), and warns on a self-hosted runner.
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
@@ -528,7 +531,7 @@ The states are `present`, `missing` and `read-only needed`; a vault whose access
 
 `opv access <env> --target <name> --create --github <owner/repo> --github-env <environment>` creates the identity instead of printing its command: it checks that gh is signed in and can see the repository and environment (creating the GitHub environment if missing, after asking), shows the account name, every grant and where the token goes, asks once, runs `op service-account create … --raw`, and pipes the token into `gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo … --env …` on stdin. The token is never shown, typed, logged or written to a file. It refuses before creating anything when a vault is not in the selected account, and if storing the token fails it says to remove the new account in 1Password and run it again (1Password shows a token once). An existing account of the same name is left alone: keep it until the new token has produced verified delivery evidence.
 
-`opv access <env> [--target <name>] --rotate --github <owner/repo> [--github-env <environment>]` replaces the identity: it creates a successor service account named `<old name>-YYYYMMDD` with the same grants and puts its token in the existing GitHub secret, never shown. It refuses when that secret does not exist yet (use `--create` first). It ends with `Do:` revoke the old service account in 1Password; opv cannot. See [CI credential expiry and rotation](#ci-credential-expiry-and-rotation).
+`opv access <env> [--target <name>] --rotate --github <owner/repo> [--github-env <environment>]` replaces the identity: it creates a successor service account named `<old name>-YYYYMMDD-HHMM` (UTC; `-2`, `-3`, … if that name was just used) with the same grants and puts its token in the existing GitHub secret, never shown. It refuses when that secret does not exist yet (use `--create` first). It ends with `Do:` revoke the old service account in 1Password; opv cannot. See [CI credential expiry and rotation](#ci-credential-expiry-and-rotation).
 
 `--json` gives `{environments: [{environment, report, commands, vaults, findings}]}`, where `vaults` holds each vault line (`vault_id`, `production`, `capability`, `writers`) and `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
 
@@ -603,7 +606,7 @@ Non-blocking findings that never change the exit code, with or without `--gate`:
 | `environment_gap` | a key's explicit `environments` list leaves a declared environment out with no `except` ([presence](configuration.md#presence-every-environment-minus-except)); one finding per product, key and environment | `opv propose key <product/KEY> --env <env>`, or declare an `except` with its reason; the [`extend` intent](#extend-an-environment-to-every-key-the-extend-intent) closes every gap of one environment at once |
 | `retirement_incomplete` | a key is `retiring` and its retirement is not finished; the message names the remaining steps in order | `opv sync <env> --prune --retire` (actor `ci`) while a target still holds it, then a person's `opv apply rp-<id>` ([retiring a key](#retiring-a-key)) |
 | `expires_soon` | a key's `expires` date is within 30 days | rotate it |
-| `credential_expiring`, `credential_expired` | a recorded CI reader, CI identity or deploy credential expires within 14 days, or has expired ([below](#ci-credential-expiry-and-rotation)) | its rotation command: `opv access <env> [--target <t>] --rotate --github <owner/repo>` or `opv target credentials <env> --target <t> --rotate` |
+| `credential_expiring`, `credential_expired` | a recorded CI reader, CI identity or deploy credential, or this machine's [agent identity](#agent-identities-read-only) (key `agent_identity`), expires within 14 days, or has expired ([below](#ci-credential-expiry-and-rotation)) | its rotation command: `opv access <env> [--target <t>] --rotate --github <owner/repo>`, `opv access <env> --rotate --agent` or `opv target credentials <env> --target <t> --rotate` |
 | [settings health](configuration.md#settings-health-likely-wrong-values) | a likely-wrong value: the same secret in two environments or under two keys, a placeholder (`changeme`, `<your key>`, … in a secret or a config key), `low_entropy` (a secret of at least 8 characters with very low entropy for its length), stray whitespace, a local address where it deploys, a test or live key in the wrong tier | `opv open <key> --env <env>` |
 
 ## The inventory: `opv inventory`
@@ -803,6 +806,160 @@ opv access prod --target web --rotate --github org/app --revoked myapp-prod-web-
 
 (Deleting the two `rotation_*` lines from `secrets.bindings.toml` by hand does the same.) 1Password never lists service accounts in `op vault user list`, so opv cannot look for the successor itself. A project whose configuration lives in 1Password records nothing locally, so it cannot detect an interrupted run: the question names the successor, and if the run stops before the token is stored, revoke that account before running it again. `opv target credentials --rotate` mints a provider token into an existing item and creates no service account.
 
+## Agent identities (read-only)
+
+An agent identity lets an assistant, or your own automation, run opv unattended without your session (#338). It is the CI reader on your machine: a 1Password service account that can only read one environment's vaults. Its token is kept in this machine's OS credential store instead of a GitHub secret. 1Password enforces the read-only grant. Only people change values.
+
+### Set it up: one command
+
+In your own terminal, signed in as yourself:
+
+```sh
+opv access dev --create --agent
+```
+
+```text
+Create 1Password service account "shop-dev-agent-laptop" (the read-only agent identity of dev on this machine), valid 90 days, with:
+  vault vdev0000000000000000000001: read
+  vault vdev0000000000000000000002: read
+and keep its token in this machine's macOS Keychain. The token is never shown.
+It reads these vaults' values only to deliver them, and can never change them. An assistant running as you can still reach the token; see opv guide agent, "Agent identity".
+Go ahead? [y/N] y
+created "shop-dev-agent-laptop"; checked it reads exactly these 2 vaults; stored its token in macOS Keychain; nothing was printed
+Set OPV_IDENTITY=agent in your assistant's environment to use it.
+Next: opv doctor --env dev
+```
+
+- **The account** is `{project}-{env}-agent-{machine}`. It gets `read_items` on exactly the vaults the environment's CI reader reads, and it expires in 90 days. `--name <machine>` sets the machine part (default: this host's name), and `--project <name>` sets the project part (default: the repository's name).
+- **It is checked before it is kept.** opv runs `op whoami` and `op vault list` under the new token: the account must be yours and the vaults exactly these. If either differs, nothing is stored and opv tells you to remove the new account in 1Password.
+- **The token** goes to the macOS Keychain, Windows Credential Manager or the Linux Secret Service. On WSL it goes to your Windows user's Windows Credential Manager, through interop, not a Linux keyring. It is never shown, typed, put in argv or written to a file. With no usable store, opv refuses with `agent_store_unavailable`; there is no file fallback. If only the kernel keyring is available, which is cleared when the machine or WSL stops, the question says so and `opv doctor` fails the row (`agent_store_volatile`). The kernel keyring works from a login session; a systemd service or CI job whose session keyring does not link the user keyring gets `agent_store_unavailable` instead.
+- **opv keeps a value-free index** of the identities on this machine, `agent-identities.toml` in your configuration directory ([configuration](configuration.md#agent-identity-opv_identity-and-the-local-index)).
+- **One identity per project, environment and machine.** A second `--create` is refused with `agent_identity_exists`, and its `Next:` is `opv access dev --rotate --agent`.
+- `--json` prints one document (`created`, `kind: "agent"`, `environment`, `machine`, `store`, `read_only`, `vaults`, `expires_on`, `use: "OPV_IDENTITY=agent"`, `next`). The question then goes to stderr.
+- `--agent` takes the place of `--github`, and cannot be combined with `--github`, `--github-env`, `--target` or `--grant-receipt`.
+
+### Use it: `OPV_IDENTITY=agent`
+
+Set `OPV_IDENTITY=agent` in the environment of your assistant's host (its MCP server entry, or the shell it starts in). The assistant then runs the read commands, `opv run` among them:
+
+```sh
+opv run dev -- cargo test
+```
+
+- opv reads the token from the store once per process, without a prompt and within 5 seconds, and gives it only to its own `op` calls. It is never in the assistant's environment or the app's: `env` shows `OPV_IDENTITY=agent` and nothing more.
+- Each environment needs its own identity. An environment without one stops with `agent_identity_not_installed` (exit 7, `Next: opv access <env> --create --agent`). opv never falls back to your session.
+- `OPV_IDENTITY=person`, or no variable, uses your own session, as before. Any other value is a `usage` error. As in CI, `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*` in the environment wins over `OPV_IDENTITY`.
+- Only `OPV_IDENTITY=agent` selects the identity. opv does not choose it on its own in agent mode.
+
+### Check it: `opv doctor` and `opv ready`
+
+`opv doctor --env <env>` prints an `op identity` row after `op auth`:
+
+```text
+ok    op identity: agent shop-dev-agent-laptop for dev (read-only by grant; token from macOS Keychain, durable, self-check 41 ms; reads 2 of 2 vaults; expires 2027-02-15, in 90 days; account: 940 of 1000 daily 1Password requests left, shared with CI)
+```
+
+| `state` | Level | When |
+|---|---|---|
+| `agent` | ok | the agent identity is in use and every check passed |
+| `person` | ok | your own session: `you (your own 1Password session)` |
+| `service_account`, `connect` | ok | a token from `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*`, as in CI |
+| `agent_expiring` | warn | it expires within 14 days; `fix: opv access <env> --rotate --agent` |
+| `rate_limit_near` | warn | less than 10% of the account's daily requests left, or 90% of the token's hourly reads used |
+| `agent_reach_short` | warn | it reads fewer of the environment's vaults than the configuration uses |
+| `token_in_agent_env` | warn | an assistant runs with `OP_SERVICE_ACCOUNT_TOKEN` in its environment, where `env` shows it |
+| `assistant_on_person_session` | warn | an assistant is using your session, which can write |
+| `agent_unscoped` | skip | `OPV_IDENTITY=agent` without `--env`; run `opv doctor --env <env>` |
+| `agent_expired`, `agent_rejected` | FAIL | it has expired, or 1Password no longer accepts it; `opv access <env> --rotate --agent` |
+| `agent_not_installed` | FAIL | this machine has no identity for the environment; create it |
+| `agent_store_locked`, `agent_store_unavailable`, `agent_store_volatile` | FAIL | the store is locked or would prompt, is missing, or is cleared when the machine stops |
+
+In `--json`, the row's check carries `state` and an `identity` object. `opv ready --json` has a top-level `identity` array with one object per environment:
+
+- `kind`: `agent`, `service_account`, `connect`, `person` or `none`;
+- `name`, `environment`, `source` (the store, such as `macos_keychain`), `read_only`, `expires_on`, `days_left`;
+- `reach` (`readable`, `expected`), `rate_limit` (`hourly_used_pct`, and `daily_account` with `limit`, `used` and `remaining`), `store` and `state`.
+
+`ready` never runs the store self-check (`self_check: "not_run"`). An agent identity that is about to expire is `credential_expiring` (key `agent_identity`), which is advisory, as for CI. `schema_version` stays 4. Every field is a name, date, count or state, never a token, its length or a digest.
+
+### Rotate it
+
+```sh
+opv access dev --rotate --agent     # this environment's identity
+opv access --rotate --agent         # every agent identity of this project on this machine
+```
+
+```text
+Replace 2 agent identities on this machine, each with a fresh one valid 90 days and the same read-only vaults:
+  shop-dev-agent-laptop      -> shop-dev-agent-laptop-20261117  (dev, 2 vaults)
+  shop-staging-agent-laptop  -> shop-staging-agent-laptop-20261117  (staging, 3 vaults)
+Go ahead? [y/N] y
+created and checked 2 successors; replaced both tokens in macOS Keychain; nothing was printed
+Do: revoke these in 1Password (Developer > Service accounts); opv cannot: shop-dev-agent-laptop, shop-staging-agent-laptop
+Next: opv doctor
+```
+
+- Each new token replaces the old one only after it passes the same check as at create.
+- op cannot delete a service account. The `Do:` line names every old account; delete each one in the 1Password web app.
+- An interrupted rotation is refused on the next run with `secret_not_stored`, naming the new account. Delete that account in 1Password if it exists, then run `opv access <env> --rotate --agent --revoked <that name>`.
+
+### Remove it
+
+```sh
+opv access dev --remove --agent     # this environment's identity
+opv access --remove --agent         # every agent identity of this project on this machine
+```
+
+```text
+Remove 1 agent identity from this machine: its token in macOS Keychain and its entry:
+  shop-dev-agent-laptop  (dev)
+Go ahead? [y/N] y
+removed "shop-dev-agent-laptop" (dev): deleted its token from macOS Keychain and its entry; nothing was printed
+Do: delete these in the 1Password web app (Developer > Service accounts); opv cannot: shop-dev-agent-laptop
+Next: opv doctor --env dev
+```
+
+- Per identity, opv deletes the token from this machine's credential store, then its `[[identity]]` entry from `agent-identities.toml`. One question covers the batch. It is a person's command: under the agent identity or an assistant it is refused.
+- A token that cannot be deleted (the store is locked, say) keeps the entry, and the line says so; run it again once the store is unlocked. An entry whose token is already gone from the store is removed, and the line notes it.
+- op cannot delete a service account, and removing the token here only ends this machine's use of it. The `Do:` line names every account to delete in the 1Password web app, which alone ends its access (with the successor an interrupted rotation may have left).
+
+### Production: `--confirm <env>`
+
+A production-tier environment, or one with `confirm_env = true`, needs its name typed again:
+
+```sh
+opv access prod --create --agent --confirm prod
+opv access prod --rotate --agent --confirm prod
+```
+
+Without it, `--create` is refused before any call (`confirm_required`). When `--rotate --agent` rotates every identity, it skips a production identity without `--confirm` and prints a note with the command.
+
+### What it cannot do
+
+- **Write.** `set`, `import`, `provision`, `apply`, `config import`, `target credentials` and `access --create` or `--rotate` are refused before any call with `own_session_required` (exit 7), which names the agent identity. Only the `--dry-run` forms of `import` and `provision` run. 1Password refuses writes too, because the account has no `write_items`.
+- **Deploy.** `opv sync` is refused the same way. Its `Do:` says to run it in your own terminal, signed in as yourself, or to let CI's deploy job run it.
+- **Widen itself.** It cannot create service accounts or reach another environment's vaults. Creating and rotating are a person's acts.
+- **Read a target's state vault.** Deploy credentials and the plan ledger live there, so `plan` and `status` have the same limits as under the CI reader.
+
+It can run `run`, `plan`, `ready`, `status`, `doctor` and the other read commands. Every read counts against 1Password's rate limits for service accounts: per token, 1,000 reads and 100 writes an hour; per account, 1,000 requests a day, reads and writes together, shared with CI and every other service account. Business accounts have higher limits. An agent that runs `opv run` in a loop can use up the daily budget that CI needs, so watch the `op identity` row.
+
+### What it does not defend against
+
+A program running as your OS user can read the credential store directly. It can also read the environment of the `op run` process, which holds the token while `opv run`'s app runs. opv's own output never carries the token or a value, but an assistant with a shell running as you can still reach the token. The damage is limited: the identity is read-only and covers one environment, production needs a typed confirmation, it expires in 90 days, and one deletion in 1Password ends it.
+
+Optional hardening: run the assistant as a separate OS user, or in a container that cannot reach your credential store. Start it where none of your own sessions reach it: no 1Password desktop-app CLI integration in its terminal, and not inside `opv login --`.
+
+### Four identities, one model
+
+| Identity | Created with | Token lives | Lifetime | 1Password access | Runs | Writes 1Password |
+|---|---|---|---|---|---|---|
+| Person | `opv login` or the 1Password app | the app or the shell | session | what the person can open | everything | yes: the only identity that changes values |
+| CI reader | `opv access <env> --create --github <repo>` | GitHub secret | 90 days | read, boundary vaults | inventory, plan, ready | never |
+| CI deploy identity | `… --target <t> --create --github <repo>` | GitHub secret | 90 days | read boundary, read and write its state vault | sync, deploy | value-free delivery evidence only |
+| Agent identity | `opv access <env> --create --agent` | this machine's OS store | 90 days | read, boundary vaults (the CI reader's grants) | run, plan, ready, status, doctor | never |
+
+Every identity delivers the same way, and none of them sees a value. Only a person changes values. 1Password vault access is the only permission. Deploys belong to CI or a person.
+
 ## Run a reviewed operation on a target: `opv target op`
 
 `opv target op <env> --target <name> machines` lists the target's Fly app: one line per Machine with its id, name, state, region and image. `opv target op <env> --target <name> machine-update --machine <id> --image <ref>` moves one Machine of the app to another image; `--machine` is the Machine's 14-character lowercase-hex id, and the write needs `--confirm <env>` on an environment that sets `confirm_env`. Only Fly targets offer these operations and `--target` is required. The image must be in the target's own repository, `registry.fly.io/<the target's fly.app>:<tag>` (or, for `machine-update`, `registry.fly.io/<the target's fly.app>@sha256:<64 hex>`). The target must record `deploy_credentials`: the operation signs in with that item only, never your own login, and its `flyctl` child sees only opv's basic variables. It prints the app's ids, names, states, regions and image references, never a value; `--json` prints one document instead of lines.
@@ -989,6 +1146,8 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `unknown_target` | 2 | never | no | the target is not declared for the environment |
 | `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument, a removed form) |
 | `value_in_text_field` | 2 | after_fix | no | free text in an intent document looks like a secret value and is refused before anything is written |
+| `agent_store_unavailable` | 3 | after_fix | yes | no OS credential store on this machine can hold the agent identity's token; opv never falls back to a file |
+| `agent_store_volatile` | 3 | after_fix | yes | the agent identity's token is in a store WSL clears when it stops, so unattended runs will break |
 | `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
 | `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
 | `producer_failed` | 3 | after_fix | no | a producer ended with a non-zero exit, a signal, its timeout or its own error code; nothing was written |
@@ -1011,6 +1170,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `target_changed` | 5 | safe | no | the target's object changed while opv was writing it; nothing was written and re-running is safe |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
+| `agent_identity_exists` | 6 | never | yes | this environment already has an agent identity on this machine; a person replaces it with opv access <env> --rotate --agent |
 | `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
 | `federated_outside_ci` | 6 | never | no | the target signs in with a federated identity that exists only in a GitHub Actions job, so it is not used outside one |
@@ -1036,6 +1196,9 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
 | `account_ambiguous` | 7 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
 | `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
+| `agent_identity_not_installed` | 7 | after_fix | yes | OPV_IDENTITY=agent selected the agent identity, but this environment has none on this machine; opv never falls back to the person's session, and a person creates one with opv access <env> --create --agent |
+| `agent_rejected` | 7 | after_fix | yes | 1Password rejected the agent identity's token (revoked, deleted or expired); a person rotates it with opv access <env> --rotate --agent |
+| `agent_store_locked` | 7 | after_fix | yes | the OS credential store is locked or would prompt, and opv never waits on a prompt; a person unlocks it |
 | `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
 | `federated_identity_mismatch` | 7 | after_fix | no | the CI job's ambient sign-in is not the federated identity configured for the target |
@@ -1220,7 +1383,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.21.0  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.22.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

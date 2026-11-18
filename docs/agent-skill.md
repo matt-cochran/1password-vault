@@ -71,6 +71,28 @@ sign-in does not reach this process. Never request a session token or password
 in chat, steal another process's session, or clear agent markers to bypass a
 native refusal. See the guide's sign-in/readiness instructions.
 
+## Agent identity (read-only)
+
+The agent identity is a read-only 1Password service account for one environment, kept in
+this machine's OS credential store; it is the CI reader's model on a laptop. Only a person
+changes values, and no identity sees one.
+
+- When `OPV_IDENTITY=agent` is in your environment, use it: `opv ready --json`, `opv run
+  <env> -- <command>`, `plan`, `status`, `doctor`. opv reads the token itself; never look for
+  it, read the OS store or ask anyone for a token.
+- Creating and rotating it are the person's, in their own terminal: hand them
+  `opv access <env> --create --agent` (on `agent_identity_not_installed`, or when they want
+  unattended runs) and `opv access <env> --rotate --agent` (on `agent_expiring`,
+  `credential_expiring` or `agent_rejected`). Never run either yourself.
+- Check it with `opv doctor --env <env>` (the `op identity` row) or the `identity` array of
+  `opv ready --json`. `assistant_on_person_session` means you are on the person's
+  write-capable session: tell them, and hand over the create command.
+- It never writes 1Password and never syncs. On `own_session_required`, hand the person the
+  command to run in their own terminal (a sync can also be CI's deploy job). Never suggest
+  `OPV_IDENTITY=person` or unsetting `OPV_IDENTITY`.
+- A same-user shell can still reach the token; opv's guarantee covers opv's outputs. See
+  "Agent identity (read-only)" in `opv guide agent`.
+
 ## The assistant proposes; a person applies; CI delivers
 
 With the opv MCP server (`opv mcp serve`; `opv mcp install` registers it for the project after

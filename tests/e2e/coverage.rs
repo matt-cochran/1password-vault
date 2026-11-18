@@ -115,6 +115,15 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "native Windows only (D12); the e2e harness is Unix-only",
     ),
     // end provision
+    // agent identity (#338): scenarios/agent_identity.rs reaches the other agent causes.
+    // `AgentStoreVolatile` is reported only by doctor's `identity` row (design §7.4, slice
+    // S10), which is not built yet; `access --create --agent` shows it as a note, never an
+    // error. Reached by src/cause/render_tests.rs until then.
+    (
+        "AgentStoreVolatile",
+        "only doctor's identity row (S10, not built yet) reports it",
+    ),
+    // end agent identity
 ];
 
 fn snapshots() -> PathBuf {
@@ -2723,6 +2732,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .map(|(n, _, _)| *n)
         .chain(FLOWS.iter().copied())
         .chain(CORE.iter().copied())
+        .chain(crate::scenarios::agent_identity::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::consistency::SNAPSHOTS.iter().copied())
         .chain(

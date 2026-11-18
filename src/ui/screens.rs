@@ -351,6 +351,9 @@ pub fn access(f: &mut Frame, area: Rect, app: &App) {
                     let who = match &check.grant.principal {
                         Principal::Deploy { target, .. } => format!("deploy identity of {target}"),
                         Principal::CiReader { .. } => "CI reader".to_string(),
+                        Principal::Agent { machine, .. } => {
+                            format!("agent identity on {machine}")
+                        }
                     };
                     let needs = match check.grant.permission {
                         Permission::Read => "read",

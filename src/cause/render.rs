@@ -39,6 +39,58 @@ fn vendor(program: &str, args: &[&str]) -> Next {
     })
 }
 
+/// #338 (D12): whether this process runs as the read-only agent identity, which is refused
+/// `opv sync`.
+fn agent_runs() -> bool {
+    matches!(
+        crate::host::Host::detect().op_credential,
+        Some(crate::host::OpCredential::Agent)
+    )
+}
+
+/// Whether `c` is a step to `opv sync`: a deploy.
+fn is_sync(c: &Cmd) -> bool {
+    c.command == ["sync"]
+}
+
+/// A success-path step as its `Next:` words ([`cmd_text`]), for whoever runs opv. Under
+/// the agent identity a step to `opv sync` is never the agent's (D12: agents never deploy,
+/// and opv refuses it): the deploy goes through CI's deploy job, or the person runs that
+/// command in their own terminal.
+pub fn deploy_step_text(c: &Cmd) -> String {
+    deploy_step_text_on(c, agent_runs())
+}
+
+/// [`deploy_step_text`], judged by `agent`.
+pub(crate) fn deploy_step_text_on(c: &Cmd, agent: bool) -> String {
+    let shown = cmd_text(c);
+    if agent && is_sync(c) {
+        format!("deploy through CI's deploy job, or the person runs {shown} in their own terminal")
+    } else {
+        shown
+    }
+}
+
+/// A success-path step as a document's `next`: the command line (the assistant's `run`),
+/// or under the agent identity a step to `opv sync` as the person's `apply` of it, so an
+/// agent never reads a deploy as its own step ([`deploy_step_text`]).
+pub fn deploy_step_value(c: &Cmd) -> serde_json::Value {
+    deploy_step_value_on(c, agent_runs())
+}
+
+/// [`deploy_step_value`], judged by `agent`.
+pub(crate) fn deploy_step_value_on(c: &Cmd, agent: bool) -> serde_json::Value {
+    if agent && is_sync(c) {
+        serde_json::json!({
+            "kind": NextKind::Apply,
+            "actor": NextActor::Person,
+            "command": cmd_text(&without_json(c.clone())),
+        })
+    } else {
+        serde_json::Value::String(cmd_text(c))
+    }
+}
+
 /// The command line of a [`Cmd`]: its argv ([`Cmd::to_argv`]), each word quoted with
 /// `shell_word`.
 ///
@@ -2357,6 +2409,39 @@ impl Cause {
                 command.0,
                 principal_words(identity)
             ),
+            // agent identity (#338)
+            AgentIdentityNotInstalled { env } => {
+                format!("no agent identity for {env} on this machine")
+            }
+            AgentIdentityExists { env, name } => {
+                format!("agent identity {name} for {env} is already installed on this machine")
+            }
+            AgentRejected { name, env, seen: _ } => {
+                let of_env = env
+                    .as_ref()
+                    .map(|e| format!(" for {e}"))
+                    .unwrap_or_default();
+                format!("agent identity {name}{of_env} was rejected by 1Password")
+            }
+            AgentStoreUnavailable { store } => format!(
+                "no credential store on this machine can hold the agent identity's token: {} is not usable",
+                store.label()
+            ),
+            AgentStoreLocked { store } => format!(
+                "{} is locked or would prompt, and opv never waits on its prompt",
+                store.label()
+            ),
+            AgentStoreVolatile { store, env } => {
+                let of_env = env
+                    .as_ref()
+                    .map(|e| format!(" for {e}"))
+                    .unwrap_or_default();
+                format!(
+                    "the agent identity's token{of_env} is in {}, which WSL clears when it stops; unattended runs will break",
+                    store.label()
+                )
+            }
+            // end agent identity
             CredentialRejected {
                 system,
                 credential,
@@ -4002,17 +4087,77 @@ impl Cause {
                     ),
                 }
             }
-            NeedsOwnSession {
-                command: _,
-                identity,
-            } => {
+            // agent identity (#338): a person's own step is never "set OPV_IDENTITY=person"; the
+            // agent asks the person to run it in their own terminal (design §5, vet R10).
+            AgentIdentityNotInstalled { env } => plan(
+                inspect(
+                    "ask the person to create it in their own terminal; opv never falls back to their session",
+                ),
+                Next::Handoff(cmd(&["access"], &[env.as_str(), "--create", "--agent"])),
+            ),
+            AgentIdentityExists { env, name: _ } => plan(
+                None,
+                Next::Handoff(cmd(&["access"], &[env.as_str(), "--rotate", "--agent"])),
+            ),
+            AgentRejected { name, env, seen: _ } => plan(
+                inspect(format!(
+                    "1Password no longer accepts {name} (revoked, deleted or expired): ask the person to rotate it in their own terminal"
+                )),
+                Next::Handoff(match env {
+                    Some(e) => cmd(&["access"], &[e.as_str(), "--rotate", "--agent"]),
+                    None => cmd(&["access"], &["--rotate", "--agent"]),
+                }),
+            ),
+            AgentStoreUnavailable { store } => {
+                let how = match store {
+                    AgentStore::SecretService => {
+                        "start a Secret Service for your user (such as gnome-keyring)".to_string()
+                    }
+                    other => format!("make {} usable for your user", other.label()),
+                };
+                plan(
+                    Some((
+                        Action::StoreSetup { store: *store },
+                        format!("{how}; opv never keeps the token in a file"),
+                    )),
+                    Next::Rerun,
+                )
+            }
+            AgentStoreLocked { store } => plan(
+                Some((
+                    Action::StoreSetup { store: *store },
+                    format!("unlock {}, then run again", store.label()),
+                )),
+                Next::Rerun,
+            ),
+            AgentStoreVolatile { store, env } => plan(
+                Some((
+                    Action::StoreSetup { store: *store },
+                    format!(
+                        "keep the token in a store that survives a WSL stop, such as a Secret Service login keyring, not {}",
+                        store.label()
+                    ),
+                )),
+                Next::Check(match env {
+                    Some(e) => cmd(&["doctor"], &["--env", e.as_str()]),
+                    None => cmd(&["doctor"], &[]),
+                }),
+            ),
+            // end agent identity
+            NeedsOwnSession { command, identity } => {
                 let without = match principal_var(identity) {
                     Some(v) => format!(", without {v}"),
                     None => String::new(),
                 };
+                // #338 (D12): a deploy is also CI's deploy job's.
+                let or_ci = if command.0 == "sync" || command.0.starts_with("sync ") {
+                    ", or let CI's deploy job run it"
+                } else {
+                    ""
+                };
                 plan(
                     inspect(format!(
-                        "run it in your own terminal, signed in as yourself{without}"
+                        "run it in your own terminal, signed in as yourself{without}{or_ci}"
                     )),
                     Next::Handoff(inv_cmd(inv)),
                 )
