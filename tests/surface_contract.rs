@@ -163,3 +163,76 @@ fn no_mcp_tool_provisions() {
         "{provisioning:?}"
     );
 }
+
+/// `opv schema`, as the installed binary prints it.
+fn live_schema() -> Value {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_opv"))
+        .arg("schema")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("opv schema runs");
+    serde_json::from_slice(&out.stdout).expect("schema is JSON")
+}
+
+/// #338 (design §7.4): `opv schema` documents the `identity` object with each of its
+/// fields.
+#[test]
+fn schema_documents_every_field_of_the_identity_object() {
+    let schema = live_schema();
+    let doc = schema["documents"]["identity"].as_str().unwrap_or_default();
+    let missing: Vec<&str> = [
+        "kind",
+        "name",
+        "environment",
+        "source",
+        "read_only",
+        "expires_on",
+        "days_left",
+        "reach",
+        "rate_limit",
+        "state",
+    ]
+    .into_iter()
+    .filter(|field| !doc.contains(&format!("{field} (")) && !doc.contains(&format!("{field},")))
+    .collect();
+    assert!(missing.is_empty(), "undocumented: {missing:?}");
+}
+
+/// #338 (design §7.4): the `ready` document names its `identity` list.
+#[test]
+fn schema_ready_document_lists_identity() {
+    let schema = live_schema();
+    let ready = schema["documents"]["ready"].as_str().unwrap_or_default();
+    assert!(ready.contains("identity ["), "{ready}");
+}
+
+/// #338 (D7): the identity rides in existing documents; no MCP tool is added for it.
+#[test]
+fn no_mcp_tool_is_added_for_the_identity() {
+    let schema = live_schema();
+    let tools: BTreeSet<String> = schema["mcp_tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| t["tool"].as_str().map(str::to_string))
+        .collect();
+    let expected: BTreeSet<String> = [
+        "opv_state",
+        "opv_next",
+        "opv_propose",
+        "opv_import_local",
+        "opv_explain",
+    ]
+    .iter()
+    .map(|name| name.to_string())
+    .collect();
+    assert_eq!(tools, expected);
+}
+
+/// #338: adding `identity` changes no field's meaning, so the schema version stays 4
+/// (`src/json.rs`: the version changes only when a field changes meaning).
+#[test]
+fn the_identity_object_keeps_schema_version_four() {
+    assert_eq!(live_schema()["schema_version"], 4);
+}

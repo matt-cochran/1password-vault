@@ -599,7 +599,14 @@ impl Found {
             Found::Manifest(ManifestStore {
                 account: Some(a), ..
             }) => (Some(a.clone()), None),
-            Found::File { store, .. } if Host::detect().op_credential.is_none() => {
+            // A token in the environment belongs to one account and decides it; the agent
+            // identity (#338) is keyed by the environment's account, so `.opv` still names it.
+            Found::File { store, .. }
+                if matches!(
+                    Host::detect().op_credential,
+                    None | Some(crate::host::OpCredential::Agent)
+                ) =>
+            {
                 match store.path.parent() {
                     Some(parent) => (pointer_account(parent), find_dot_opv(parent)),
                     None => (None, None),

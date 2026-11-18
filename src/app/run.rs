@@ -250,6 +250,14 @@ fn launch(
             crate::domain::key_label(product, key)
         ));
     }
+    // #338 (D12), FR-55: a personal key's value is in a person's own item, which a token
+    // (the agent identity, a CI service account, Connect) can never read: 1Password never
+    // grants a service account a Private vault. As `sync` and the CI reader never read a
+    // personal item, the run leaves those keys out, says so once, and goes on.
+    let (unreadable, selected) = personal::unreadable_here(fleet, selected, Host::detect());
+    if let Some(note) = personal::not_injected_note(product, &unreadable) {
+        runner.note(&note);
+    }
     // FR-40 (#266): op's default account is never used by accident. With several accounts
     // on this machine and none selected, the run stops before any read, with the choices.
     if super::tidy::active() && !account_selected(env) {
@@ -751,6 +759,51 @@ mod tests {
                 .borrow()
                 .iter()
                 .any(|n| n.starts_with("api/DATABASE_URL is not injected"))
+        );
+    }
+
+    /// #338: dev (no target) with one shared key and one personal key.
+    fn personal_fleet() -> Fleet {
+        crate::config::parse(
+            "[environments.dev]\nboundaries.api = { vault_id = \"v1\", item_id = \"i1\" }\n\
+             [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+             [products.api.keys.LLM_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\n",
+        )
+        .unwrap()
+    }
+
+    /// `opv run dev` of [`personal_fleet`] under the agent identity: one `op run` answers.
+    fn agent_run() -> FakeRunner {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        let host = Host::from_env(
+            &crate::host::FakeEnv::new("linux")
+                .shell("/bin/bash")
+                .var_val("OPV_IDENTITY", "agent"),
+        );
+        crate::host::with_test_host(host, || {
+            run(&personal_fleet(), "dev", "api", &cmd(&["app"]), &r).unwrap()
+        });
+        r
+    }
+
+    #[test]
+    fn under_the_agent_a_run_with_a_personal_key_goes_on_with_the_shared_keys() {
+        assert!(env_of(&agent_run()).iter().any(|(k, _)| k == "TOKEN"));
+    }
+
+    #[test]
+    fn under_the_agent_a_run_never_injects_a_personal_key() {
+        assert!(!env_of(&agent_run()).iter().any(|(k, _)| k == "LLM_KEY"));
+    }
+
+    #[test]
+    fn under_the_agent_a_run_names_the_personal_key_it_leaves_out() {
+        assert!(
+            agent_run()
+                .notes
+                .borrow()
+                .iter()
+                .any(|n| n.starts_with("api/LLM_KEY is not injected: personal"))
         );
     }
 

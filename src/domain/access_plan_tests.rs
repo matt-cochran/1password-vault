@@ -40,6 +40,22 @@ fn ci(environment: &str) -> Principal {
     }
 }
 
+fn agent(environment: &str, machine: &str) -> Principal {
+    Principal::Agent {
+        environment: environment.to_string(),
+        machine: machine.to_string(),
+    }
+}
+
+/// An agent identity's needs with `vaults` as its boundary vaults.
+fn agent_needs<'a>(environment: &'a str, machine: &'a str, vaults: &[&'a str]) -> AgentNeeds<'a> {
+    AgentNeeds {
+        environment,
+        machine,
+        boundary_vaults: vaults.iter().copied().collect(),
+    }
+}
+
 fn grant(principal: Principal, account: &str, vault_id: &str, permission: Permission) -> Grant {
     Grant {
         principal,
@@ -69,6 +85,95 @@ fn deploy_account_names_the_target_identity() {
 #[test]
 fn ci_account_names_the_environment_reader() {
     assert_eq!(ci_account("shop", "prod"), "shop-prod-ci");
+}
+
+#[test]
+fn agent_account_lowercases_and_sanitizes_the_machine() {
+    assert_eq!(
+        agent_account("shop", "dev", "Matt's Laptop.local"),
+        "shop-dev-agent-matt-s-laptop-local"
+    );
+}
+
+#[test]
+fn agent_account_collapses_and_trims_dashes_in_the_machine() {
+    assert_eq!(
+        agent_account("shop", "dev", "  build__box  "),
+        "shop-dev-agent-build-box"
+    );
+}
+
+#[test]
+fn agent_account_cuts_the_machine_to_thirty_two_characters() {
+    let long = "a".repeat(40);
+    assert_eq!(
+        agent_account("shop", "dev", &long),
+        format!("shop-dev-agent-{}", "a".repeat(32))
+    );
+}
+
+// --- agent grants -------------------------------------------------------------------
+
+#[test]
+fn an_agent_reads_its_environments_boundary_vaults() {
+    let grants = required_with_agents(
+        "shop",
+        &[],
+        &[],
+        &[agent_needs("prod", "laptop", &["shared", "web"])],
+    );
+    assert_eq!(
+        grants,
+        [
+            grant(
+                agent("prod", "laptop"),
+                "shop-prod-agent-laptop",
+                "shared",
+                Permission::Read
+            ),
+            grant(
+                agent("prod", "laptop"),
+                "shop-prod-agent-laptop",
+                "web",
+                Permission::Read
+            ),
+        ]
+    );
+}
+
+#[test]
+fn an_agent_gets_the_same_vaults_as_the_ci_reader_for_its_environment() {
+    let ci_grants = required_with_agents("shop", &[], &[ci_needs("prod", &["shared", "web"])], &[]);
+    let agent_grants = required_with_agents(
+        "shop",
+        &[],
+        &[],
+        &[agent_needs("prod", "laptop", &["shared", "web"])],
+    );
+    let ci_vaults: Vec<&str> = ci_grants
+        .iter()
+        .map(|grant| grant.vault_id.as_str())
+        .collect();
+    let agent_vaults: Vec<&str> = agent_grants
+        .iter()
+        .map(|grant| grant.vault_id.as_str())
+        .collect();
+    assert_eq!(agent_vaults, ci_vaults);
+}
+
+#[test]
+fn an_agent_never_gets_a_read_write_grant() {
+    let grants = required_with_agents(
+        "shop",
+        &[],
+        &[],
+        &[agent_needs("prod", "laptop", &["shared", "web"])],
+    );
+    assert!(
+        grants
+            .iter()
+            .all(|grant| grant.permission == Permission::Read)
+    );
 }
 
 // --- required ----------------------------------------------------------------------
@@ -580,4 +685,13 @@ fn a_missing_grant_on_a_list_naming_service_accounts_stays_missing() {
     let mut report = compare(&grants, &observed);
     mark_unlisted_service_accounts(&mut report, |_| true);
     assert_eq!(report.checks[0].state, GrantState::Missing);
+}
+
+#[test]
+fn an_agent_machine_cut_at_a_separator_never_ends_in_a_dash() {
+    let machine = format!("{}.x", "a".repeat(31));
+    assert_eq!(
+        agent_account("shop", "dev", &machine),
+        format!("shop-dev-agent-{}", "a".repeat(31))
+    );
 }

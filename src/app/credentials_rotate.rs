@@ -6,7 +6,7 @@
 //! prints how.
 //!
 //! - [`run_access`]: create a successor of the identity `super::access_create` computed,
-//!   named `<original>-YYYYMMDD`, store its token as the same GitHub secret on stdin, and
+//!   named `<original>-YYYYMMDD-HHMM`, store its token as the same GitHub secret on stdin, and
 //!   verify the token with one `op vault list` in that child's own environment. The GitHub
 //!   secret must already exist: rotation replaces what a CI job reads, it never sets up a
 //!   job that has none.
@@ -40,9 +40,55 @@ use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome};
 /// paths and the value recorded as expiry (#296).
 const VALIDITY_DAYS: i64 = 90;
 
-/// The successor's date suffix, `YYYYMMDD`.
-fn date_suffix() -> String {
-    crate::app::retire::today().replace('-', "")
+/// The successor's suffix, `YYYYMMDD-HHMM` in UTC: a second rotation on the same day gets a
+/// name of its own (#338), so the old account the person revokes is never named twice.
+pub(super) fn date_suffix() -> String {
+    suffix_at(now_secs())
+}
+
+/// `secs` since the Unix epoch as the successor's suffix, `YYYYMMDD-HHMM` (UTC).
+pub(super) fn suffix_at(secs: u64) -> String {
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let date = crate::domain::credential::add_days("1970-01-01", days).unwrap_or_default();
+    let s = secs % 86_400;
+    format!(
+        "{}-{:02}{:02}",
+        date.replace('-', ""),
+        s / 3600,
+        s / 60 % 60
+    )
+}
+
+/// The successor of `base` named with `suffix`, given the names already `taken` (the
+/// account being replaced, a successor the person revoked): `<base>-<suffix>`, else with
+/// `-2`, `-3`, … until it is free, so two rotations in the same minute never share a name.
+pub(super) fn successor_name(base: &str, suffix: &str, taken: &[&str]) -> String {
+    let first = format!("{base}-{suffix}");
+    std::iter::once(first.clone())
+        .chain((2u32..).map(|n| format!("{first}-{n}")))
+        .find(|name| !taken.contains(&name.as_str()))
+        .unwrap_or(first)
+}
+
+/// Seconds since the Unix epoch. In a unit test the first reading on a thread is kept, so a
+/// test's expected successor and the one its run made are named at the same instant.
+fn now_secs() -> u64 {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    };
+    #[cfg(test)]
+    {
+        thread_local! {
+            static FIRST: std::cell::OnceCell<u64> = const { std::cell::OnceCell::new() };
+        }
+        FIRST.with(|f| *f.get_or_init(now))
+    }
+    #[cfg(not(test))]
+    {
+        now()
+    }
 }
 
 /// `opv access <env> [--target <t>] --create`: the command that sets up what rotation
@@ -123,8 +169,9 @@ fn cannot_mint() -> Error {
 
 /// Run `op service-account create` once, through the runner's create effect (07.12, X5):
 /// its stdout (the token), or the diagnosed cause. An unknown outcome is
-/// `CreateOutcomeUnknown` with a check first, never a re-run (see `access_create`).
-fn create(
+/// `CreateOutcomeUnknown` with a check first, never a re-run (see `access_create`). Shared
+/// with the agent identity's rotation ([`super::agent_identity_rotate`]).
+pub(super) fn create(
     r: &dyn CommandRunner,
     call: &Call,
     ctx: &DiagnoseContext,
@@ -343,7 +390,11 @@ pub fn run_access(
     if let Some(vault) = id.not_in_account.first() {
         return Err(vault.error());
     }
-    let successor = format!("{}-{}", id.service_account, date_suffix());
+    let successor = successor_name(
+        &id.service_account,
+        &date_suffix(),
+        &[id.service_account.as_str(), revoked.unwrap_or_default()],
+    );
     let home = marker_home(fleet, &successor);
     // NR-1: an earlier run that recorded a pending rotation and never finished may have made
     // its successor; nobody holds that one's token, and making another would leave both. It

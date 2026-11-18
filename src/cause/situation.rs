@@ -78,6 +78,12 @@ impl Situation {
                     name: c.var().to_string(),
                 }
             }
+            // The agent identity (#338) is a service account, by its name once resolved.
+            Some(OpCredential::Agent) => Principal::ServiceAccount {
+                name: crate::identity::agent_name()
+                    .unwrap_or("of this run's agent identity")
+                    .to_string(),
+            },
             None => Principal::Person { account: None },
         };
         let tokens = crate::adapters::registry::credential_vars();

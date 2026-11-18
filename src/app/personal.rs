@@ -264,6 +264,49 @@ pub fn merged_fields(
     Ok(out)
 }
 
+/// One key a run selected, with its declaration.
+pub(crate) type Selected<'a> = (&'a String, &'a KeySpec);
+
+/// `selected` split into the personal keys a run under `host` cannot read and the rest
+/// (#338, D12). A personal value is in a person's own item; a token (the agent identity, a
+/// CI service account, Connect) is never a person and 1Password never grants a service
+/// account a Private vault, so under one every personal key is unreadable. A person's own
+/// session reads them all: nothing is split off.
+pub(crate) fn unreadable_here<'a>(
+    fleet: &Fleet,
+    selected: Vec<Selected<'a>>,
+    host: Host,
+) -> (Vec<Selected<'a>>, Vec<Selected<'a>>) {
+    if host.op_credential.is_none() {
+        return (Vec::new(), selected);
+    }
+    selected
+        .into_iter()
+        .partition(|(_, spec)| is_personal(fleet, spec))
+}
+
+/// The one note naming the personal keys of `product` a run leaves out because its
+/// identity cannot read a person's own item (#338); `None` when there are none. Names only.
+pub(crate) fn not_injected_note(product: &str, keys: &[Selected<'_>]) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = keys
+        .iter()
+        .map(|(key, _)| crate::domain::key_label(product, key))
+        .collect();
+    let (verb, whose) = if names.len() == 1 {
+        ("is", "its value is")
+    } else {
+        ("are", "their values are")
+    };
+    Some(format!(
+        "{} {verb} not injected: personal, so {whose} in a person's own 1Password item, \
+         which this run's 1Password token cannot read; the run goes on without them",
+        names.join(", ")
+    ))
+}
+
 /// Whether `spec` is personal, directly or through a `from` to a personal source
 /// (FR-45, FR-55). Load-time rules keep the two in step; this follows both.
 pub fn is_personal(fleet: &Fleet, spec: &KeySpec) -> bool {

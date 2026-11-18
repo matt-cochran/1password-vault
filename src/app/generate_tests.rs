@@ -689,3 +689,25 @@ fn structured_generation_is_supported_for_team_shared_and_production_tiers() {
         }
     }
 }
+
+// #338: the agent identity is read-only (D4) -------------------------------------------------
+
+#[test]
+fn generate_under_the_agent_identity_is_refused_without_an_op_write() {
+    let (fleet, op, _) = world();
+    let agent = crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux").var_val("OPV_IDENTITY", "agent"),
+    );
+    let code = run_on(
+        &fleet,
+        "dev",
+        &["api/SESSION_KEY".into()],
+        &op,
+        agent,
+        &mut Vec::new(),
+    )
+    .unwrap_err()
+    .code_str();
+    let writes = op.count(&["op", "item", "edit"]) + op.count(&["op", "item", "create"]);
+    assert_eq!((code, writes), ("own_session_required", 0));
+}

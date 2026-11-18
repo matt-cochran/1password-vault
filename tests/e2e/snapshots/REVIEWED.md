@@ -295,3 +295,17 @@ The owner delegated the 0.12.0 snapshot sign-off on 2026-10-18 to a Junior revie
 Ten `access__…` matrix cells changed (`access__op_vault_user_list_…__not_found` ×7, `access__op_whoami__{applied_but_reply_lost,malformed_output,timeout}`), plus `scenarios/core_access`. Spike #304 (Q3) showed a service account never appears in `op vault user list`, so a CI reader's or deploy identity's grant on a readable vault whose list names no service account is now `not_supported` (text: `not supported (service accounts are never listed)`), counted as unclassified, with no `Owner runs:` command; one `ci_reader_not_visible` finding per environment (`next: opv access <env> --verify-reader --grant-receipt <file> --grant-receipt-sha256 <approved-sha256>`) and one `deploy_identity_not_visible` finding per target (`next: opv delivery verify <env> --target <name>`). `issue_157_access_reports_the_vault_outside_the_account_and_checks_the_others` now expects `not_supported` for every vault but the one outside the account. Each diff was checked to be only this. No value in any diff.
 
 - [ ] Owner sign-off of the #314 access snapshots.
+
+## 0.22.0: the agent identity end to end (#338, S12)
+
+One new scenario snapshot, `scenarios/agent_identity.snap` (`tests/e2e/scenarios/agent_identity.rs`), on a marked world with a fake credential store in the scenario directory (`OPV_FAKE_AGENT_STORE`, `fake` builds only). It holds, text and `--json` each: a person's `opv access dev --create --agent` at a pseudo-terminal and the second create (`agent_identity_exists`); `plan prod` and `status prod` under `OPV_IDENTITY=agent` with the reader grants (every target row `unknown` or `new`, no finding); and `plan prod` reaching `agent_identity_not_installed`, `agent_rejected` (the service account revoked), `agent_store_unavailable` and `agent_store_locked`. Normalized so no host state reaches it: the machine part of the account name is `<machine>`, the store kind `<store>`, dates `<date>`, the token marker's counter `<n>`. The app's two shared vaults get 26-character IDs in this world (the token-scoped binding check accepts no other). Checked by the implementing agent: no token (`ops_SIMTOKEN…`) and no value anywhere; each error's `next` is the typed `{kind, actor, command}`, a person's for create, rotate and not-installed.
+
+Points for the owner: `plan prod` under the agent ends `Next: opv sync prod --deploy …`, a command the agent identity is refused (D12); `agent_store_unavailable`'s `Do:` names the host's store (here the fake's Secret Service advice).
+
+- [ ] Owner sign-off of the agent identity snapshot.
+
+### 0.22.0: agent polish (#338, s12b)
+
+`scenarios/agent_identity.snap` changed in two places, both under `OPV_IDENTITY=agent`: `plan prod` now ends `Next: deploy through CI's deploy job, or the person runs opv sync prod --deploy --prune --expect-plan … in their own terminal`, and its `--json` `next` is `{kind: apply, actor: person, command: "opv sync …"}` (was the assistant's `run`); `status prod`'s `pending deploy (…)` line carries the same words. This answers the point above (D12). The scenario's world now keeps the app's personal key (`web/PERSONAL_LLM_KEY`): `opv run dev` under the agent leaves it out with one value-free note naming it and runs with the shared keys (asserted by tests, not the snapshot). Checked by the implementing agent: no token and no value anywhere; no new line names `OPV_IDENTITY=person`.
+
+- [ ] Owner sign-off of the agent polish changes.

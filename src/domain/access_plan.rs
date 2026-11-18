@@ -16,8 +16,17 @@ use crate::domain::access::Reader;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Principal {
-    Deploy { environment: String, target: String },
-    CiReader { environment: String },
+    Deploy {
+        environment: String,
+        target: String,
+    },
+    CiReader {
+        environment: String,
+    },
+    Agent {
+        environment: String,
+        machine: String,
+    },
 }
 
 /// The access a principal needs on one vault (FR-59).
@@ -51,6 +60,15 @@ pub struct TargetNeeds<'a> {
 /// What one environment's CI jobs need: read on each boundary vault (FR-59).
 pub struct CiNeeds<'a> {
     pub environment: &'a str,
+    pub boundary_vaults: std::collections::BTreeSet<&'a str>,
+}
+
+/// What one environment's read-only agent identity on `machine` needs: exactly the CI
+/// reader's boundary vaults, each read, never read-write (FR-59; design
+/// `agent-identity.md` §7.1).
+pub struct AgentNeeds<'a> {
+    pub environment: &'a str,
+    pub machine: &'a str,
     pub boundary_vaults: std::collections::BTreeSet<&'a str>,
 }
 
@@ -113,9 +131,56 @@ pub fn ci_account(project: &str, environment: &str) -> String {
     format!("{project}-{environment}-ci")
 }
 
+/// The longest machine part of an agent account name (design `agent-identity.md` §7).
+const AGENT_MACHINE_MAX: usize = 32;
+
+/// The machine part of an agent account name: lowercased, every run of characters outside
+/// `[a-z0-9]` collapsed to one `-`, leading and trailing `-` trimmed, cut to at most 32
+/// characters (design `agent-identity.md` §7).
+fn machine_slug(machine: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for ch in machine.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    slug.truncate(AGENT_MACHINE_MAX);
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+/// The name of an environment's read-only agent identity on one machine:
+/// `{project}-{environment}-agent-{machine}`, with the machine part sanitized (FR-59;
+/// design `agent-identity.md` §7).
+pub fn agent_account(project: &str, environment: &str, machine: &str) -> String {
+    format!("{project}-{environment}-agent-{}", machine_slug(machine))
+}
+
 /// Every grant the configuration requires, sorted by (principal, vault_id) and without
 /// duplicates (FR-59).
 pub fn required(project: &str, targets: &[TargetNeeds<'_>], ci: &[CiNeeds<'_>]) -> Vec<Grant> {
+    required_with_agents(project, targets, ci, &[])
+}
+
+/// Every grant the configuration requires, including each agent identity's read-only grants:
+/// the same boundary vaults, vault set and `Read` permission as the CI reader of the same
+/// environment, never read-write (FR-59; design `agent-identity.md` §7.1). Sorted by
+/// (principal, vault_id) and without duplicates.
+pub fn required_with_agents(
+    project: &str,
+    targets: &[TargetNeeds<'_>],
+    ci: &[CiNeeds<'_>],
+    agents: &[AgentNeeds<'_>],
+) -> Vec<Grant> {
     let mut grants: BTreeSet<(Principal, String, String, Permission)> = BTreeSet::new();
     for target in targets {
         let principal = Principal::Deploy {
@@ -143,6 +208,21 @@ pub fn required(project: &str, targets: &[TargetNeeds<'_>], ci: &[CiNeeds<'_>]) 
             environment: entry.environment.to_string(),
         };
         let service_account = ci_account(project, entry.environment);
+        for vault in &entry.boundary_vaults {
+            grants.insert((
+                principal.clone(),
+                (*vault).to_string(),
+                service_account.clone(),
+                Permission::Read,
+            ));
+        }
+    }
+    for entry in agents {
+        let principal = Principal::Agent {
+            environment: entry.environment.to_string(),
+            machine: entry.machine.to_string(),
+        };
+        let service_account = agent_account(project, entry.environment, entry.machine);
         for vault in &entry.boundary_vaults {
             grants.insert((
                 principal.clone(),
