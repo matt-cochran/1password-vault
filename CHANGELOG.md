@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-21
+
 ### Fixed
 
 - **Production provisions work from a person's own `opv login` on WSL and on Linux without the 1Password app (#353, related #351).** Every session there is an `OP_SESSION_<id>` variable, and a production-tier or `confirm_env` `opv provision` refused any such variable with `own_session_required`, even under the person's own `opv login -- …`. Now `opv login [-- <command>]`, when its own sign-in prompted the person, records a proof in a private directory under the validated `$XDG_RUNTIME_DIR` and gives its child `OPV_LOGIN_PROOF`. The record holds the login's PID, start time, executable, controlling terminal, the nonce's SHA-256 and the session variables' names, and nothing derived from a value (ADR-0001 R1). A production write accepts the session only when the proof matches, that login is still running as an ancestor on the same terminal, stdin and stdout are a terminal, no assistant marker is set, and the session variables are exactly the login's, with the same values. `eval "$(opv login --shell)"` sessions do not qualify, because they outlive the login. Service-account and Connect tokens are always refused. Design: `docs/design/own-login-proof.md` (amends owner-value-ingestion D6).
