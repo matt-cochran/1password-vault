@@ -1547,19 +1547,43 @@ fn who_is_running(
         .into());
     }
     // D6: in production the write uses the app's authorization or a sign-in opv prompts
-    // for, never a session or token already in the environment. Names only.
+    // for, never a token in the environment, and a session in it only when this terminal's
+    // own `opv login` signed it in and proves it (#353, design `own-login-proof.md`).
     if (environment.tier == Tier::Production || environment.confirm_env)
-        && let Some(var) = crate::host::credential_on(host_env)
+        && let Some(identity) = production_refusal(host_env, &host)
     {
         return Err(Cause::NeedsOwnSession {
             command: CommandId(format!("provision {} --env {}", req.set, req.env)),
-            identity: Principal::ShellToken {
-                var: VarName::new(var),
-            },
+            identity,
         }
         .into());
     }
     super::tidy::require_person_on(r, "opv provision", host)
+}
+
+/// D6 (#353): who the environment's credential is, when a production write must refuse it.
+/// A service-account or Connect variable always refuses (by name); `OP_SESSION*` sessions
+/// refuse unless [`Host::own_login`] proves them this terminal's own `opv login` sign-in.
+/// Names only; `None` when nothing is in the environment or the proof holds.
+pub(crate) fn production_refusal(host_env: &dyn HostEnv, host: &Host) -> Option<Principal> {
+    let var = crate::host::credential_on(host_env)?;
+    let token = [
+        "OP_SERVICE_ACCOUNT_TOKEN",
+        "OP_CONNECT_HOST",
+        "OP_CONNECT_TOKEN",
+    ]
+    .into_iter()
+    .find(|t| host_env.is_set(t));
+    match (token, host.own_login()) {
+        (Some(t), _) => Some(Principal::ShellToken {
+            var: VarName::new(t),
+        }),
+        (None, Ok(())) => None,
+        (None, Err(why)) => Some(Principal::ShellSession {
+            var: VarName::new(var),
+            why,
+        }),
+    }
 }
 
 /// Each member's value state in the item read at `S0`, in name order. The values are

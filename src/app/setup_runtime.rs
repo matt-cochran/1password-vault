@@ -71,10 +71,17 @@ impl Runtime {
             command
         };
         let args: Vec<_> = command[1..].iter().map(String::as_str).collect();
+        // #353: a login that prompted the person itself proves it to its child, so a
+        // production write there counts as the person's own sign-in. Removed on return.
+        let proof = self.login_proof();
+        let mut env = self.environment();
+        if let Some(p) = &proof {
+            env.push((super::login_proof::PROOF_VAR, p.value()));
+        }
         // The one child that keeps the session: handing it on is `opv login -- <cmd>`'s
         // purpose (session-reuse §6, FMECA M6).
         self.runner
-            .run_signed_in_child(&command[0], &args, &self.environment())
+            .run_signed_in_child(&command[0], &args, &env)
             .map_err(|e| {
                 Cause::ChildStartFailed {
                     program: command[0].clone(),
@@ -84,6 +91,35 @@ impl Runtime {
                 }
                 .into()
             })
+    }
+}
+
+impl Runtime {
+    /// #353: the login proof for this login's child: only for `opv login`, only for a
+    /// session its own sign-in produced here (a reused session has none), never for an
+    /// assistant. A proof that cannot be written is said once on stderr when the person
+    /// can act on it ($XDG_RUNTIME_DIR, #351); the login goes on without it.
+    fn login_proof(&self) -> Option<super::login_proof::Issued> {
+        use crate::cause::SessionProof;
+        use crate::host::HostEnv as _;
+        if self.command.as_deref() != Some("login")
+            || self.session.is_empty()
+            || crate::host::ProcessEnv.agent_mode().is_some()
+        {
+            return None;
+        }
+        match super::login_proof::issue_here(&self.session) {
+            Ok(p) => Some(p),
+            Err(why @ (SessionProof::RuntimeDir | SessionProof::NoTerminal)) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "note: production writes from this terminal will be refused: {}",
+                    why.words()
+                );
+                None
+            }
+            Err(_) => None,
+        }
     }
 }
 

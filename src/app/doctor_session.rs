@@ -320,7 +320,43 @@ pub fn rows(
             }
         });
     }
+    rows.extend(production_row(host));
     rows
+}
+
+/// The production-writes row name (#353).
+pub const PRODUCTION_ROW: &str = "production writes";
+
+/// #353: whether a production-tier write (`opv provision`) can use this shell's
+/// `OP_SESSION*` session, and why not. Only when one is set, outside CI and without a
+/// service-account or Connect credential (their own rows say why writes are refused); with
+/// no session variable, opv signs the person in at 1Password's prompt for the write.
+pub fn production_row(host: &Host) -> Option<DoctorRow> {
+    if host.ci || host.op_credential.is_some() || !host.op_session_in_env() {
+        return None;
+    }
+    Some(match host.own_login() {
+        Ok(()) => DoctorRow {
+            name: PRODUCTION_ROW,
+            status: RowStatus::Ok,
+            text: "allowed in this terminal: its own opv login signed this session in".into(),
+            fix: None,
+            state: "own_login",
+            reason: None,
+        },
+        Err(why) => DoctorRow {
+            name: PRODUCTION_ROW,
+            status: RowStatus::Warn,
+            text: format!(
+                "refused with this shell's session ({}); sign in for the write with opv login \
+                 -- opv provision <SET> --env <env>, or use a new shell without OP_SESSION_*",
+                why.words()
+            ),
+            fix: None,
+            state: "refused",
+            reason: Some(why.code()),
+        },
+    })
 }
 
 /// §3.3 `<why>`.

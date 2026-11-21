@@ -564,6 +564,21 @@ fn variants(c: &Cause) -> Vec<Cause> {
                 *why = FederatedWhy::IdentityMismatch;
             }
         })],
+        // #353: a session in the environment that is not this terminal's own login.
+        NeedsOwnSession { .. } => [SessionProof::NoProof, SessionProof::NotAncestor]
+            .into_iter()
+            .map(|why| {
+                varied(c, |v| {
+                    if let NeedsOwnSession { command, identity } = v {
+                        *command = CommandId("provision worker-deploy --env prod".into());
+                        *identity = Principal::ShellSession {
+                            var: VarName::new("OP_SESSION_ACC6AIN"),
+                            why,
+                        };
+                    }
+                })
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
