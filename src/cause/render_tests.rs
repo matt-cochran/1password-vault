@@ -354,6 +354,21 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["approve", "OP_SERVICE_ACCOUNT_TOKEN"],
         ),
+        // #353: a session that is not this terminal's own login names why.
+        (
+            NeedsOwnSession {
+                command: CommandId("provision grant --env prod".into()),
+                identity: Principal::ShellSession {
+                    var: VarName::new("OP_SESSION_ACC6AIN"),
+                    why: SessionProof::NotAncestor,
+                },
+            },
+            vec![
+                "provision grant --env prod",
+                "OP_SESSION_ACC6AIN",
+                "does not run under the opv login",
+            ],
+        ),
         (
             CredentialRejected {
                 system: System::Fly,

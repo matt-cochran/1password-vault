@@ -846,12 +846,13 @@ fn principal_words(p: &Principal) -> String {
             )
         }
         Principal::ShellToken { var } => format!("the token in {var}"),
+        Principal::ShellSession { var, .. } => format!("the session in {var}"),
     }
 }
 
 fn principal_var(p: &Principal) -> Option<&VarName> {
     match p {
-        Principal::ShellToken { var } => Some(var),
+        Principal::ShellToken { var } | Principal::ShellSession { var, .. } => Some(var),
         Principal::Person { .. }
         | Principal::ServiceAccount { .. }
         | Principal::ServicePrincipal { .. }
@@ -2404,6 +2405,15 @@ impl Cause {
                     None => format!("{what}{of_env} is not in 1Password account {selected}"),
                 }
             }
+            // #353: a session in the environment says which check of its login proof failed.
+            NeedsOwnSession {
+                command,
+                identity: Principal::ShellSession { var, why },
+            } => format!(
+                "opv {} must be used in your own session, not with the session in {var}: {}",
+                command.0,
+                why.words()
+            ),
             NeedsOwnSession { command, identity } => format!(
                 "opv {} must be used in your own session, not as {}",
                 command.0,
@@ -4144,6 +4154,19 @@ impl Cause {
                 }),
             ),
             // end agent identity
+            // #353: this terminal's own `opv login` sign-in counts; an exported or inherited
+            // session does not, and a new shell without it signs in at 1Password's prompt.
+            NeedsOwnSession {
+                command,
+                identity: Principal::ShellSession { var, .. },
+            } => plan(
+                inspect(format!(
+                    "run it under opv login in your own terminal (opv login -- opv {}), or in \
+                     a new shell without {var}, where opv signs you in at 1Password's prompt",
+                    command.0
+                )),
+                Next::Handoff(inv_cmd(inv)),
+            ),
             NeedsOwnSession { command, identity } => {
                 let without = match principal_var(identity) {
                     Some(v) => format!(", without {v}"),

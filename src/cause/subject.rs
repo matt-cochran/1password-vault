@@ -325,6 +325,98 @@ pub enum Principal {
     ShellToken {
         var: VarName,
     },
+    /// An `OP_SESSION*` session in the environment that is not this terminal's own
+    /// `opv login` sign-in (#353): `why` names the check of its login proof that failed.
+    ShellSession {
+        var: VarName,
+        why: SessionProof,
+    },
+}
+
+/// Why an `OP_SESSION*` session in the environment is not proven to be this terminal's own
+/// `opv login` sign-in (#353, `docs/design/own-login-proof.md`). Names no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionProof {
+    /// No `OPV_LOGIN_PROOF`: an exported, inherited or `--shell` session.
+    NoProof,
+    /// `OPV_LOGIN_PROOF` is not in the form `opv login` writes.
+    Malformed,
+    /// `$XDG_RUNTIME_DIR` is not a private, RAM-backed directory of this user (#351).
+    RuntimeDir,
+    /// No proof record for the named login.
+    Missing,
+    /// The record is not a private regular file of this user.
+    UnsafeRecord,
+    /// The nonce does not match the record.
+    Forged,
+    /// The login that wrote the record has ended (or its process ID was reused).
+    Stale,
+    /// The login that wrote the record is not an ancestor of this process.
+    NotAncestor,
+    /// This process's controlling terminal is not the login's.
+    OtherTerminal,
+    /// A session variable is not one the login created, or its value differs.
+    WrongSession,
+    /// Stdin or stdout is not a terminal.
+    NoTerminal,
+    /// An assistant's marker is set.
+    Agent,
+    /// This platform has no login proof (Linux and WSL only).
+    Unsupported,
+}
+
+impl SessionProof {
+    /// The stable snake_case name (`opv doctor --json`'s `reason`).
+    pub fn code(self) -> &'static str {
+        match self {
+            SessionProof::NoProof => "no_proof",
+            SessionProof::Malformed => "malformed",
+            SessionProof::RuntimeDir => "runtime_dir",
+            SessionProof::Missing => "missing",
+            SessionProof::UnsafeRecord => "unsafe_record",
+            SessionProof::Forged => "forged",
+            SessionProof::Stale => "stale",
+            SessionProof::NotAncestor => "not_ancestor",
+            SessionProof::OtherTerminal => "other_terminal",
+            SessionProof::WrongSession => "wrong_session",
+            SessionProof::NoTerminal => "no_terminal",
+            SessionProof::Agent => "agent",
+            SessionProof::Unsupported => "unsupported",
+        }
+    }
+
+    /// Why, in a message's words.
+    pub fn words(self) -> &'static str {
+        match self {
+            SessionProof::NoProof => {
+                "no opv login in this terminal signed it in (it was exported, inherited or \
+                 set by `opv login --shell`)"
+            }
+            SessionProof::Malformed => "its OPV_LOGIN_PROOF is not one opv login wrote",
+            SessionProof::RuntimeDir => {
+                "$XDG_RUNTIME_DIR is not a private, RAM-backed directory you own, so opv \
+                 login could not record its sign-in"
+            }
+            SessionProof::Missing => "the opv login it names left no sign-in record",
+            SessionProof::UnsafeRecord => "its sign-in record is not a private file of yours",
+            SessionProof::Forged => "its OPV_LOGIN_PROOF does not match opv login's record",
+            SessionProof::Stale => "the opv login that signed it in has ended",
+            SessionProof::NotAncestor => {
+                "this command does not run under the opv login that \
+                 signed it in"
+            }
+            SessionProof::OtherTerminal => {
+                "this command does not run in the terminal opv login signed in on"
+            }
+            SessionProof::WrongSession => "it is not the session opv login created",
+            SessionProof::NoTerminal => "stdin and stdout are not a terminal",
+            SessionProof::Agent => "an assistant's marker is set",
+            SessionProof::Unsupported => {
+                "this platform has no opv login proof (Linux and WSL only)"
+            }
+        }
+    }
 }
 
 /// A right that was missing.

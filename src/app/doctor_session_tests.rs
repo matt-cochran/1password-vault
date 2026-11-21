@@ -644,3 +644,49 @@ fn doctor_rows_on_a_headless_linux_run_no_op() {
     assert_eq!(rows[0].reason, Some("headless"));
     assert!(r.calls.borrow().is_empty());
 }
+
+// #353: the production-writes row says whether this shell's session counts for a
+// production write, and why not.
+
+#[test]
+fn no_production_row_without_a_session_variable() {
+    assert_eq!(production_row(&host(wsl().tty())), None);
+}
+
+#[test]
+fn a_proven_own_login_allows_production_writes() {
+    let row = production_row(&host(
+        wsl().tty().var_val("OP_SESSION_one", "x").own_login(),
+    ));
+    assert_eq!(
+        row.map(|r| (r.status, r.state)),
+        Some((RowStatus::Ok, "own_login"))
+    );
+}
+
+#[test]
+fn an_exported_session_refuses_production_writes_with_its_reason() {
+    let row = production_row(&host(wsl().tty().var_val("OP_SESSION_one", "x")));
+    assert_eq!(
+        row.map(|r| (r.status, r.state, r.reason)),
+        Some((RowStatus::Warn, "refused", Some("no_proof")))
+    );
+}
+
+#[test]
+fn a_missing_runtime_directory_is_the_reason_given() {
+    let env = wsl()
+        .tty()
+        .var_val("OP_SESSION_one", "x")
+        .login_refused(crate::cause::SessionProof::RuntimeDir);
+    assert_eq!(
+        production_row(&host(env)).and_then(|r| r.reason),
+        Some("runtime_dir")
+    );
+}
+
+#[test]
+fn no_production_row_under_ci() {
+    let env = wsl().var_val("OP_SESSION_one", "x").var_val("CI", "true");
+    assert_eq!(production_row(&host(env)), None);
+}

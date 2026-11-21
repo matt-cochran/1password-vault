@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Production provisions work from a person's own `opv login` on WSL and on Linux without the 1Password app (#353, related #351).** Every session there is an `OP_SESSION_<id>` variable, and a production-tier or `confirm_env` `opv provision` refused any such variable with `own_session_required`, even under the person's own `opv login -- …`. Now `opv login [-- <command>]`, when its own sign-in prompted the person, records a proof in a private directory under the validated `$XDG_RUNTIME_DIR` and gives its child `OPV_LOGIN_PROOF`. The record holds the login's PID, start time, executable, controlling terminal, the nonce's SHA-256 and the session variables' names, and nothing derived from a value (ADR-0001 R1). A production write accepts the session only when the proof matches, that login is still running as an ancestor on the same terminal, stdin and stdout are a terminal, no assistant marker is set, and the session variables are exactly the login's, with the same values. `eval "$(opv login --shell)"` sessions do not qualify, because they outlive the login. Service-account and Connect tokens are always refused. Design: `docs/design/own-login-proof.md` (amends owner-value-ingestion D6).
+
+### Changed
+
+- **`own_session_required` for a session says why.** The new principal `shell_session {var, why}` has one of these reasons: `no_proof`, `malformed`, `runtime_dir`, `missing`, `unsafe_record`, `forged`, `stale`, `not_ancestor`, `other_terminal`, `wrong_session`, `no_terminal`, `agent` or `unsupported`. Its `Do:` names `opv login -- opv <command>`, or a new shell without the variable. The code and exit 7 are unchanged.
+- **`opv doctor` has a `production writes` row** whenever an `OP_SESSION*` is set, outside CI and without a service-account or Connect token. The row is `ok` (state `own_login`) or `warn` (state `refused`, with the reason) and never fails the run.
+- **`opv login` notes when it cannot record the proof**, because `$XDG_RUNTIME_DIR` is missing or unsafe (#351). Production writes from that terminal will then be refused.
+
 ## [0.22.0] - 2026-11-17
 
 0.22.0 (#338) gives assistants and unattended automation their own read-only 1Password identity, built the same way as CI's reader, so they no longer borrow a person's write-capable session. Only people change values.
