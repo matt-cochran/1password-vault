@@ -61,6 +61,7 @@ mod ledger_tests;
 pub mod local;
 pub mod local_delivery;
 pub mod login;
+pub mod login_proof;
 pub mod login_shell;
 pub mod masked;
 pub mod mcp_install;

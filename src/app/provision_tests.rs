@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
-use crate::cause::{Cause, Guard, NoTerminal, Principal, ProvisionRefusal, UnsupportedFeature};
+use crate::cause::{
+    Cause, Guard, NoTerminal, Principal, ProvisionRefusal, SessionProof, UnsupportedFeature,
+};
 use crate::host::FakeEnv;
 use crate::runner::fake::{ScriptedEnd, ScriptedProducer};
 use crate::runner::{Call, Output};
@@ -529,13 +531,84 @@ fn a_session_variable_in_production_needs_the_persons_own_session() {
         request("grant", "prod"),
         &mut Scripted::answering(Some("prod")),
     );
+    // #353: the refusal names the session and why it is not this terminal's own login.
     assert!(matches!(
         cause_of(r),
         Cause::NeedsOwnSession {
-            identity: Principal::ShellToken { var },
+            identity: Principal::ShellSession { var, why: SessionProof::NoProof },
             ..
         } if var.as_str() == "OP_SESSION_abcdef"
     ));
+}
+
+#[test]
+fn a_production_session_this_terminals_own_login_proves_is_written() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    let r = run(
+        &op,
+        &fleet,
+        &person().var("OP_SESSION_abcdef").own_login(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert!(matches!(r, Ok(Outcome::Written(_))));
+}
+
+#[test]
+fn a_production_session_whose_proof_fails_names_why() {
+    let (op, fleet) = world();
+    let r = run(
+        &op,
+        &fleet,
+        &person()
+            .var("OP_SESSION_abcdef")
+            .login_refused(SessionProof::NotAncestor),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert!(matches!(
+        cause_of(r),
+        Cause::NeedsOwnSession {
+            identity: Principal::ShellSession {
+                why: SessionProof::NotAncestor,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_production_proof_never_excuses_a_service_account_token() {
+    let (op, fleet) = world();
+    let r = run(
+        &op,
+        &fleet,
+        &person()
+            .var("OP_SESSION_abcdef")
+            .var("OP_SERVICE_ACCOUNT_TOKEN")
+            .own_login(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(r.unwrap_err().code_str(), "own_session_required");
+}
+
+#[test]
+fn a_production_proof_never_excuses_an_assistant() {
+    let (op, fleet) = world();
+    let r = run(
+        &op,
+        &fleet,
+        &person()
+            .var("OP_SESSION_abcdef")
+            .var_val("CLAUDECODE", "1")
+            .own_login(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(r.unwrap_err().code_str(), "person_only");
 }
 
 #[test]

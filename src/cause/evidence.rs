@@ -46,7 +46,8 @@ pub fn checked_account<'a>(
         | Principal::AppIdentity { .. }
         | Principal::StoreIdentity { .. }
         | Principal::DeployCredentials { .. }
-        | Principal::ShellToken { .. } => None,
+        | Principal::ShellToken { .. }
+        | Principal::ShellSession { .. } => None,
     })
 }
 
@@ -67,6 +68,7 @@ fn acting_as(p: &Principal) -> Option<String> {
             "deploy credentials {item} (vault {vault}) of target {target} in environment {env}"
         )),
         Principal::ShellToken { var } => Some(format!("the token in {var}")),
+        Principal::ShellSession { var, .. } => Some(format!("the session in {var}")),
     }
 }
 

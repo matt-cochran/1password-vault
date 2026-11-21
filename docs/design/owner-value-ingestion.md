@@ -490,7 +490,7 @@ evidence requires it).
 
 **D6. Production writes.** A: typed environment plus FR-61's refusal of session/token variables for
 production tier or `confirm_env`; in practice a WSL person who exported a session opens a fresh
-shell. B: typed environment only. **Recommend A**.
+shell. B: typed environment only. **Recommend A**. Amended by #353 ([own-login-proof.md](own-login-proof.md)): a session that this terminal's own `opv login` proves it created is accepted.
 
 **D7. Partial sets.** A: `--fill-missing` (§4.7) in Slice B; Slice A refuses `partial`. B: only
 `--replace`, refused for the `immutable` user-hash key, so a Journeeze partial set would be
