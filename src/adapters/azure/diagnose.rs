@@ -93,6 +93,7 @@ fn principal_fact(principal: &Principal) -> String {
             format!("acting with deploy credentials of target {target} in environment {env}")
         }
         Principal::ShellToken { var } => format!("the token in {var} was in effect"),
+        Principal::ShellSession { var, .. } => format!("the session in {var} was in effect"),
     }
 }
 

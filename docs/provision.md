@@ -386,7 +386,7 @@ partial Journeeze set is recovered.
 | no interactive terminal | `terminal_required` (6) | before any `op` call |
 | a producer member on native Windows | `platform_unsupported` (6) | before any `op` call |
 | a service account, Connect or a target's deploy credentials | `own_session_required` (7) | before the item is read |
-| production tier or `confirm_env`, with `OP_SESSION_*`, `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*` in the environment | `own_session_required` (7) | before any `op` call |
+| production tier or `confirm_env`, with `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*` in the environment, or an `OP_SESSION_*` that this terminal's own `opv login` did not sign in (#353: the message names why) | `own_session_required` (7) | before any `op` call |
 | the producer's file no longer has its pin | `producer_changed` (2) | at load |
 | partial, inconsistent, an immutable member under `--replace`, a value equal to another environment's, a budget too small, an item opv cannot rewrite whole | `policy_refused` (6) | before consent, except the comparison (after the producer) |
 | the typed environment differs | `confirm_mismatch` (6) | before any producer |
@@ -397,8 +397,18 @@ partial Journeeze set is recovered.
 | the write's outcome stays unknown | `outcome_unknown` (9) | names the set's state |
 | no access to the vault | 1Password's own refusal | the only permission system |
 
-In production the write uses the 1Password app's authorization or a sign-in opv prompts for,
-never a session or token already exported: open a fresh shell if one is. The terminal, agent
+In production the write uses the 1Password app's authorization, a sign-in opv prompts for, or
+the session of this terminal's own `opv login` (#353). It never uses a token, or a session that
+was exported or inherited. On WSL with the Linux `op`, and on Linux without the 1Password app,
+run the write under the login, as in `opv login -- opv provision <SET> --env prod`, or as a
+script that runs it (`opv login -- bash provision.sh`). The login records a proof under
+`$XDG_RUNTIME_DIR` that it created the session, and gives it only to its own child. The write
+accepts the session only while that login still runs as its ancestor, on the same terminal,
+with no assistant marker and the same session variables. `eval "$(opv login --shell)"` does
+not qualify: its session outlives the login and reaches everything the shell starts later. A
+session that does not qualify is refused with the reason, and `opv doctor` reports it on its
+`production writes` row. When `$XDG_RUNTIME_DIR` is missing (#351), the login says so and no
+proof is written. Design: [own-login-proof.md](design/own-login-proof.md). The terminal, agent
 and confirmation rules prevent unattended and accidental writes; against another process of the
 same user they are friction, not a boundary. Vault access is the real control, and CI, which has
 only a service account, can never write.

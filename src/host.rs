@@ -137,6 +137,12 @@ pub trait HostEnv {
     fn agent_identity_installed(&self) -> bool {
         false
     }
+    /// #353 (design `own-login-proof.md`): whether the `OP_SESSION*` sessions here are this
+    /// terminal's own `opv login` sign-in, or the first check of its proof that failed.
+    /// Asked only when a session variable is set. Default: no proof.
+    fn own_login(&self) -> Result<(), crate::cause::SessionProof> {
+        Err(crate::cause::SessionProof::NoProof)
+    }
     /// The marker that puts this caller in agent mode, if any.
     ///
     /// Agent mode is presentation only, never a security control (R1, review M2): the
@@ -229,6 +235,10 @@ impl HostEnv for ProcessEnv {
     fn agent_identity_installed(&self) -> bool {
         crate::identity::installed_here()
     }
+
+    fn own_login(&self) -> Result<(), crate::cause::SessionProof> {
+        crate::app::login_proof::verify_here(self)
+    }
 }
 
 /// Go's `strconv.ParseBool`, which op uses for its boolean variables (FMECA L1).
@@ -277,6 +287,8 @@ pub struct FakeEnv {
     pub desktop_app: bool,
     /// This machine's index records an agent identity for the project (#338 rule 4).
     pub agent_installed: bool,
+    /// #353: the login proof's verdict; `None` is no proof.
+    pub own_login: Option<Result<(), crate::cause::SessionProof>>,
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -338,6 +350,18 @@ impl FakeEnv {
         self.agent_installed = true;
         self
     }
+
+    /// #353: this terminal's own `opv login` signed the sessions in (the proof holds).
+    pub fn own_login(mut self) -> Self {
+        self.own_login = Some(Ok(()));
+        self
+    }
+
+    /// #353: the login proof fails with `why`.
+    pub fn login_refused(mut self, why: crate::cause::SessionProof) -> Self {
+        self.own_login = Some(Err(why));
+        self
+    }
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -385,6 +409,10 @@ impl HostEnv for FakeEnv {
     }
     fn agent_identity_installed(&self) -> bool {
         self.agent_installed
+    }
+    fn own_login(&self) -> Result<(), crate::cause::SessionProof> {
+        self.own_login
+            .unwrap_or(Err(crate::cause::SessionProof::NoProof))
     }
 }
 
@@ -772,6 +800,9 @@ pub struct Host {
     /// The 1Password desktop app is running (FMECA M2); looked for only on a Linux host
     /// with a graphical session, false elsewhere.
     desktop_app: bool,
+    /// #353: whether the `OP_SESSION*` sessions here are this terminal's own `opv login`
+    /// sign-in ([`HostEnv::own_login`]); judged only when one is set.
+    own_login: Result<(), crate::cause::SessionProof>,
 }
 
 impl Host {
@@ -854,6 +885,11 @@ impl Host {
             && !ci
             && op_credential.is_none()
             && env.desktop_app_running();
+        let own_login = if op_session {
+            env.own_login()
+        } else {
+            Err(crate::cause::SessionProof::NoProof)
+        };
         Host {
             platform,
             shell,
@@ -867,7 +903,15 @@ impl Host {
             graphical,
             op_session,
             desktop_app,
+            own_login,
         }
+    }
+
+    /// #353: whether the `OP_SESSION*` sessions here are this terminal's own `opv login`
+    /// sign-in, or the first check of its proof that failed. `Err(NoProof)` when no session
+    /// variable is set.
+    pub fn own_login(&self) -> Result<(), crate::cause::SessionProof> {
+        self.own_login
     }
 
     /// `OP_BIOMETRIC_UNLOCK_ENABLED` (#203, design §3.2 step 2): `Some(false)` for a false
