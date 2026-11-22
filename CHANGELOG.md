@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The own-login proof accepted no real login on Linux and WSL (#353).** `opv login` clears `PR_SET_DUMPABLE`, so the kernel hides its `/proc/<pid>/exe` link from the provisioning process; 0.22.1 then judged every live login "ended" (`stale`). When `exe` is unreadable, the check now compares the login's command name from `/proc/<pid>/comm` with the recorded executable's. The process ID with its start time still names exactly one process, so a reused ID is still refused.
+
 ## [0.22.1] - 2026-11-21
 
 ### Fixed
