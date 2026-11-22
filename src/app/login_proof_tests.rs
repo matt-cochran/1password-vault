@@ -18,6 +18,8 @@ const OPV: &str = "/usr/local/bin/opv";
 struct Fake {
     me: RefCell<u32>,
     procs: RefCell<HashMap<u32, (ProcStat, PathBuf)>>,
+    /// Command names that differ from the executable's file name.
+    comms: RefCell<HashMap<u32, String>>,
 }
 
 impl Fake {
@@ -42,6 +44,7 @@ impl Fake {
         Fake {
             me: RefCell::new(LOGIN),
             procs: RefCell::new(procs),
+            comms: RefCell::new(HashMap::new()),
         }
     }
     /// Act as `pid` from now on.
@@ -67,7 +70,20 @@ impl Procs for Fake {
         self.procs.borrow().get(&pid).map(|(s, _)| *s)
     }
     fn exe(&self, pid: u32) -> Option<PathBuf> {
-        self.procs.borrow().get(&pid).map(|(_, e)| e.clone())
+        let procs = self.procs.borrow();
+        let (_, e) = procs.get(&pid)?;
+        // An empty path models a non-dumpable process, whose `exe` link is hidden.
+        (!e.as_os_str().is_empty()).then(|| e.clone())
+    }
+    fn comm(&self, pid: u32) -> Option<String> {
+        let procs = self.procs.borrow();
+        let (_, e) = procs.get(&pid)?;
+        let name = self.comms.borrow().get(&pid).cloned().unwrap_or_else(|| {
+            e.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        Some(name.chars().take(15).collect())
     }
 }
 
@@ -368,4 +384,37 @@ fn proc_stat_with_parentheses_in_the_name_parses() {
             tty: 34816
         })
     );
+}
+
+/// #353 on WSL: `opv login` clears PR_SET_DUMPABLE, so the kernel hides its `exe` link from
+/// the provisioning process; the proof must still be accepted from the command name.
+#[test]
+fn a_non_dumpable_login_whose_exe_is_hidden_is_accepted_by_command_name() {
+    let w = world();
+    let name = PathBuf::from(OPV)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    w.procs.set(LOGIN, |_, e| *e = PathBuf::new());
+    w.procs.comms.borrow_mut().insert(LOGIN, name);
+    assert_eq!(w.verify(), Ok(()));
+}
+
+#[test]
+fn a_hidden_exe_with_another_command_name_is_refused_as_stale() {
+    let w = world();
+    w.procs.set(LOGIN, |_, e| *e = PathBuf::new());
+    w.procs.comms.borrow_mut().insert(LOGIN, "bash".into());
+    assert_eq!(w.verify(), Err(SessionProof::Stale));
+}
+
+#[test]
+fn a_hidden_exe_with_a_reused_pid_is_still_refused_as_stale() {
+    let w = world();
+    w.procs.set(LOGIN, |s, e| {
+        *e = PathBuf::new();
+        s.start = 999;
+    });
+    assert_eq!(w.verify(), Err(SessionProof::Stale));
 }

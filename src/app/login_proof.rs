@@ -79,6 +79,10 @@ pub trait Procs {
     fn stat(&self, pid: u32) -> Option<ProcStat>;
     /// `pid`'s executable, `None` when unreadable.
     fn exe(&self, pid: u32) -> Option<PathBuf>;
+    /// `pid`'s command name (`/proc/<pid>/comm`, at most 15 bytes), `None` when it does not
+    /// exist. Readable even when `exe` is not: opv makes itself non-dumpable, and the kernel
+    /// then hides its `exe` link from every other process of the same user.
+    fn comm(&self, pid: u32) -> Option<String>;
 }
 
 /// The running system's processes, from `/proc` (Linux and WSL).
@@ -94,6 +98,10 @@ impl Procs for LinuxProcs {
     }
     fn exe(&self, pid: u32) -> Option<PathBuf> {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+    fn comm(&self, pid: u32) -> Option<String> {
+        let c = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        Some(c.trim_end_matches('\n').to_string())
     }
 }
 
@@ -141,6 +149,18 @@ impl Issued {
 }
 
 /// Executable paths compare without the kernel's ` (deleted)` (an upgrade mid-login).
+/// The kernel's command name for an executable path: its file name, cut to 15 bytes.
+fn comm_of(exe: &str) -> String {
+    let name = Path::new(exe)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.as_bytes()[..name.len().min(15)]
+        .iter()
+        .map(|&b| b as char)
+        .collect()
+}
+
 fn exe_name(p: &Path) -> String {
     let s = p.to_string_lossy();
     s.strip_suffix(" (deleted)").unwrap_or(&s).to_string()
@@ -264,8 +284,16 @@ pub fn verify(
         return Err(SessionProof::Forged);
     }
     let login = procs.stat(record.pid).ok_or(SessionProof::Stale)?;
-    let exe = procs.exe(record.pid).map(|p| exe_name(&p));
-    if login.start != record.start || exe.as_deref() != Some(record.exe.as_str()) {
+    // The login is non-dumpable (opv clears PR_SET_DUMPABLE), so its `exe` link is hidden
+    // from this process; then the command name stands in. The process ID with its start time
+    // already names exactly one process, so a reused ID is still refused.
+    let same_program = match procs.exe(record.pid) {
+        Some(p) => exe_name(&p) == record.exe,
+        None => procs
+            .comm(record.pid)
+            .is_some_and(|c| c == comm_of(&record.exe)),
+    };
+    if login.start != record.start || !same_program {
         return Err(SessionProof::Stale);
     }
     if !is_ancestor(record.pid, record.start, procs) {
