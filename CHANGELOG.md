@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-11-23
+
 ### Fixed
 
 - **Agent identities on WSL no longer fail outright when WSL interop is down.** opv took Windows Credential Manager whenever WSL, interop and `powershell.exe` were present, without starting it, so with interop failing (`UtilAcceptVsock: accept4 failed 110`) every agent-identity command failed, reported as a locked store. `opv access <env> --create --agent` now checks the interop store first (bounded at 15 seconds, no prompt) and, when it does not answer, takes the Linux order: an unlocked Secret Service, else the kernel keyring, declared volatile (`agent_store_volatile`). The question and `opv doctor` say which store and why, and the index records the reason (`store_reason`). An existing identity is always read, rotated and removed in the store its index entry records, never another one.
