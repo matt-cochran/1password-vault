@@ -223,6 +223,257 @@ fn wsl_script_is_passed_as_the_fixed_text() {
     );
 }
 
+// --- store selection (WSL interop down, OPV_AGENT_STORE) -----------------------------------
+
+/// Selection over fixed probe answers: `wsl` is the interop preflight (`None` off WSL).
+fn selected(
+    wsl: Option<Result<(), StoreFailure>>,
+    secret_service: Result<(), StoreFailure>,
+) -> Selection {
+    let preflight = move || wsl.unwrap_or(Ok(()));
+    let ss = move || secret_service;
+    select_linux(&Probes {
+        wsl: wsl
+            .is_some()
+            .then_some(&preflight as &dyn Fn() -> Result<(), StoreFailure>),
+        secret_service: &ss,
+    })
+}
+
+#[test]
+fn wsl_with_answering_interop_keeps_windows_credential_manager() {
+    assert_eq!(
+        selected(Some(Ok(())), Ok(())),
+        Selection {
+            store: AgentStore::WindowsCredentialManager,
+            reason: StoreReason::Platform,
+        }
+    );
+}
+
+#[test]
+fn wsl_interop_down_falls_back_to_an_unlocked_secret_service() {
+    assert_eq!(
+        selected(Some(Err(StoreFailure::InteropDown)), Ok(())),
+        Selection {
+            store: AgentStore::SecretService,
+            reason: StoreReason::WslInteropDown,
+        }
+    );
+}
+
+#[test]
+fn wsl_interop_down_without_a_secret_service_falls_back_to_the_kernel_keyring() {
+    assert_eq!(
+        selected(
+            Some(Err(StoreFailure::InteropDown)),
+            Err(StoreFailure::Unavailable)
+        ),
+        Selection {
+            store: AgentStore::KernelKeyring,
+            reason: StoreReason::WslInteropDown,
+        }
+    );
+}
+
+#[test]
+fn wsl_interop_down_with_a_locked_secret_service_falls_back_to_the_kernel_keyring() {
+    let s = selected(
+        Some(Err(StoreFailure::InteropDown)),
+        Err(StoreFailure::Locked),
+    );
+    assert_eq!(s.store, AgentStore::KernelKeyring);
+}
+
+#[test]
+fn wsl_interop_that_times_out_falls_back_as_interop_down() {
+    let s = selected(
+        Some(Err(StoreFailure::TimedOut)),
+        Err(StoreFailure::Unavailable),
+    );
+    assert_eq!(s.reason, StoreReason::WslInteropDown);
+}
+
+#[test]
+fn wsl_credential_manager_failing_behind_working_interop_says_so() {
+    let s = selected(Some(Err(StoreFailure::Unavailable)), Ok(()));
+    assert_eq!(s.reason, StoreReason::CredentialManagerUnusable);
+}
+
+#[test]
+fn linux_keeps_a_locked_secret_service_so_it_fails_as_locked() {
+    assert_eq!(
+        selected(None, Err(StoreFailure::Locked)),
+        Selection {
+            store: AgentStore::SecretService,
+            reason: StoreReason::Platform,
+        }
+    );
+}
+
+#[test]
+fn linux_without_a_secret_service_uses_the_kernel_keyring() {
+    assert_eq!(
+        selected(None, Err(StoreFailure::Unavailable)),
+        Selection {
+            store: AgentStore::KernelKeyring,
+            reason: StoreReason::NoSecretService,
+        }
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_kernel_keyring_fallback_is_declared_volatile() {
+    let store = OsCredentialStore::opened(selected(
+        Some(Err(StoreFailure::InteropDown)),
+        Err(StoreFailure::Unavailable),
+    ));
+    let cause = store.describe().volatile_cause(Some(EnvName::new("dev")));
+    assert_eq!(cause.map(|c| c.code()), Some("agent_store_volatile"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn override_names_the_store_without_probing_interop() {
+    let d = OsCredentialStore::select(Some(AgentStore::KernelKeyring)).describe();
+    assert_eq!(
+        (d.store, d.reason),
+        (AgentStore::KernelKeyring, StoreReason::Override)
+    );
+}
+
+#[test]
+fn override_wincred_names_windows_credential_manager() {
+    assert_eq!(
+        parse_store_override(Some("wincred")).unwrap(),
+        Some(AgentStore::WindowsCredentialManager)
+    );
+}
+
+#[test]
+fn override_secret_service_names_the_secret_service() {
+    assert_eq!(
+        parse_store_override(Some("secret-service")).unwrap(),
+        Some(AgentStore::SecretService)
+    );
+}
+
+#[test]
+fn override_kernel_keyring_names_the_kernel_keyring() {
+    assert_eq!(
+        parse_store_override(Some("kernel-keyring")).unwrap(),
+        Some(AgentStore::KernelKeyring)
+    );
+}
+
+#[test]
+fn empty_override_chooses_nothing() {
+    assert_eq!(parse_store_override(Some("")).unwrap(), None);
+}
+
+#[test]
+fn unknown_override_is_refused_as_usage() {
+    let err = parse_store_override(Some("keychain")).unwrap_err();
+    assert_eq!(code(&err), "usage");
+}
+
+#[test]
+fn unknown_override_refusal_names_the_variable_and_its_values() {
+    let err = parse_store_override(Some("keychain")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("OPV_AGENT_STORE expects wincred, secret-service or kernel-keyring"),
+        "{err}"
+    );
+}
+
+#[test]
+fn store_reason_round_trips_through_its_index_id() {
+    let all = [
+        StoreReason::Platform,
+        StoreReason::Override,
+        StoreReason::WslInteropDown,
+        StoreReason::CredentialManagerUnusable,
+        StoreReason::NoSecretService,
+    ];
+    assert!(all.iter().all(|r| StoreReason::from_id(Some(r.id())) == *r));
+}
+
+// --- WSL interop failures, through a stand-in for powershell.exe ---------------------------
+
+#[cfg(target_os = "linux")]
+fn wsl_store(program: &str) -> OsCredentialStore {
+    OsCredentialStore::with_backend(Backend::Wsl(wsl::WslVault::with_program(program.into())))
+}
+
+/// A stand-in program that exits with `code`, as a script file in `dir`.
+#[cfg(target_os = "linux")]
+fn exiting_with(dir: &tempfile::TempDir, code: i32) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.path().join(format!("exit-{code}"));
+    std::fs::write(&path, format!("#!/bin/sh\ncat >/dev/null\nexit {code}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_shim_failing_like_a_vsock_error_reads_as_interop_down() {
+    // The WSL shim exits 1 when its vsock accept fails; the script never exits 1.
+    let dir = tempfile::tempdir().unwrap();
+    let err = wsl_store(&exiting_with(&dir, 1))
+        .resolve(&key("dev"))
+        .unwrap_err();
+    assert_eq!(code(&err), "agent_store_interop_down");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_interop_that_will_not_start_reads_as_interop_down() {
+    let err = wsl_store("/nonexistent/opv-test/powershell.exe")
+        .preflight()
+        .unwrap_err();
+    assert_eq!(code(&err), "agent_store_interop_down");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_interop_down_is_never_reported_as_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = wsl_store(&exiting_with(&dir, 1))
+        .store(&key("dev"), &dummy())
+        .unwrap_err();
+    assert_ne!(code(&err), "agent_store_locked");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn credential_manager_failure_behind_working_interop_reads_as_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = wsl_store(&exiting_with(&dir, 4))
+        .resolve(&key("dev"))
+        .unwrap_err();
+    assert_eq!(code(&err), "agent_store_unavailable");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_interop_down_does_not_stall_later_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = wsl_store(&exiting_with(&dir, 1));
+    let _ = store.resolve(&key("dev"));
+    assert!(!store.stalled.load(Ordering::SeqCst));
+}
+
+#[test]
+fn interop_down_fake_reports_agent_store_interop_down() {
+    let fake = FakeCredentialSource::new(AgentStore::WindowsCredentialManager);
+    fake.set_fault(Some(FakeFault::InteropDown));
+    let err = fake.resolve(&key("dev")).unwrap_err();
+    assert_eq!(code(&err), "agent_store_interop_down");
+}
+
 // --- no-value canaries (ADR-0001 R1) ----------------------------------------------------------
 
 #[test]

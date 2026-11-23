@@ -139,6 +139,7 @@ fn machine(envs: &[&str]) -> Machine {
                     environment: env.to_string(),
                     machine: "laptop".into(),
                     store: "macos_keychain".into(),
+                    store_reason: None,
                     created_on: "2026-08-19".into(),
                     expires_on: "2026-11-17".into(),
                     rotation_successor: None,

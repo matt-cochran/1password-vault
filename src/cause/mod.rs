@@ -995,6 +995,11 @@ pub enum Cause {
     AgentStoreLocked {
         store: AgentStore,
     },
+    /// WSL interop to Windows does not answer (its vsock), so Windows Credential Manager,
+    /// which opv reaches through `powershell.exe`, cannot be used from this WSL session.
+    AgentStoreInteropDown {
+        store: AgentStore,
+    },
     /// The token is in a store that does not survive a WSL stop, so unattended runs break.
     AgentStoreVolatile {
         store: AgentStore,
@@ -2544,6 +2549,7 @@ impl Cause {
             AgentRejected { .. } => "agent_rejected",
             AgentStoreUnavailable { .. } => "agent_store_unavailable",
             AgentStoreLocked { .. } => "agent_store_locked",
+            AgentStoreInteropDown { .. } => "agent_store_interop_down",
             AgentStoreVolatile { .. } => "agent_store_volatile",
             CredentialRejected { credential, .. } => match credential {
                 CredentialRef::DeployCredentials { .. } => "deploy_credentials_failed",
@@ -2688,6 +2694,7 @@ impl Cause {
             | ChildStartFailed { .. }
             | ProducerFailed { .. }
             | AgentStoreUnavailable { .. }
+            | AgentStoreInteropDown { .. }
             | AgentStoreVolatile { .. } => 3,
             InventoryIncomplete { .. }
             | ChangedBeforeWrite {

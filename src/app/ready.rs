@@ -1570,14 +1570,16 @@ pub(crate) fn env_identity(
     let mut agent = None;
     let facts = match found {
         who::Who::Agent { name } => {
-            let expires_on = (probe.seams.record)(&name, env).map(|rec| rec.expires_on);
+            let record = (probe.seams.record)(&name, env);
+            let source = (probe.seams.source)(record.as_ref()).describe();
+            let expires_on = record.map(|rec| rec.expires_on);
             agent = Some(crate::domain::credential::agent_record(
                 env,
                 &name,
                 expires_on.as_deref(),
             ));
             who::Facts::Agent(Box::new(who::AgentFacts {
-                source: (probe.seams.source)().describe(),
+                source,
                 expires_on,
                 reach: who::reach(fleet, env, r),
                 rate: crate::adapters::onepassword_ratelimit::read(r),
