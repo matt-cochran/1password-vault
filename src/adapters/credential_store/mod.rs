@@ -178,6 +178,7 @@ pub struct Selection {
 }
 
 /// What selection learns from a Linux machine. Each probe is bounded and never prompts.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct Probes<'a> {
     /// WSL with interop on: the interop store's preflight. `None` when this is not WSL (or
     /// interop is off).
@@ -195,6 +196,7 @@ pub(crate) struct Probes<'a> {
 /// - Linux: a Secret Service when one answers, locked or not (a locked one fails as
 ///   `agent_store_locked` rather than the token landing in a volatile store), else the kernel
 ///   keyring.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn select_linux(probes: &Probes<'_>) -> Selection {
     let fell_back = match probes.wsl {
         None => None,
