@@ -75,13 +75,14 @@ fn probe(host: Host, expires_on: &'static str) -> IdentityProbe<'static> {
                 for_resolve.resolve(&key(env))?;
                 Ok(name(env))
             }),
-            source: Box::new(move || store.clone() as Arc<dyn AgentCredentialSource>),
+            source: Box::new(move |_| store.clone() as Arc<dyn AgentCredentialSource>),
             record: Box::new(move |name, env| {
                 Some(AgentRecord {
                     account_name: name.into(),
                     environment: env.into(),
                     machine: "laptop".into(),
                     store: "secret_service".into(),
+                    store_reason: None,
                     created_on: "2026-08-19".into(),
                     expires_on: expires_on.into(),
                     rotation_successor: None,
@@ -170,7 +171,7 @@ fn ready_json_carries_the_agent_identity_object_of_its_environment() {
             "days_left": 90,
             "reach": {"readable": 1, "expected": 1},
             "rate_limit": null,
-            "store": {"persistence": "durable", "self_check": "not_run", "self_check_ms": null},
+            "store": {"persistence": "durable", "reason": "platform", "self_check": "not_run", "self_check_ms": null},
             "state": "agent",
         })
     );

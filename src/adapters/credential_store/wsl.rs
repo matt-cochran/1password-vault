@@ -5,6 +5,12 @@
 //! `-EncodedCommand`. The operation, the entry's name and the value go over stdin, never
 //! argv (ADR R2); the value comes back on stdout straight into zeroized memory. The child's
 //! environment is cleared, and its stderr is discarded unread.
+//!
+//! When interop itself is down (owner's machine, 2026-11-23: `powershell.exe` exits 1 after
+//! about 10 s with `UtilAcceptVsock: accept4 failed 110`), every call reports
+//! [`StoreFailure::InteropDown`], never a lock: the child would not start, exited with a code
+//! the script never uses, or outlived its bound. Only the script's own failure codes mean
+//! Credential Manager itself failed ([`StoreFailure::Unavailable`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +33,17 @@ const POWERSHELL: &str = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powersh
 /// The script's exit codes (see `wsl_vault.ps1`).
 const EXIT_OK: i32 = 0;
 const EXIT_NO_ENTRY: i32 = 3;
+const EXIT_STORE_FAILURE: i32 = 4;
+const EXIT_UNKNOWN_OP: i32 = 5;
+
+/// A finished run that was not the outcome the operation wanted: Credential Manager's own
+/// failure for the script's failure codes, else interop (the WSL shim's own exit, a signal).
+fn failure(code: Option<i32>) -> StoreFailure {
+    match code {
+        Some(EXIT_STORE_FAILURE | EXIT_UNKNOWN_OP) => StoreFailure::Unavailable,
+        _ => StoreFailure::InteropDown,
+    }
+}
 
 pub(super) struct WslVault {
     powershell: PathBuf,
@@ -40,6 +57,15 @@ impl WslVault {
             return None;
         }
         find_powershell().map(|powershell| Self { powershell })
+    }
+
+    /// The store run through `program` instead of `powershell.exe` (tests of interop
+    /// failures with a stand-in program; nothing is sent to Windows).
+    #[cfg(test)]
+    pub(super) fn with_program(program: PathBuf) -> Self {
+        Self {
+            powershell: program,
+        }
     }
 
     fn run(
@@ -71,13 +97,15 @@ impl WslVault {
         if let Some(dir) = self.powershell.parent() {
             cmd.current_dir(dir);
         }
-        run_child(cmd, &input, timeout)
+        // A child that will not start or outlives its bound: interop, never a lock
+        // (Credential Manager never prompts for a generic credential).
+        run_child(cmd, &input, timeout).map_err(|_| StoreFailure::InteropDown)
     }
 
     pub(super) fn preflight(&self, timeout: Duration) -> Result<(), StoreFailure> {
         match self.run("probe", "", None, timeout)?.code {
             Some(EXIT_OK) => Ok(()),
-            _ => Err(StoreFailure::Unavailable),
+            other => Err(failure(other)),
         }
     }
 
@@ -94,7 +122,7 @@ impl WslVault {
                 Ok(Some(Zeroizing::new(text.to_owned())))
             }
             Some(EXIT_NO_ENTRY) => Ok(None),
-            _ => Err(StoreFailure::Unavailable),
+            other => Err(failure(other)),
         }
     }
 
@@ -106,7 +134,7 @@ impl WslVault {
     ) -> Result<(), StoreFailure> {
         match self.run("set", user, Some(value), timeout)?.code {
             Some(EXIT_OK) => Ok(()),
-            _ => Err(StoreFailure::Unavailable),
+            other => Err(failure(other)),
         }
     }
 
@@ -114,7 +142,7 @@ impl WslVault {
         match self.run("delete", user, None, timeout)?.code {
             Some(EXIT_OK) => Ok(true),
             Some(EXIT_NO_ENTRY) => Ok(false),
-            _ => Err(StoreFailure::Unavailable),
+            other => Err(failure(other)),
         }
     }
 }

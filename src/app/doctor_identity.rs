@@ -148,8 +148,9 @@ pub struct Context {
     pub today: String,
 }
 
-/// Opens the detected credential store.
-pub type SourceFn<'a> = Box<dyn Fn() -> Arc<dyn AgentCredentialSource> + 'a>;
+/// Opens the credential store an identity's index entry records (the machine's default store
+/// when there is no entry), so the self-check and the row describe the store that holds it.
+pub type SourceFn<'a> = Box<dyn Fn(Option<&AgentRecord>) -> Arc<dyn AgentCredentialSource> + 'a>;
 
 /// Reads the index entry of (service-account name, env).
 pub type RecordFn<'a> = Box<dyn Fn(&str, &str) -> Option<AgentRecord> + 'a>;
@@ -162,7 +163,7 @@ pub type ResolveFn<'a> = Box<dyn Fn(&Fleet, &str) -> Result<String, Error> + 'a>
 pub struct Seams<'a> {
     /// Resolve rule 3 for (fleet, env): the agent identity's service-account name.
     pub resolve: ResolveFn<'a>,
-    /// The detected credential store, for the self-check.
+    /// The identity's credential store, for the self-check.
     pub source: SourceFn<'a>,
     /// The index entry of (service-account name, env), if recorded.
     pub record: RecordFn<'a>,
@@ -185,7 +186,13 @@ impl<'a> Seams<'a> {
     pub fn process(r: &'a dyn CommandRunner) -> Self {
         Seams {
             resolve: Box::new(move |fleet, env| resolve_process(fleet, env, r)),
-            source: Box::new(|| Arc::from(crate::adapters::credential_store::machine_store())),
+            source: Box::new(|record| {
+                use crate::adapters::credential_store as cs;
+                match record.and_then(crate::app::agent_identity::recorded_store) {
+                    Some((store, reason)) => Arc::from(cs::recorded_store(store, reason)),
+                    None => Arc::from(cs::machine_store()),
+                }
+            }),
             record: Box::new(|name, env| {
                 let path = crate::app::agent_identity::index_path()?;
                 let index = crate::app::agent_identity::load(&path).ok()?;
@@ -215,7 +222,7 @@ fn resolve_process(fleet: &Fleet, env: &str, r: &dyn CommandRunner) -> Result<St
         &|| crate::app::agent_identity::machine_name(None),
         kept,
         &|target| {
-            let store = crate::adapters::credential_store::machine_store();
+            let store = crate::app::agent_identity::machine_source_for(&target.key);
             crate::identity::resolve(&*store, || Ok(target)).map(|_| ())
         },
     )?;
@@ -261,9 +268,10 @@ pub fn after(
     let env = env.unwrap_or_default();
     let rejected = auth.filter(|c| c.code() == "agent_rejected").cloned();
     let signed_in = auth.is_none();
-    let source = (seams.source)();
+    let record = (seams.record)(&name, env);
+    let source = (seams.source)(record.as_ref());
     Facts::Agent(Box::new(AgentFacts {
-        expires_on: (seams.record)(&name, env).map(|r| r.expires_on),
+        expires_on: record.map(|r| r.expires_on),
         reach: (signed_in)
             .then(|| fleet.and_then(|f| reach(f, env, r)))
             .flatten(),
@@ -494,6 +502,7 @@ fn other_row(who: Who, ctx: &Context) -> IdentityRow {
                 "agent_identity_not_installed" => "agent_not_installed",
                 "agent_store_locked" => "agent_store_locked",
                 "agent_store_unavailable" => "agent_store_unavailable",
+                "agent_store_interop_down" => "agent_store_interop_down",
                 _ => "agent_unusable",
             };
             failed(e, state, id("none", None, None, state))
@@ -581,6 +590,7 @@ pub fn agent_json(a: &AgentFacts, ctx: &Context, state: &str) -> serde_json::Val
         "rate_limit": rate,
         "store": {
             "persistence": a.source.persistence,
+            "reason": a.source.reason,
             "self_check": self_check,
             "self_check_ms": ms,
         },
@@ -609,6 +619,7 @@ fn agent_row(a: AgentFacts, ctx: &Context) -> IdentityRow {
         SelfCheck::Failed(e) => {
             let state = match e.code_str() {
                 "agent_store_locked" => "agent_store_locked",
+                "agent_store_interop_down" => "agent_store_interop_down",
                 _ => "agent_store_unavailable",
             };
             let e = Error::from(e.parts().0.clone());
@@ -686,8 +697,14 @@ fn ok_text(a: &AgentFacts, env: &str, expiry: ExpiryState) -> String {
         SelfCheck::Ok { elapsed } => format!(", self-check {} ms", elapsed.as_millis()),
         _ => String::new(),
     };
+    let why = a
+        .source
+        .reason
+        .phrase()
+        .map(|p| format!(" ({p})"))
+        .unwrap_or_default();
     parts.push(format!(
-        "token from {}, {persistence}{ms}",
+        "token from {}{why}, {persistence}{ms}",
         crate::app::agent_identity::store_name(a.source.store)
     ));
     if let Some(r) = a.reach {

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 use super::{
-    AgentCredentialSource, AgentKey, Persistence, SourceDescription, StoreFailure,
+    AgentCredentialSource, AgentKey, Persistence, SourceDescription, StoreFailure, StoreReason,
     secret_from_store,
 };
 use crate::cause::AgentStore;
@@ -22,6 +22,18 @@ pub enum FakeFault {
     Unavailable,
     /// `agent_store_locked` (a lock, a prompt or a timeout).
     Locked,
+    /// `agent_store_interop_down` (WSL interop to Windows does not answer).
+    InteropDown,
+}
+
+impl FakeFault {
+    fn failure(self) -> StoreFailure {
+        match self {
+            FakeFault::Unavailable => StoreFailure::Unavailable,
+            FakeFault::Locked => StoreFailure::Locked,
+            FakeFault::InteropDown => StoreFailure::InteropDown,
+        }
+    }
 }
 
 pub struct FakeCredentialSource {
@@ -44,10 +56,7 @@ impl FakeCredentialSource {
     /// A durable fake of `store`.
     pub fn new(store: AgentStore) -> Self {
         Self {
-            description: SourceDescription {
-                store,
-                persistence: Persistence::Durable,
-            },
+            description: SourceDescription::new(store, Persistence::Durable),
             entries: Mutex::new(HashMap::new()),
             fault: Mutex::new(None),
         }
@@ -58,6 +67,12 @@ impl FakeCredentialSource {
         let mut fake = Self::new(AgentStore::KernelKeyring);
         fake.description.persistence = Persistence::Volatile;
         fake
+    }
+
+    /// The same fake, described as chosen for `reason`.
+    pub fn with_reason(mut self, reason: StoreReason) -> Self {
+        self.description.reason = reason;
+        self
     }
 
     /// Fail every later call with `fault`, or stop failing with `None`.
@@ -73,12 +88,7 @@ impl FakeCredentialSource {
         let fault = *self.fault.lock().unwrap_or_else(|p| p.into_inner());
         match fault {
             None => Ok(()),
-            Some(FakeFault::Unavailable) => Err(StoreFailure::Unavailable
-                .cause(self.description.store)
-                .into()),
-            Some(FakeFault::Locked) => {
-                Err(StoreFailure::Locked.cause(self.description.store).into())
-            }
+            Some(f) => Err(f.failure().cause(self.description.store).into()),
         }
     }
 }
@@ -119,7 +129,8 @@ impl AgentCredentialSource for FakeCredentialSource {
 #[cfg(feature = "fake")]
 pub const DIR_VAR: &str = "OPV_FAKE_AGENT_STORE";
 
-/// The variable that makes [`DirStore`] fail every call: `unavailable` or `locked`.
+/// The variable that makes [`DirStore`] fail every call: `unavailable`, `locked` or
+/// `interop_down`.
 #[cfg(feature = "fake")]
 pub const FAULT_VAR: &str = "OPV_FAKE_AGENT_STORE_FAULT";
 
@@ -147,24 +158,21 @@ impl DirStore {
         let fault = match std::env::var(FAULT_VAR).as_deref() {
             Ok("unavailable") => Some(FakeFault::Unavailable),
             Ok("locked") => Some(FakeFault::Locked),
+            Ok("interop_down") => Some(FakeFault::InteropDown),
             _ => None,
         };
         Self { dir, fault }
     }
 
     fn description() -> SourceDescription {
-        SourceDescription {
-            store: AgentStore::SecretService,
-            persistence: Persistence::Durable,
-        }
+        SourceDescription::new(AgentStore::SecretService, Persistence::Durable)
     }
 
     fn check(&self) -> Result<(), Error> {
         let store = Self::description().store;
         match self.fault {
             None => Ok(()),
-            Some(FakeFault::Unavailable) => Err(StoreFailure::Unavailable.cause(store).into()),
-            Some(FakeFault::Locked) => Err(StoreFailure::Locked.cause(store).into()),
+            Some(f) => Err(f.failure().cause(store).into()),
         }
     }
 

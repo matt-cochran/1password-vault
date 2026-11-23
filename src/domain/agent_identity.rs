@@ -19,6 +19,10 @@ pub struct AgentRecord {
     pub machine: String,
     /// The OS store that keeps the token (for example `macos_keychain`).
     pub store: String,
+    /// Why that store was chosen at create (for example `wsl_interop_down`); `None` for this
+    /// platform's own store, and in entries written before 0.22.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_reason: Option<String>,
     /// The date the identity was created, `YYYY-MM-DD`.
     pub created_on: String,
     /// The expiry date, `YYYY-MM-DD`.
@@ -38,6 +42,7 @@ mod tests {
             environment: "dev".to_string(),
             machine: "laptop".to_string(),
             store: "macos_keychain".to_string(),
+            store_reason: None,
             created_on: "2026-11-17".to_string(),
             expires_on: "2027-02-15".to_string(),
             rotation_successor: None,
