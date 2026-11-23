@@ -293,7 +293,9 @@ fn resolve_identity(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Res
         &host_name,
         kept,
         &|target| {
-            let store = crate::adapters::credential_store::machine_store();
+            // The store this identity was created in, never the one the machine would pick
+            // today (design §7.5).
+            let store = crate::app::agent_identity::machine_source_for(&target.key);
             crate::identity::resolve(store.as_ref(), || Ok(target)).map(|_| ())
         },
     )

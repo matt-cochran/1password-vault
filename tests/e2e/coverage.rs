@@ -119,6 +119,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
     // `AgentStoreVolatile` is reported only by doctor's `identity` row (design §7.4, slice
     // S10), which is not built yet; `access --create --agent` shows it as a note, never an
     // error. Reached by src/cause/render_tests.rs until then.
+    // `AgentStoreInteropDown` needs WSL with its interop to Windows failing, which the
+    // harness never has. Reached by src/adapters/credential_store_tests.rs (a stand-in for
+    // powershell.exe exiting as the WSL shim does) and src/app/agent_identity.rs.
+    (
+        "AgentStoreInteropDown",
+        "only WSL with failing interop reaches it; the e2e harness never runs on WSL",
+    ),
     (
         "AgentStoreVolatile",
         "only doctor's identity row (S10, not built yet) reports it",

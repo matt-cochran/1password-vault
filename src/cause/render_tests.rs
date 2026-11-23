@@ -1084,6 +1084,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["Secret Service"],
         ),
         (
+            AgentStoreInteropDown {
+                store: AgentStore::WindowsCredentialManager,
+            },
+            vec!["Windows Credential Manager"],
+        ),
+        (
             AgentStoreVolatile {
                 store: AgentStore::KernelKeyring,
                 env: Some(EnvName::new("env-dev")),
@@ -1204,10 +1210,11 @@ fn ordinal(c: &Cause) -> usize {
         AgentStoreUnavailable { .. } => 96,
         AgentStoreLocked { .. } => 97,
         AgentStoreVolatile { .. } => 98,
+        AgentStoreInteropDown { .. } => 99,
     }
 }
 
-const VARIANTS: usize = 99;
+const VARIANTS: usize = 100;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

@@ -5560,7 +5560,7 @@ fn run_other(
             };
             let index = opv::app::agent_identity::index_path()
                 .ok_or_else(opv::app::agent_identity::no_config_dir)?;
-            let store = opv::adapters::credential_store::machine_store();
+            let store = opv::adapters::credential_store::store_for_create()?;
             let machine = opv::app::agent_identity::machine_name(name.as_deref());
             let req = opv::app::access_create::AgentRequest {
                 env: &env,
@@ -5608,7 +5608,13 @@ fn run_other(
             };
             let index = opv::app::agent_identity::index_path()
                 .ok_or_else(opv::app::agent_identity::no_config_dir)?;
-            let store = opv::adapters::credential_store::machine_store();
+            let store = opv::app::agent_identity::source_for_scope(
+                &opv::app::agent_identity::load(&index)?,
+                &project,
+                env.as_deref(),
+                &opv::adapters::credential_store::recorded_store,
+                &opv::adapters::credential_store::machine_store,
+            )?;
             let req = opv::app::agent_identity_remove::Request {
                 env: env.as_deref(),
                 project: &project,
@@ -5651,7 +5657,13 @@ fn run_other(
             };
             let index = opv::app::agent_identity::index_path()
                 .ok_or_else(opv::app::agent_identity::no_config_dir)?;
-            let store = opv::adapters::credential_store::machine_store();
+            let store = opv::app::agent_identity::source_for_scope(
+                &opv::app::agent_identity::load(&index)?,
+                &project,
+                env.as_deref(),
+                &opv::adapters::credential_store::recorded_store,
+                &opv::adapters::credential_store::machine_store,
+            )?;
             let req = opv::app::agent_identity_rotate::Request {
                 env: env.as_deref(),
                 project: &project,
