@@ -123,7 +123,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `AgentRejected` (#338) | name; env: Option; seen | **agent_rejected** (exit 7) | after_fix | "1Password no longer accepts <name> (revoked, deleted or expired): ask the person to rotate it in their own terminal" | `opv access [<env>] --rotate --agent`, as a person's handoff |
 | `AgentStoreUnavailable` (#338) | store: AgentStore | **agent_store_unavailable** (exit 3) | after_fix | StoreSetup: "make <store> usable for your user; opv never keeps the token in a file" | rerun |
 | `AgentStoreLocked` (#338) | store: AgentStore | **agent_store_locked** (exit 7) | after_fix | StoreSetup: "unlock <store>, then run again" | rerun |
-| `AgentStoreVolatile` (#338) | store: AgentStore; env: Option | **agent_store_volatile** (exit 3) | after_fix | StoreSetup: "keep the token in a store that survives a WSL stop, such as a Secret Service login keyring, not <store>" | `opv doctor [--env <env>]` |
+| `AgentStoreInteropDown` | store: AgentStore | **agent_store_interop_down** (exit 3) | after_fix | StoreSetup: "restart WSL from Windows with wsl --shutdown, reopen this terminal and run again; or keep a new identity's token in a Linux store instead of <store>: OPV_AGENT_STORE=secret-service or OPV_AGENT_STORE=kernel-keyring ..." | rerun |
+| `AgentStoreVolatile` (#338) | store: AgentStore; env: Option | **agent_store_volatile** (exit 3) | after_fix | StoreSetup: "<store> is lost when WSL or this machine restarts: after that, make a new token with opv access <env> --rotate --agent; to avoid it, keep the token in a store that survives a restart (...)" | `opv doctor [--env <env>]` |
 
 ### 4.4 Access and resources (exit 5 for targets, 4 for 1Password)
 
@@ -359,7 +360,7 @@ It can't disagree with the step, and the CLI and MCP can't disagree with each ot
 | `input_invalid` | edit the input file (it holds values) | the same command | keep: the re-run checks the edited file |
 | `deploy_credentials_failed`, `credential_rejected` | replace or unset the credential | `opv doctor …` | keep: doctor shows whether the credential works |
 | `target_not_signed_in` | the vendor sign-in (`flyctl auth login`, …) | the same command | keep: the vendor's sign-in is stored for the user, so the re-run sees it |
-| `agent_store_unavailable`, `agent_store_locked` | the person makes usable or unlocks the machine's credential store (#338) | the same command | keep: the re-run reads the store again and never waits on a prompt |
+| `agent_store_unavailable`, `agent_store_locked`, `agent_store_interop_down` | the person makes usable or unlocks the machine's credential store, or restarts WSL so interop answers (#338) | the same command | keep: the re-run reads the store again and never waits on a prompt |
 | `agent_store_volatile` | the person moves the agent identity to a store that survives a WSL stop (#338) | `opv doctor --env …` | keep: doctor's `op identity` row shows the store in use |
 
 It is **guidance, not enforcement**. An agent with a shell can run anything the person can; §9 says what actually stops an agent.

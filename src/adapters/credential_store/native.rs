@@ -182,3 +182,43 @@ fn no_prompt_guard<T>(
     let _ = store;
     f()
 }
+
+/// macOS: opv disables keychain interaction for every call, so a locked keychain or an ACL
+/// answers with a refusal instead of a dialog (vet R6). These pin how each refusal reads:
+/// never as "not installed", and never as a wait.
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    fn refused(code: i32) -> Error {
+        Error::NoStorageAccess(Box::new(security_framework::base::Error::from_code(code)))
+    }
+
+    #[test]
+    fn interaction_not_allowed_reads_as_locked() {
+        assert_eq!(classify(refused(-25308)), StoreFailure::Locked);
+    }
+
+    #[test]
+    fn authorization_failed_reads_as_locked() {
+        assert_eq!(classify(refused(-25293)), StoreFailure::Locked);
+    }
+
+    #[test]
+    fn a_cancelled_authorization_reads_as_locked() {
+        assert_eq!(classify(refused(-128)), StoreFailure::Locked);
+    }
+
+    #[test]
+    fn a_platform_failure_with_interaction_refused_reads_as_locked() {
+        let err =
+            Error::PlatformFailure(Box::new(security_framework::base::Error::from_code(-25308)));
+        assert_eq!(classify(err), StoreFailure::Locked);
+    }
+
+    #[test]
+    fn a_missing_keychain_reads_as_unavailable() {
+        // errSecNoSuchKeychain
+        assert_eq!(classify(refused(-25294)), StoreFailure::Unavailable);
+    }
+}

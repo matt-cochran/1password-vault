@@ -2441,13 +2441,17 @@ impl Cause {
                 "{} is locked or would prompt, and opv never waits on its prompt",
                 store.label()
             ),
+            AgentStoreInteropDown { store } => format!(
+                "WSL interop to Windows is not responding (its vsock), so opv cannot reach {} from this WSL session",
+                store.label()
+            ),
             AgentStoreVolatile { store, env } => {
                 let of_env = env
                     .as_ref()
                     .map(|e| format!(" for {e}"))
                     .unwrap_or_default();
                 format!(
-                    "the agent identity's token{of_env} is in {}, which WSL clears when it stops; unattended runs will break",
+                    "the agent identity's token{of_env} is in {}, which is lost when WSL or this machine restarts; unattended runs will break",
                     store.label()
                 )
             }
@@ -4140,12 +4144,24 @@ impl Cause {
                 )),
                 Next::Rerun,
             ),
+            AgentStoreInteropDown { store } => plan(
+                Some((
+                    Action::StoreSetup { store: *store },
+                    format!(
+                        "restart WSL from Windows with wsl --shutdown, reopen this terminal and run again; or keep a new identity's token in a Linux store instead of {}: OPV_AGENT_STORE=secret-service or OPV_AGENT_STORE=kernel-keyring for opv access <env> --create --agent (an identity already in {} is removed first, once interop answers)",
+                        store.label(),
+                        store.label()
+                    ),
+                )),
+                Next::Rerun,
+            ),
             AgentStoreVolatile { store, env } => plan(
                 Some((
                     Action::StoreSetup { store: *store },
                     format!(
-                        "keep the token in a store that survives a WSL stop, such as a Secret Service login keyring, not {}",
-                        store.label()
+                        "{} is lost when WSL or this machine restarts: after that, make a new token with opv access {} --rotate --agent; to avoid it, keep the token in a store that survives a restart (Windows Credential Manager through WSL interop, or a Secret Service login keyring)",
+                        store.label(),
+                        env.as_ref().map(|e| e.as_str()).unwrap_or("<env>")
                     ),
                 )),
                 Next::Check(match env {

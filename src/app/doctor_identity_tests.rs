@@ -31,10 +31,7 @@ fn ctx(env: Option<&str>, marker: bool) -> Context {
 }
 
 fn durable() -> SourceDescription {
-    SourceDescription {
-        store: AgentStore::SecretService,
-        persistence: Persistence::Durable,
-    }
+    SourceDescription::new(AgentStore::SecretService, Persistence::Durable)
 }
 
 /// A healthy agent identity: durable store, self-check ok, 2 of 2 vaults, 90 days left.
@@ -224,10 +221,7 @@ fn a_token_1password_rejected_fails_agent_rejected() {
 #[test]
 fn a_volatile_store_fails_agent_store_volatile() {
     let a = AgentFacts {
-        source: SourceDescription {
-            store: AgentStore::KernelKeyring,
-            persistence: Persistence::Volatile,
-        },
+        source: SourceDescription::new(AgentStore::KernelKeyring, Persistence::Volatile),
         ..agent()
     };
     assert_eq!(
@@ -239,10 +233,7 @@ fn a_volatile_store_fails_agent_store_volatile() {
 #[test]
 fn a_volatile_store_is_a_failure_of_the_run() {
     let a = AgentFacts {
-        source: SourceDescription {
-            store: AgentStore::KernelKeyring,
-            persistence: Persistence::Volatile,
-        },
+        source: SourceDescription::new(AgentStore::KernelKeyring, Persistence::Volatile),
         ..agent()
     };
     assert_eq!(
@@ -550,13 +541,14 @@ fn fake_seams(source: Arc<dyn AgentCredentialSource>) -> Seams<'static> {
                 .into()),
             }
         }),
-        source: Box::new(move || source.clone()),
+        source: Box::new(move |_| source.clone()),
         record: Box::new(|name, env| {
             Some(AgentRecord {
                 account_name: name.into(),
                 environment: env.into(),
                 machine: "laptop".into(),
                 store: "secret_service".into(),
+                store_reason: None,
                 created_on: "2026-11-17".into(),
                 expires_on: "2027-02-15".into(),
                 rotation_successor: None,
@@ -730,7 +722,7 @@ fn the_agent_row_json_carries_the_identity_object() {
                 "hourly_used_pct": 0,
                 "daily_account": {"limit": 1000, "used": 8, "remaining": 992},
             },
-            "store": {"persistence": "durable", "self_check": "ok", "self_check_ms": null},
+            "store": {"persistence": "durable", "reason": "platform", "self_check": "ok", "self_check_ms": null},
             "state": "agent",
         })
     );

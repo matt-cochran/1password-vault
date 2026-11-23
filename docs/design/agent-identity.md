@@ -235,6 +235,19 @@ residual (§4.6, point 1). It is follow-up work F3 (§14), not a 0.22.0 slice.
 | WSL, headless Linux | **Decided by S1** (D10): Secret Service when a daemon is present and survives a WSL VM stop. Otherwise the kernel user keyring as a fallback, with doctor `FAIL agent_store_volatile`. | The `@u` keyring is lost when the WSL VM stops (idle shutdown, `wsl --shutdown`, reboot). It may also be lost when the user's last process exits (**unverified**). |
 | none usable | refused before create: `agent_store_unavailable` | Never a file fallback (SR-4). |
 
+**Selection at create, reads from the record (fix, 2026-11-23).** File checks alone (WSL,
+interop enabled, `powershell.exe` present) do not show that interop works: on the owner's
+machine `powershell.exe` exited 1 after about 10 s with `UtilAcceptVsock: accept4 failed 110`,
+and every agent-identity command failed as a "locked" store. `--create --agent` now runs the
+interop store's `probe` (bounded by the 15-second write bound, no prompt) before choosing it;
+when it does not answer, the Linux order applies (a Secret Service that answers and is
+unlocked, else the kernel keyring with `agent_store_volatile`). `OPV_AGENT_STORE=wincred|
+secret-service|kernel-keyring` overrides the choice; another value is `usage`. The index
+records the store and, when it is not the platform's own, why (`store_reason`); doctor shows
+both. Reads, rotation and removal open the recorded store only: when it is unusable they stop
+with its own cause, `agent_store_interop_down` for interop (a code the script never uses, a
+child that will not start, or one that outlives its bound), never another store's answer.
+
 Library: the Rust `keyring` crate. Its backends, versions, non-interactive mode and headless
 behaviour are **unverified** (S1).
 

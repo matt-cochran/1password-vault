@@ -82,6 +82,7 @@ pub fn table() -> Vec<CodeRow> {
 /// `docs/design/error-catalog.md` §6.3.
 pub const ASSISTANT_READS_AFTER_PERSON: &[&str] = &[
     "account_ambiguous",
+    "agent_store_interop_down",
     "agent_store_locked",
     "agent_store_unavailable",
     "agent_store_volatile",
@@ -207,6 +208,9 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "agent_store_locked" => {
             "the OS credential store is locked or would prompt, and opv never waits on a prompt; a person unlocks it"
+        }
+        "agent_store_interop_down" => {
+            "WSL interop to Windows is not responding, so Windows Credential Manager cannot be reached from WSL; a person restarts WSL (wsl --shutdown) or picks a Linux store with OPV_AGENT_STORE"
         }
         "agent_store_volatile" => {
             "the agent identity's token is in a store WSL clears when it stops, so unattended runs will break"
@@ -770,6 +774,9 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         AgentStoreLocked {
             store: AgentStore::SecretService,
+        },
+        AgentStoreInteropDown {
+            store: AgentStore::WindowsCredentialManager,
         },
         AgentStoreVolatile {
             store: AgentStore::KernelKeyring,

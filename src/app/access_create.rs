@@ -540,8 +540,14 @@ fn run_to(
         }
         (_, Prepared::Machine(prep)) => {
             let store = super::agent_identity::store_name(prep.source.store);
+            let why = prep
+                .source
+                .reason
+                .phrase()
+                .map(|p| format!(" ({p})"))
+                .unwrap_or_default();
             ui.show(&format!(
-                "and keep its token in this machine's {store}. The token is never shown."
+                "and keep its token in this machine's {store}{why}. The token is never shown."
             ))?;
             ui.show(
                 "It reads these vaults' values only to deliver them, and can never change them. \
@@ -550,8 +556,9 @@ fn run_to(
             )?;
             if prep.source.volatile_cause(None).is_some() {
                 ui.show(&format!(
-                    "Note: {} is cleared when this machine (or WSL) stops; unattended runs \
-                     break after that.",
+                    "Note: {} is cleared when this machine (or WSL) stops or restarts, and the \
+                     token is lost; unattended runs break after that until a person makes a new \
+                     token with opv access {env} --rotate --agent.",
                     prep.source.store.label()
                 ))?;
             }
@@ -794,6 +801,9 @@ fn keep_on_machine(
             environment: env.to_string(),
             machine: prep.slug.clone(),
             store: super::agent_identity::store_id(prep.source.store),
+            store_reason: (prep.source.reason
+                != crate::adapters::credential_store::StoreReason::Platform)
+                .then(|| prep.source.reason.id().to_string()),
             created_on: today,
             expires_on: expires_on.clone(),
             rotation_successor: None,

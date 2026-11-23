@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::adapters::credential_store::{self, AgentCredentialSource, AgentKey, StoreReason};
 use crate::cause::{AgentStore, Cause, IoKind, LocalOp};
 use crate::domain::agent_identity::AgentRecord;
 use crate::error::Error;
@@ -140,6 +141,103 @@ pub fn store_id(store: AgentStore) -> String {
         .unwrap_or_default()
 }
 
+/// The store an index id names; `None` for an id this build does not know.
+pub fn parse_store_id(id: &str) -> Option<AgentStore> {
+    [
+        AgentStore::MacosKeychain,
+        AgentStore::WindowsCredentialManager,
+        AgentStore::SecretService,
+        AgentStore::KernelKeyring,
+    ]
+    .into_iter()
+    .find(|s| store_id(*s) == id)
+}
+
+/// The store, and why it was chosen, that `record` names; `None` for a store id this build
+/// does not know.
+pub fn recorded_store(record: &AgentRecord) -> Option<(AgentStore, StoreReason)> {
+    Some((
+        parse_store_id(&record.store)?,
+        StoreReason::from_id(record.store_reason.as_deref()),
+    ))
+}
+
+/// Opens a recorded store (the process's: [`credential_store::recorded_store`]).
+pub type OpenRecorded<'a> = &'a dyn Fn(AgentStore, StoreReason) -> Box<dyn AgentCredentialSource>;
+
+/// Opens the machine's default store (the process's: [`credential_store::machine_store`]).
+pub type OpenDefault<'a> = &'a dyn Fn() -> Box<dyn AgentCredentialSource>;
+
+/// The store to read `key`'s existing identity from: the one its index entry records, so a
+/// read never lands in another store because the machine would choose differently today
+/// (WSL interop down, `OPV_AGENT_STORE` set). With no entry, or a store id this build does not
+/// know, the machine's default store.
+pub fn source_for(
+    index: &Index,
+    key: &AgentKey,
+    open: OpenRecorded<'_>,
+    default: OpenDefault<'_>,
+) -> Box<dyn AgentCredentialSource> {
+    match index
+        .find(key.account().as_str(), key.project(), key.env().as_str())
+        .and_then(|e| recorded_store(&e.record))
+    {
+        Some((store, reason)) => open(store, reason),
+        None => default(),
+    }
+}
+
+/// The store the identities of `project` (`env`'s alone when given) are kept in, for
+/// `--remove --agent` and `--rotate --agent`: the one store they record, or the machine's
+/// default when none is recorded. Identities in more than one store are refused with `usage`
+/// unless one environment is named, so no store is written or deleted for an identity it does
+/// not hold.
+pub fn source_for_scope(
+    index: &Index,
+    project: &str,
+    env: Option<&str>,
+    open: OpenRecorded<'_>,
+    default: OpenDefault<'_>,
+) -> Result<Box<dyn AgentCredentialSource>, Error> {
+    let mut stores: Vec<(AgentStore, StoreReason)> = Vec::new();
+    for e in index
+        .identities
+        .iter()
+        .filter(|e| e.project == project && env.is_none_or(|v| e.record.environment == v))
+    {
+        if let Some(s) = recorded_store(&e.record)
+            && !stores.iter().any(|(k, _)| *k == s.0)
+        {
+            stores.push(s);
+        }
+    }
+    match stores.as_slice() {
+        [] => Ok(default()),
+        [(store, reason)] => Ok(open(*store, *reason)),
+        _ => Err(Cause::Usage {
+            problem: crate::cause::UsageProblem::NeedsFlag {
+                flag: "--agent with no environment".into(),
+                needs: "an environment named, because this project's agent identities are \
+                        kept in more than one store"
+                    .into(),
+            },
+        }
+        .into()),
+    }
+}
+
+/// [`source_for`] for this process: the user's index (none, or one that cannot be read,
+/// gives the machine's default store).
+pub fn machine_source_for(key: &AgentKey) -> Box<dyn AgentCredentialSource> {
+    let index = index_path().and_then(|p| load(&p).ok()).unwrap_or_default();
+    source_for(
+        &index,
+        key,
+        &credential_store::recorded_store,
+        &credential_store::machine_store,
+    )
+}
+
 /// The store's name after "in" or "this machine's": its label without a leading "the".
 pub fn store_name(store: AgentStore) -> &'static str {
     let label = store.label();
@@ -181,6 +279,7 @@ mod tests {
                 environment: env.into(),
                 machine: "laptop".into(),
                 store: "secret_service".into(),
+                store_reason: None,
                 created_on: "2026-11-17".into(),
                 expires_on: "2027-02-15".into(),
                 rotation_successor: None,
@@ -258,5 +357,151 @@ mod tests {
     #[test]
     fn the_store_name_drops_the_leading_article() {
         assert_eq!(store_name(AgentStore::MacosKeychain), "macOS Keychain");
+    }
+
+    // --- which store an existing identity is read from -------------------------------------
+
+    use crate::adapters::credential_store::{FakeCredentialSource, FakeFault};
+    use crate::cause::{AccountId, EnvName};
+    use std::cell::RefCell;
+
+    fn in_store(env: &str, store: &str) -> IndexEntry {
+        let mut e = entry(env);
+        e.record.store = store.into();
+        e
+    }
+
+    fn key(env: &str) -> AgentKey {
+        AgentKey::new(
+            AccountId::new("AFAKEOP0000000000000000001"),
+            "shop",
+            EnvName::new(env),
+        )
+        .unwrap()
+    }
+
+    /// Opens a recorded store as a fake failing with `fault`, noting each store opened.
+    struct Opener {
+        opened: RefCell<Vec<&'static str>>,
+        fault: Option<FakeFault>,
+    }
+
+    impl Opener {
+        fn new(fault: Option<FakeFault>) -> Self {
+            Self {
+                opened: RefCell::new(Vec::new()),
+                fault,
+            }
+        }
+
+        fn open(&self, store: AgentStore, reason: StoreReason) -> Box<dyn AgentCredentialSource> {
+            self.opened.borrow_mut().push(store.label());
+            let fake = FakeCredentialSource::new(store).with_reason(reason);
+            fake.set_fault(self.fault);
+            Box::new(fake)
+        }
+
+        fn default(&self) -> Box<dyn AgentCredentialSource> {
+            self.opened.borrow_mut().push("default");
+            Box::new(FakeCredentialSource::volatile())
+        }
+    }
+
+    fn wincred_index() -> Index {
+        Index {
+            identities: vec![in_store("dev", "windows_credential_manager")],
+        }
+    }
+
+    #[test]
+    fn an_identity_in_credential_manager_with_interop_down_reads_as_interop_down() {
+        let o = Opener::new(Some(FakeFault::InteropDown));
+        let source = source_for(&wincred_index(), &key("dev"), &|s, r| o.open(s, r), &|| {
+            o.default()
+        });
+        let err = source.resolve(&key("dev")).unwrap_err();
+        assert_eq!(
+            err.cause().map(|(c, _)| c.code()),
+            Some("agent_store_interop_down")
+        );
+    }
+
+    #[test]
+    fn an_identity_in_credential_manager_with_interop_down_never_reads_another_store() {
+        let o = Opener::new(Some(FakeFault::InteropDown));
+        let source = source_for(&wincred_index(), &key("dev"), &|s, r| o.open(s, r), &|| {
+            o.default()
+        });
+        let _ = source.resolve(&key("dev"));
+        assert_eq!(*o.opened.borrow(), vec!["Windows Credential Manager"]);
+    }
+
+    #[test]
+    fn an_identity_is_read_with_the_reason_its_store_was_chosen() {
+        let mut e = in_store("dev", "kernel_keyring");
+        e.record.store_reason = Some("wsl_interop_down".into());
+        let index = Index {
+            identities: vec![e],
+        };
+        let o = Opener::new(None);
+        let source = source_for(&index, &key("dev"), &|s, r| o.open(s, r), &|| o.default());
+        assert_eq!(source.describe().reason, StoreReason::WslInteropDown);
+    }
+
+    #[test]
+    fn an_identity_the_index_does_not_record_is_read_from_the_default_store() {
+        let o = Opener::new(None);
+        let _ = source_for(
+            &Index::default(),
+            &key("dev"),
+            &|s, r| o.open(s, r),
+            &|| o.default(),
+        );
+        assert_eq!(*o.opened.borrow(), vec!["default"]);
+    }
+
+    #[test]
+    fn identities_in_two_stores_need_an_environment_named() {
+        let index = Index {
+            identities: vec![
+                in_store("dev", "windows_credential_manager"),
+                in_store("test", "kernel_keyring"),
+            ],
+        };
+        let o = Opener::new(None);
+        let r = source_for_scope(&index, "shop", None, &|s, r| o.open(s, r), &|| o.default());
+        assert_eq!(
+            r.err().and_then(|e| e.cause().map(|(c, _)| c.code())),
+            Some("usage")
+        );
+    }
+
+    #[test]
+    fn a_named_environment_opens_its_own_recorded_store() {
+        let index = Index {
+            identities: vec![
+                in_store("dev", "windows_credential_manager"),
+                in_store("test", "kernel_keyring"),
+            ],
+        };
+        let o = Opener::new(None);
+        let _ = source_for_scope(&index, "shop", Some("test"), &|s, r| o.open(s, r), &|| {
+            o.default()
+        });
+        assert_eq!(*o.opened.borrow(), vec!["the kernel keyring"]);
+    }
+
+    #[test]
+    fn every_store_id_parses_back_to_its_store() {
+        let all = [
+            AgentStore::MacosKeychain,
+            AgentStore::WindowsCredentialManager,
+            AgentStore::SecretService,
+            AgentStore::KernelKeyring,
+        ];
+        assert!(
+            all.iter()
+                .all(|s| parse_store_id(&store_id(*s)) == Some(*s))
+        );
     }
 }

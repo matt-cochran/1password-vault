@@ -267,6 +267,7 @@ fn index_of(projects: &[&str]) -> crate::app::agent_identity::Index {
                     environment: "dev".into(),
                     machine: "laptop".into(),
                     store: "secret_service".into(),
+                    store_reason: None,
                     created_on: "2026-11-17".into(),
                     expires_on: "2027-02-15".into(),
                     rotation_successor: None,
